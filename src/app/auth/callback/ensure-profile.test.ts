@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { AFTER_SIGN_IN_PATH } from '@/components/SignInForm';
 import { isAppError, type AppError } from '@/lib/errors';
 
 import {
   DEFAULT_NEXT_PATH,
+  E164_PHONE,
   classifyProfileWriteError,
   ensureProfile,
   safeNextPath,
@@ -84,6 +88,64 @@ describe('toE164', () => {
     expect(toE164('+91-98765-4321x')).toBeNull();
     // A second + is not a separator, so it survives the strip and fails the check.
     expect(toE164('++919876543210')).toBeNull();
+  });
+});
+
+/* ========================================================================== */
+/* The trigger in 0002 must normalize the same way this module does             */
+/* ========================================================================== */
+
+/**
+ * `handle_new_user()` writes `profiles.phone` at signup; `ensureProfile` writes it again on every
+ * later session. Requirement 1.5 makes that column the single cross-channel Farmer identity, so two
+ * normalizers that disagreed would give one farmer two identities — a worse outcome than the
+ * `+`-less phone the trigger used to copy verbatim (GoTrue stores the number without its leading
+ * `+`; `profiles_phone_e164` requires it).
+ *
+ * So the trigger's own literals are read back out of the migration and checked against this
+ * module's, the way `SignInForm.test.tsx` checks the browser's copy of the E.164 pattern against
+ * the check constraint. A divergence fails here rather than being discovered as a misrouted
+ * WhatsApp conversation.
+ *
+ * Requirements: 1.4, 1.5
+ * Design: D8
+ */
+describe('handle_new_user() normalizes the same way toE164 does', () => {
+  const migration = readFileSync(
+    resolve(process.cwd(), 'supabase', 'migrations', '0002_profiles.sql'),
+    'utf8',
+  );
+
+  /** The pattern the trigger rejects against — the `!~` literal in its body. */
+  const triggerE164 = /v_candidate !~ '([^']+)'/.exec(migration)?.[1];
+
+  /** The separator class it strips — the second argument to its `regexp_replace`. */
+  const triggerSeparators = /regexp_replace\(\s*new\.phone,\s*'([^']+)'/.exec(migration)?.[1];
+
+  it('rejects against the same E.164 pattern this module and the constraint use', () => {
+    expect(triggerE164).toBe(E164_PHONE.source);
+  });
+
+  /**
+   * `SEPARATORS` is `/[\s()\u2010-\u2015-]/`. The SQL spells the dash range out character by
+   * character because a bracket-expression range in Postgres is collating-sequence dependent, so
+   * the two literals are equivalent rather than identical — which is exactly why this is pinned.
+   */
+  it('strips the same separator set', () => {
+    expect(triggerSeparators).toBe('[\\s()\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015-]');
+  });
+
+  it('names no separator this module would keep', () => {
+    const escaped = [...(triggerSeparators ?? '').matchAll(/\\u([0-9a-f]{4})/g)].map((match) =>
+      String.fromCodePoint(Number.parseInt(match[1]!, 16)),
+    );
+    // The class's literal members, plus two characters standing in for its `\s`.
+    const separators = [...escaped, '(', ')', '-', ' ', '\t'];
+
+    expect(escaped).toHaveLength(6);
+    for (const separator of separators) {
+      expect(toE164(`+91${separator}98765${separator}43210`)).toBe(PHONE);
+    }
   });
 });
 

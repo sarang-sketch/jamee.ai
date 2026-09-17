@@ -95,21 +95,116 @@ create trigger profiles_set_updated_at
 -- a unique violation on `phone`) — surface as signup errors. The upsert in the
 -- post-sign-in server action is what keeps Requirement 1.4 observable when they
 -- do.
+--
+-- ===========================================================================
+-- WHY THIS FUNCTION NORMALIZES, AND MUST NOT BE "SIMPLIFIED" BACK TO new.phone
+-- ===========================================================================
+--
+-- The body below used to be `values (new.id, new.phone)`. That form blocked
+-- phone signup entirely.
+--
+-- GoTrue stores the phone WITHOUT the leading '+'. Measured against the local
+-- stack: `auth.admin.createUser({ phone: '+919876500011' })` arrives in
+-- `auth.users.phone` as `919876500011`, and the verbatim copy carried that into
+-- `profiles.phone`. The `profiles_phone_e164` check above requires the '+' —
+-- `'+919876500011' ~ '^\+[1-9][0-9]{7,14}$'` is true, `'919876500011'` is false
+-- — so every insert into auth.users carrying a phone raised
+--
+--   ERROR:  new row for relation "profiles" violates check constraint
+--           "profiles_phone_e164"
+--
+-- This trigger is `after insert ... for each row` inside GoTrue's own
+-- transaction, so that raise aborted the whole insert and GoTrue reported
+-- `Database error creating new user`. Precisely the "front door refusing to
+-- open" failure the V5 note above warns about, rather than a degraded mode.
+--
+-- The constraint is correct and is deliberately NOT widened. A '+'-less number
+-- is not E.164, and this column is the single cross-channel identity
+-- Requirement 1.5 establishes and Requirement 10.2 resolves an inbound WhatsApp
+-- sender against. The trigger was the wrong half.
+--
+-- THE MATCHING APPLICATION-SIDE NORMALIZER IS `toE164` IN
+-- `src/app/auth/callback/ensure-profile.ts`, and the two must stay in step.
+-- This trigger writes the column at signup; D8's upsert writes it again on every
+-- later session. Two normalizers that disagreed would give one farmer two
+-- identities, which is a worse outcome than the bug this fixes. The three
+-- literals below — the separator class and the E.164 pattern — are read back out
+-- of this file by `ensure-profile.test.ts`, so a divergence is a failing test
+-- rather than a discovery in production.
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer
 set search_path = ''
 as $$
+declare
+  -- `new.phone` with the separators removed, then the same value with its
+  -- leading '+' restored. Null once no E.164 number can be built from it.
+  v_compact   text;
+  v_candidate text;
 begin
+  -- Step 1 of `toE164`: drop the separator characters, none of which carry
+  -- meaning. This class is the SQL spelling of that module's `SEPARATORS`,
+  -- /[\s()\u2010-\u2015-]/ — whitespace, parentheses, the six Unicode dashes
+  -- U+2010..U+2015, and the ASCII hyphen. The dashes are listed individually
+  -- rather than written as the range `\u2010-\u2015` on purpose: a bracket
+  -- expression range in Postgres is collating-sequence dependent, and an
+  -- explicit list is not.
+  --
+  -- On qualification. `pg_catalog.regexp_replace` is qualified like every other
+  -- reference in this body. `pg_catalog` is searched implicitly even when
+  -- `search_path` is empty, which is also what lets the `!~` operator below
+  -- resolve — and with an empty path there is no schema left from which either
+  -- could be shadowed. `case`, `like` and `coalesce` are grammar constructs, not
+  -- function lookups, so there is nothing on them to qualify.
+  --
+  -- Null in, null out: an auth user with no phone stays null all the way down.
+  v_compact := pg_catalog.regexp_replace(
+    new.phone,
+    '[\s()\u2010\u2011\u2012\u2013\u2014\u2015-]',
+    '',
+    'g'
+  );
+
+  -- Step 2: restore the '+' GoTrue dropped. This changes no digit and is a no-op
+  -- when the '+' is already there, so it is correct on either form of the value.
+  -- It is NOT the same act as inventing a country code — that would choose which
+  -- country a farmer is in, and nothing here does that.
+  v_candidate := case when v_compact like '+%' then v_compact else '+' || v_compact end;
+
+  -- Step 3: refuse anything the check constraint would refuse, instead of
+  -- attempting the write. The pattern is a copy of `profiles_phone_e164` above
+  -- and of `E164_PHONE` in `ensure-profile.ts`; all three must stay identical.
+  -- `toE164` collapses "no phone" and "unusable phone" into the same null, and
+  -- so does this: a null `v_candidate` makes `!~` null, the branch does not fire,
+  -- and the null survives.
+  if v_candidate !~ '^\+[1-9][0-9]{7,14}$' then
+    v_candidate := null;
+  end if;
+
+  -- `on conflict (id) do nothing` is unchanged. It is what makes this trigger
+  -- idempotent.
+  --
+  -- On the fallback, which is not a fallback *value*. When normalization yields
+  -- null the raw value goes in, and it is guaranteed to be refused: had
+  -- `new.phone` satisfied the check it would carry no separator and already have
+  -- its '+', so `v_candidate` would be non-null. Nothing non-E.164 can reach the
+  -- column through it. What it buys is that this change cannot alter WHICH
+  -- signups fail or HOW — a null phone still raises 23502 on `phone not null`,
+  -- and a non-null unusable phone still raises 23514 naming the value the
+  -- provider actually sent, which is the more diagnosable of the two.
+  --
+  -- No number is invented and the insert is never silently skipped. Both stay
+  -- the residual failure modes documented above, absorbed by `ensureProfile`.
   insert into public.profiles (id, phone)
-  values (new.id, new.phone)
+  values (new.id, coalesce(v_candidate, new.phone))
   on conflict (id) do nothing;
+
   return new;
 end $$;
 
 comment on function public.handle_new_user() is
-  'D8 profile bootstrap on auth.users insert. security definer because the signup role does not necessarily hold insert privilege on public.profiles. search_path pinned to the empty string per V5, so every object reference in the body is schema-qualified.';
+  'D8 profile bootstrap on auth.users insert. Normalizes auth.users.phone to E.164 before writing it, because GoTrue stores the number without the leading + that profiles_phone_e164 requires; toE164() in src/app/auth/callback/ensure-profile.ts is the matching application-side normalizer and the two must agree. security definer because the signup role does not necessarily hold insert privilege on public.profiles. search_path pinned to the empty string per V5, so every object reference in the body is schema-qualified.';
 
 -- V5: a trigger on auth.users is the documented Supabase bootstrap pattern.
 create trigger on_auth_user_created

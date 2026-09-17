@@ -3,8 +3,9 @@
  *
  * The integration harness has two halves, and only one of them needs a database.
  *
- * This file tests the half that does not: the connection-string derivation, the provider stubs and
- * the classification fixtures they script, and the object-store double. All of it runs on every
+ * This file tests the half that does not: the connection-string derivation, the sign-in credentials
+ * `createTestFarmer` mints, the provider stubs and the classification fixtures they script, and the
+ * object-store double. All of it runs on every
  * machine on every `npm test`, which matters because the other half —
  * `tests/integration/harness.test.ts` — is skipped without `JAMEE_TEST_DATABASE_URL`, so a fixture
  * bug there would sit undiscovered on any machine that has no local stack.
@@ -30,12 +31,14 @@ import {
   LOCAL_SUPABASE_API_PORT,
   SUPABASE_ANON_KEY_VAR,
   SUPABASE_API_URL_VAR,
+  SUPABASE_PUBLISHABLE_KEY_VAR,
   SUPABASE_SERVICE_ROLE_KEY_VAR,
   TEST_DATABASE_URL_VAR,
   apiUrlFromDatabaseUrl,
   hostOfDatabaseUrl,
   requireSupabaseTestConfig,
 } from '../integration/database';
+import { randomTestPassword } from '../integration/farmers';
 import { objectStore, uploadedImage, uploadedRecording } from '../integration/objects';
 import {
   CLASSIFICATIONS,
@@ -101,6 +104,12 @@ describe('the harness stack configuration', () => {
       {
         [TEST_DATABASE_URL_VAR]: LOCAL_DATABASE_URL,
         [SUPABASE_API_URL_VAR]: 'https://project.supabase.co',
+        // Nulled for the reason the sibling test below nulls it: `requireSupabaseTestConfig()`
+        // prefers the publishable name over the anon one, so a developer or CI job that exports a
+        // real `sb_publishable_...` would win over the `'anon'` this case sets and the result would
+        // depend on the shell rather than on the code. Every variable the function reads is stated
+        // here, including the ones stated as absent.
+        [SUPABASE_PUBLISHABLE_KEY_VAR]: undefined,
         [SUPABASE_ANON_KEY_VAR]: 'anon',
         [SUPABASE_SERVICE_ROLE_KEY_VAR]: 'service-role',
       },
@@ -120,7 +129,10 @@ describe('the harness stack configuration', () => {
       {
         [TEST_DATABASE_URL_VAR]: LOCAL_DATABASE_URL,
         [SUPABASE_API_URL_VAR]: undefined,
-        'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY': undefined,
+        // The exported constant rather than the literal it used to spell: a rename in
+        // `database.ts` would leave a literal silently failing to null the variable it names, which
+        // is the same ambient-leak this file just had to fix once.
+        [SUPABASE_PUBLISHABLE_KEY_VAR]: undefined,
         [SUPABASE_ANON_KEY_VAR]: undefined,
         [SUPABASE_SERVICE_ROLE_KEY_VAR]: undefined,
       },
@@ -131,6 +143,46 @@ describe('the harness stack configuration', () => {
         expect(() => requireSupabaseTestConfig()).toThrow('supabase start');
       },
     );
+  });
+});
+
+/**
+ * GoTrue hashes with bcrypt, and bcrypt refuses an input over **72 BYTES** — by panicking, so the
+ * admin create endpoint answers 500 with no usable message and every integration `beforeAll` fails
+ * at once. The harness shipped a 73-byte password (two raw UUIDs and a hyphen) and so could never
+ * have passed on any machine. These assertions run the REAL generator on every `npm test`, which is
+ * the only reason they would catch the regression coming back.
+ */
+describe('the test farmer password, against the bcrypt 72-byte limit', () => {
+  /** Bcrypt's documented ceiling. Not derived from the harness, so the harness cannot move it. */
+  const BCRYPT_MAX_BYTES = 72;
+
+  it('generates a password bcrypt will accept, with headroom', () => {
+    const password = randomTestPassword();
+
+    // Bytes, not characters: bcrypt counts bytes, and a `.length` assertion would pass on input
+    // bcrypt rejects the moment anything multi-byte is introduced.
+    const bytes = Buffer.byteLength(password, 'utf8');
+
+    expect(bytes).toBeGreaterThan(0);
+    expect(bytes).toBeLessThanOrEqual(BCRYPT_MAX_BYTES);
+    // Strictly under, so a later tweak has room. Sitting exactly on 72 invites the same bug back.
+    expect(bytes).toBeLessThan(BCRYPT_MAX_BYTES);
+
+    // ASCII-only is what makes byte length equal character length above, and hex keeps it so.
+    expect(password).toMatch(/^[0-9a-f]+$/);
+    expect(password).toHaveLength(bytes);
+  });
+
+  it('generates a distinct password per farmer, all within the limit', () => {
+    // Unique per farmer because `signInWithPassword` consumes it immediately and concurrent suites
+    // must not interfere; every sample is checked, not just the first.
+    const passwords = Array.from({ length: 16 }, () => randomTestPassword());
+
+    for (const password of passwords) {
+      expect(Buffer.byteLength(password, 'utf8')).toBeLessThan(BCRYPT_MAX_BYTES);
+    }
+    expect(new Set(passwords).size).toBe(passwords.length);
   });
 });
 

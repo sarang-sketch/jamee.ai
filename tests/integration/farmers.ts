@@ -88,6 +88,33 @@ function randomEmail(): string {
 }
 
 /**
+ * A random sign-in password that stays inside bcrypt's input limit.
+ *
+ * =============================================================================
+ * WHY THIS IS A FUNCTION AND NOT AN INTERPOLATION AT THE CALL SITE
+ * =============================================================================
+ *
+ * GoTrue hashes passwords with **bcrypt, which refuses any input longer than 72 bytes** — and it
+ * refuses it by panicking, so the admin create endpoint answers with a bare `500 Internal Server
+ * Error` and `docker logs supabase_auth_jamee` is the only place the reason appears.
+ *
+ * This used to read `` `${crypto.randomUUID()}-${crypto.randomUUID()}` ``, which is 36 + 1 + 36 =
+ * **73 bytes**: one byte over, so every `beforeAll` in the integration suite failed. Stripping the
+ * hyphens leaves the two UUIDs' 32 hex digits each — **64 bytes**, eight under the limit, so a
+ * future tweak has room. Landing exactly on 72 would invite the same bug straight back.
+ *
+ * Hex is ASCII, so byte length equals character length here; anything non-ASCII added later must be
+ * measured with `Buffer.byteLength`, not `.length`. Per-farmer random rather than a shared constant
+ * because `signInWithPassword` uses it immediately and concurrent suites must not interfere.
+ *
+ * Exported so `tests/unit/integration-harness.test.ts` can guard the real value on every `npm test`
+ * rather than re-deriving the arithmetic and proving nothing.
+ */
+export function randomTestPassword(): string {
+  return `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, '');
+}
+
+/**
  * Create an auth user, confirm both identifiers, and return a client holding its session.
  *
  * `admin` must be a service-role client: creating a user and confirming it are admin endpoints.
@@ -104,7 +131,8 @@ export async function createTestFarmer(
 ): Promise<TestFarmer> {
   const phone = options.phone ?? randomTestPhone();
   const email = randomEmail();
-  const password = `${crypto.randomUUID()}-${crypto.randomUUID()}`;
+  // 64 ASCII bytes, under bcrypt's 72-byte ceiling — see randomTestPassword().
+  const password = randomTestPassword();
 
   const created = await admin.auth.admin.createUser({
     email,
@@ -117,11 +145,17 @@ export async function createTestFarmer(
   if (created.error !== null || created.data.user === null) {
     throw new Error(
       `Could not create a test farmer (${phone}): ${created.error?.message ?? 'no user returned'}. ` +
-        'Three causes account for almost every failure here: the migrations were not applied, so ' +
-        "the 0002 trigger's insert into public.profiles failed; this phone is already on another " +
-        'profile (it is UNIQUE); or the stack refuses a phone on the admin create endpoint, which is ' +
-        'fixed by enabling the phone provider under [auth.sms] in supabase/config.toml. A phone is ' +
-        'not optional — profiles.phone is NOT NULL and the trigger copies it from the auth user.',
+        'Read the status first, because it splits the causes. A 500 / "Internal Server Error" is ' +
+        'not a validation failure and usually means the Auth container itself panicked, or a ' +
+        'trigger on auth.users raised — the admin endpoint has no message for either, so the actual ' +
+        'reason lives in `docker logs supabase_auth_jamee` and that is where to look before ' +
+        'suspecting anything below. (One such panic was bcrypt refusing a password over 72 bytes; ' +
+        'see randomTestPassword().) For a non-500 failure, three causes are plausible: the ' +
+        "migrations were not applied, so the 0002 trigger's insert into public.profiles failed; " +
+        'this phone is already on another profile (it is UNIQUE); or the stack refuses a phone on ' +
+        'the admin create endpoint, which is fixed by enabling the phone provider under [auth.sms] ' +
+        'in supabase/config.toml. A phone is not optional — profiles.phone is NOT NULL and the ' +
+        'trigger copies it from the auth user.',
     );
   }
 

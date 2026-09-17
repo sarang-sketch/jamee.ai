@@ -215,6 +215,16 @@ interface SentReply {
   readonly body: string;
   readonly phoneNumberId: string | undefined;
   /**
+   * How many `whatsapp_inbound` rows that same query saw **at all**, whatever their status.
+   *
+   * Recorded because a wrong `from_phone` filter and a wrong write ordering both drive
+   * `openInboundRows` to zero, and this file once filtered on the `+`-prefixed E.164 form — which
+   * matches nothing, since `claimInbound()` stores `message.fromPhone` (Meta's `wa_id`) verbatim.
+   * That made D11's assertion unfalsifiable rather than failing loudly. Zero here means the query is
+   * pointed at the wrong value; a non-zero count with no open row is a real ordering regression.
+   */
+  readonly claimedInboundRows: number;
+  /**
    * How many `whatsapp_inbound` rows were still `received` **while the reply was being sent** — D11's
    * assertion.
    *
@@ -275,6 +285,19 @@ describeIntegration(`whatsapp scenarios (requires ${TEST_DATABASE_URL_VAR})`, ()
   }
 
   /**
+   * Farmer A's number as Meta delivers it: the `wa_id`, digits only, **no leading `+`** (V12).
+   *
+   * The single source for that value in this file. Every delivery below is sent with it, so it is
+   * also what `claimInbound()` stores in `whatsapp_inbound.from_phone` — verbatim, since the row is
+   * built as `from_phone: message.fromPhone` — and what Meta is handed back as `to`. Re-deriving it
+   * per call site is what let the sender's query filter on the `+`-prefixed E.164 form and silently
+   * match zero rows; a function called from all three cannot drift.
+   *
+   * A function rather than a `const` only because `harness` is assigned in `beforeAll`.
+   */
+  const inboundWaId = (): string => harness.farmerA.phone.replace(/^\+/, '');
+
+  /**
    * One inbound delivery from farmer A.
    *
    * `fromPhone` carries **no leading `+`**, which is how V12 says Meta delivers a `wa_id` and is the
@@ -285,7 +308,7 @@ describeIntegration(`whatsapp scenarios (requires ${TEST_DATABASE_URL_VAR})`, ()
   function delivery(providerMessageId: string, content: InboundContent): InboundMessage {
     return {
       providerMessageId,
-      fromPhone: harness.farmerA.phone.replace(/^\+/, ''),
+      fromPhone: inboundWaId(),
       timestamp: '1700000000',
       rawType:
         content.kind === 'unsupported' || content.kind === 'unconfirmed_media_shape'
@@ -330,17 +353,25 @@ describeIntegration(`whatsapp scenarios (requires ${TEST_DATABASE_URL_VAR})`, ()
    */
   function countingSender(): WhatsappSender {
     return async (options) => {
-      const open = await harness.admin
+      /**
+       * `inboundWaId()`, not `harness.farmerA.phone`: the claim row stores `message.fromPhone`
+       * unchanged, and that is the `wa_id` this file sends. The status is filtered in memory rather
+       * than in a second `.eq()` so one round trip answers both questions — how many rows this
+       * filter matched at all, and how many of them were still open.
+       */
+      const claimed = await harness.admin
         .from('whatsapp_inbound')
-        .select('provider_message_id')
-        .eq('from_phone', harness.farmerA.phone)
-        .eq('status', 'received');
+        .select('provider_message_id, status')
+        .eq('from_phone', inboundWaId());
+
+      const rows = claimed.data ?? [];
 
       replies.push({
         to: options.to,
         body: options.body,
         phoneNumberId: options.phoneNumberId,
-        openInboundRows: (open.data ?? []).length,
+        claimedInboundRows: rows.length,
+        openInboundRows: rows.filter((row) => row.status === 'received').length,
       });
       return {
         ok: true,
@@ -586,7 +617,7 @@ describeIntegration(`whatsapp scenarios (requires ${TEST_DATABASE_URL_VAR})`, ()
       expect(reply.body).toContain(CONDITION);
       expect(reply.body).toContain(messages(LANGUAGE).ui.severityLabel);
       // Meta's own `wa_id` is the recipient, verbatim — not the E.164 form the lookup used.
-      expect(reply.to).toBe(harness.farmerA.phone.replace(/^\+/, ''));
+      expect(reply.to).toBe(inboundWaId());
       expect(reply.phoneNumberId).toBe(PHONE_NUMBER_ID);
 
       // Requirement 14.2 — one shared per-farmer limit, spent from the WhatsApp channel.
@@ -598,7 +629,12 @@ describeIntegration(`whatsapp scenarios (requires ${TEST_DATABASE_URL_VAR})`, ()
        * time this call returned. "Inline, then acknowledge" is that ordering — the work happens inside
        * the invocation and the status transition follows the reply, rather than the delivery being
        * acknowledged and the work handed to a `waitUntil`.
+       *
+       * The first assertion separates the two ways the count can be zero: the claim row was visible
+       * to that query at all, so a `from_phone` filter that stops matching fails here — with its own
+       * message — rather than masquerading as an ordering regression on the line below.
        */
+      expect(reply.claimedInboundRows).toBeGreaterThan(0);
       expect(reply.openInboundRows).toBe(1);
       const inbound = await inboundRow(providerMessageId);
       expect(inbound?.status).toBe('processed');
