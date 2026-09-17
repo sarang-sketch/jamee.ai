@@ -13,7 +13,9 @@ project_id = "jamee"
 # default with the leading `543` rewritten to `553` and the last two digits preserved, so the
 # correspondence to the documented default stays obvious at a glance (default xx -> 553xx).
 #
-# This is a LOCAL-ONLY deviation, in a file that is untracked by default. `.env.example` and
+# This is a LOCAL-ONLY deviation, and this file IS TRACKED — it is committed to the repository, so
+# every clone starts on these ports and this comment travels with them. (The Supabase CLI leaves
+# `config.toml` untracked by default; this repository deliberately does not.) `.env.example` and
 # `docs/DEPLOYMENT.md` document the standard 543xx db port, and that documentation is CORRECT for a
 # normal machine with no competing stack — do not "fix" those files to match this one.
 #

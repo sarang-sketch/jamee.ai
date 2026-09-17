@@ -20,9 +20,10 @@ import { describe } from 'vitest';
  * database is up has the rest of it up too.
  *
  * ```sh
- * # 1. Once per clone — the repository ships migrations but no supabase/config.toml, so the CLI
- * #    needs to be initialized before it can start anything. Answer "N" to overwriting anything
- * #    under supabase/migrations.
+ * # 1. Normally a no-op: supabase/config.toml IS committed, so the CLI is already initialized and
+ * #    `supabase start` works on a fresh clone. Run this only if `start` complains that the project
+ * #    is not initialized, and then answer "N" to overwriting anything under supabase/ — the
+ * #    committed config carries this repository's ports and its [auth.sms] setting.
  * npx supabase init
  *
  * # 2. Start Postgres, Auth, PostgREST and Storage, then apply supabase/migrations in order.

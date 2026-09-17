@@ -22,37 +22,38 @@ capability→provider chains, the error classification, and the timeout budget a
 
 ---
 
-## Before you start: where secrets go, and one repository gap to know about
+## Before you start: where secrets go, and one silent-failure hazard to know about
 
 ### Put every secret in `.env.local`, and nowhere else
 
 Copy [`.env.example`](../.env.example) to `.env.local` and fill it in there. `.env.example` itself is
 committed and must never hold a live credential.
 
-**There is a real gap in `.gitignore` and it is worth knowing before you create any other env
-file.** The current file ignores three names:
-
-```
-.env
-.env.local
-.env*.local
-```
-
-Next.js also loads `.env.production`, `.env.development` and `.env.test`. **None of those three is
-ignored.** A secret written into any of them is a file `git status` will offer to commit, and
-nothing warns you. `.env.local` is covered; the others are not.
-
-The fix is two lines, replacing the three above:
+**`.gitignore` covers every env file Next.js loads. This was once a real gap and no longer is.**
+The current file is:
 
 ```
 .env*
 !.env.example
 ```
 
-`.env*` covers every name Next.js loads, and the negation keeps `.env.example` committed, which
-Requirement 17.2 depends on. **This document flags the fix rather than applying it** — `.gitignore`
-is not task 28.1's artifact. Until it lands: use `.env.local` only, and if you must create another
-env file, add it to `.gitignore` in the same commit.
+`.env*` covers every name Next.js loads — `.env`, `.env.local`, `.env.production`,
+`.env.development`, `.env.test` and any `*.local` variant — and the negation keeps `.env.example`
+committed, which Requirement 17.2 depends on.
+
+**What this document used to warn about, and why the history matters.** `.gitignore` previously
+listed variants (`.env`, `.env.local`, `.env*.local`) instead of using a wildcard, which left
+`.env.production`, `.env.development` and `.env.test` **committable** — a secret written into any of
+them was a file `git status` would offer to commit, with nothing to warn you. That is fixed, and
+`.gitignore`'s own comment records why the variant-listing approach was the gap. The lesson survives
+the fix: an ignore rule that enumerates names is only as good as the enumeration, and the tool that
+loads those files does not consult it.
+
+**The advice around it is unchanged.** Put every secret in `.env.local`. `.env.example` is committed
+and must never hold a live credential. If you create an env file under any other name — a tool's
+own convention, a nested directory, anything outside the repository root — confirm `git status` does
+not offer it before you commit, because `.env*` at the root does not follow a file into a
+subdirectory.
 
 ### Step 1 has a silent-failure hazard worth reading twice
 
@@ -965,8 +966,6 @@ Notes on two of them:
 
 **Known gaps that are recorded rather than fixed** — not blockers, but do not rediscover them:
 
-- The `.gitignore` gap at the top of this document (`.env.production`, `.env.development`, `.env.test`
-  are not ignored). Flagged, not applied, because `.gitignore` is not this task's artifact.
 - `Requirement 10.6` is not satisfied for WhatsApp voice notes delivered as `aac` or `amr`.
 - Scan 2 of the retention sweep does not run while U-V22b is open, so ~5 MB/day of orphans
   accumulate unreclaimed.

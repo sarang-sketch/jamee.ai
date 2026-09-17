@@ -222,14 +222,19 @@ jobs:
   # FAILS when zero tests executed. A broken stack setup therefore fails loudly instead of passing
   # as coverage.
   #
-  # HONEST STATUS OF THIS JOB. It was authored but never executed — the authoring machine has no
-  # Docker, so no GitHub Actions run has confirmed it. Every step follows the sequence
-  # `tests/integration/database.ts` documents for a local stack. The likeliest first-run
-  # adjustment is the `supabase init`-generated `supabase/config.toml`: `tests/integration/
+  # HONEST STATUS OF THIS JOB. It has never executed — no git remote is configured, so no GitHub
+  # Actions run exists to confirm it. Every step follows the sequence `tests/integration/database.ts`
+  # documents for a local stack, and that sequence HAS now been walked by hand: the suite passed
+  # 104/104 across 9 files against a live local stack in `5d4aca2`. So the steps are known-good
+  # locally and unproven on a runner; those are different claims.
+  #
+  # The first-run adjustment this comment used to anticipate is already applied. `tests/integration/
   # farmers.ts` notes that some stacks refuse a phone on the admin create endpoint until the phone
-  # provider is enabled under `[auth.sms]`. If that surfaces, the fix belongs with task 29.1, which
-  # owns the harness and its documented setup. The zero-tests assertion below is what guarantees a
-  # setup problem shows up as a red job rather than a false green.
+  # provider is enabled under `[auth.sms]`, and the now-committed `supabase/config.toml` sets
+  # `[auth.sms] enable_signup = true` (with the Twilio provider left disabled, so nothing is ever
+  # sent). If a phone-refusal still surfaces here, the fix belongs with task 29.1, which owns the
+  # harness and its documented setup. The zero-tests assertion below is what guarantees any setup
+  # problem shows up as a red job rather than a false green.
   #
   # WHAT IT COVERS TODAY. Nine files, 104 tests. `harness.test.ts` (task 29.1 — RLS tenant
   # isolation, the five seeded conditions, the profile trigger), `release-acceptance.test.ts`
@@ -265,10 +270,18 @@ jobs:
         with:
           version: 2.117.0
 
-      # The repository ships `supabase/migrations` but no `supabase/config.toml` —
-      # `tests/integration/database.ts` records that as deliberate and has each clone run
-      # `supabase init`. This mirrors that rather than committing a config file, and steps aside if
-      # a config is ever committed, so it never overwrites a real one.
+      # The repository ships `supabase/migrations` AND `supabase/config.toml` — the config was
+      # committed in `5d4aca2`, so on a normal checkout this step takes its first branch and
+      # `supabase init` never runs. The `else` is kept rather than deleted: it is the branch this
+      # step was written for, it costs nothing, and it keeps the job working on a checkout where the
+      # config is absent. Never remove the `-f` guard — an unconditional `supabase init` would
+      # overwrite the committed config, and with it the non-default ports and the whole header
+      # explaining them.
+      #
+      # NOTE ON PORTS. The committed config uses the 553xx range, not the Supabase defaults, for
+      # reasons its own header gives. That is fine here: a runner has no competing stack, and the
+      # export step below reads the real values back out of `supabase status -o env` rather than
+      # assuming any port. Do not hardcode a port in this job.
       - name: Initialize the Supabase project config
         run: |
           set -euo pipefail

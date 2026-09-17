@@ -13,11 +13,18 @@ image, chat, voice, and WhatsApp test scenarios." This is that document.
    A coding agent cannot produce those observations, so it does not pretend to. Task 32 (release
    readiness) checks that every one of them is either completed or explicitly outstanding.
 
-Automated results recorded **2026-09-17**, from the repository state at that date. The counts below
-are a snapshot: the repository is under active development, and this section has already been
-superseded once — sections 1.1 to 1.3 were rewritten on 2026-09-17 after tasks 29.2–29.5 (the four
-per-channel scenario suites), 28.5, 35.2 and 26.3 landed, all of which the earlier text recorded as
-unimplemented. Re-run the commands in section 1.1 before quoting a number.
+Automated results recorded at commit **`5d4aca2`**. The counts below are a snapshot: the repository
+is under active development, and this section has now been superseded twice.
+
+1. Sections 1.1 to 1.3 were rewritten on 2026-09-17 after tasks 29.2–29.5 (the four per-channel
+   scenario suites), 28.5, 35.2 and 26.3 landed, all of which the earlier text recorded as
+   unimplemented — the gap moved from *unwritten* to *unexecuted*.
+2. The same sections were rewritten again at `5d4aca2`, which is **the first commit at which the
+   integration suite has actually been executed against a live stack: 104 tests across 9 files, all
+   passing.** The gap moved from *unexecuted* to *executed once, locally*. What that first run found
+   is in section 1.2, and it is the most useful paragraph in this document.
+
+Re-run the commands in section 1.1 before quoting a number.
 
 ---
 
@@ -25,27 +32,49 @@ unimplemented. Re-run the commands in section 1.1 before quoting a number.
 
 ### 1.1 The run
 
-`npm test` (`vitest run`), all three projects, from the repository root:
+`npm test` (`vitest run`), all three projects, from the repository root. **The suite is 95 files and
+1780 tests, and the outcome depends on one environment variable**, so both runs are recorded — a
+number quoted without saying which run it came from is the mistake this table exists to prevent.
+
+**With `JAMEE_TEST_DATABASE_URL` exported and a live local stack** — the complete result:
 
 | | Files | Tests |
 | --- | --- | --- |
-| **Total** | **95** | **1775** |
-| Passed | 86 | 1671 |
+| **Total** | **95** | **1780** |
+| Passed | **95** | **1780** |
+| Skipped | 0 | 0 |
+| Failed | 0 | 0 |
+
+Duration 23.92 s. Exit code 0.
+
+**Without it** — what a clone with no stack sees, and what CI's job 1 sees:
+
+| | Files | Tests |
+| --- | --- | --- |
+| **Total** | **95** | **1780** |
+| Passed | 86 | 1676 |
 | Skipped | 9 | 104 |
 | Failed | 0 | 0 |
 
-Duration 12.49 s. Exit code 0.
+Duration 16.31 s. Exit code 0 — see the warning in section 1.3 about what that zero does and does
+not mean.
 
 Per project:
 
 | Project | Command | Files | Tests | Result |
 | --- | --- | --- | --- | --- |
-| `unit` | `npm run test:unit` | 55 | 1554 | all passed |
+| `unit` | `npm run test:unit` | 55 | 1559 | all passed |
 | `property` | `npm run test:property` | 31 | 117 | all passed |
-| `integration` | `npm run test:integration` | 9 | 104 | **all skipped** — no `JAMEE_TEST_DATABASE_URL` |
+| `integration` | `npm run test:integration` | 9 | 104 | **all passed** against a live local stack; **all skipped** when `JAMEE_TEST_DATABASE_URL` is absent |
 
-Every skipped file is the integration project's and every one of the 104 skipped tests is theirs.
-Section 1.3 lists them, explains why, and gives the commands that make them run.
+The integration project is the whole of the difference between the two runs: every one of the 9
+files and 104 tests that can skip is its own. Section 1.3 lists them and gives the commands.
+
+**Vitest does not read `.env.local` for this.** The gate in `tests/integration/database.ts` reads
+`process.env`, and nothing in `vitest.config.ts` loads a dotenv file — so a `JAMEE_TEST_DATABASE_URL`
+line sitting in `.env.local` is *not* enough, and a run that looks correctly configured still skips.
+The variable has to be exported into the shell that invokes `npm test`. That is the single most
+common way to get 1676 while believing you got 1780.
 
 **All 31 correctness properties are now asserted.** The `property` project has grown from one wiring
 smoke test to 31 files, and the mapping is one file per property with no gaps: Property 1 →
@@ -75,18 +104,51 @@ specified one, and a reviewer should read it as such. The reconstruction and its
 recorded in `design.md` beneath the entry and in the header of
 `tests/property/deletion-isolation.property.test.ts`.
 
-### 1.2 The four per-channel scenario suites: all four are written, none has been executed
+### 1.2 The four per-channel scenario suites: all four are written, and all four have now passed
 
 Task 30.1 asks this document to record "the outcomes of the image, chat, voice, and WhatsApp
-automated scenario suites." Those suites are tasks 29.2–29.5, and **all four now exist.** This
-section previously said none of them did; that was true when it was written and is not true now.
+automated scenario suites." Those suites are tasks 29.2–29.5, and **all four now exist and all four
+pass.** This section has been rewritten twice, and the trajectory is the point:
 
-The status changed from *does not exist* to *exists and is gated*, which is a different problem with
-the same bottom line: **there is still no outcome to record, because the integration project
-self-skips without a database URL (section 1.3).** A written suite that has never run is not
-coverage, and the distinction this section used to draw — unit tests with stubbed collaborators
-versus the same scenarios through real services, real validation, real persistence and real RLS —
-still stands. What changed is that the second kind now exists in the repository.
+| This section said | Was true | Bottom line then |
+| --- | --- | --- |
+| none of the four suites exists | before 29.2–29.5 landed | nothing to record |
+| all four exist, none has been executed | after they landed, before `5d4aca2` | still nothing to record — the project self-skipped without a database URL |
+| **all four exist and all four pass** | **at `5d4aca2`** | **41 of the 104 integration tests are these four suites, and all 104 passed** |
+
+The distinction this section has always drawn still stands and is the reason the suites exist: unit
+tests with stubbed collaborators are a different claim from the same scenarios through real
+services, real validation, real persistence and real RLS. What changed at `5d4aca2` is that the
+second kind has an outcome.
+
+**What the first execution found, which is the lesson worth carrying forward.** These suites were
+written, committed, and reported green for a long stretch without ever running a line — and that
+stretch is exactly what let **two live defects survive inside the test code itself**, invisible to
+every gate:
+
+1. **A 73-byte bcrypt password in the test-farmer fixture.** bcrypt truncates at 72 bytes; the
+   fixture's password was one byte over, so signing a test farmer in could not work. Nothing caught
+   it because nothing had tried.
+2. **A `from_phone` filter written in the `+`-prefixed E.164 form** in
+   `whatsapp-scenarios.test.ts`, while `claimInbound()` stores Meta's `wa_id` verbatim, *without*
+   the `+`. The predicate matched **zero rows**, so the assertion it guarded could never fail. It
+   was not a failing test. It was an **unfalsifiable** one, which is worse: a failing test is a red
+   tick, and an unfalsifiable one is a green tick that means nothing. `5d4aca2` fixed it with a
+   single `inboundWaId()` binding.
+
+Both defects were in test code, both were reachable only by running it, and both had been sitting
+under a green `npm test` the whole time. **The generalisation: a suite that has never executed is
+not coverage, and the number of tests in it tells you nothing about how many of them could ever
+fail.** Read the third rule at the top of this document as being about this, and note that the same
+reasoning still applies to everything in Parts 2, 3 and 5 — those are unexecuted procedures, and
+their line counts are not evidence either.
+
+A closely related instance of the same bug class **is still open** in
+`tests/integration/idempotency.test.ts`, which writes `from_phone` in the `+` form at two places
+while `claimInbound()` writes it without. It passes today only because those rows are inserted and
+read back by primary key, so nothing filters on `from_phone` — the first predicate anyone adds will
+match zero rows and look like a passing test. Fixing it is not a documentation change and is not
+done here.
 
 | Suite | File | Tests | Cases it covers |
 | --- | --- | --- | --- |
@@ -95,12 +157,11 @@ still stands. What changed is that the second kind now exists in the repository.
 | **29.4 voice** | `tests/integration/voice-scenarios.test.ts` | 9 | short recording → transcript plus answer, one voice unit, original deleted · exactly 120 s accepted · one second past → declined with both limits stated and nothing spent · one byte past the ceiling → the size code, not the duration one · empty and whitespace-only transcripts → asks for a quieter recording, keeps the object, spends the unit, calls no chat · noisy transcript preserved verbatim and still answered · a transcription the provider could not deliver → `TRANSCRIPTION_FAILED` rather than a diagnosis timeout, object retained |
 | **29.5 WhatsApp** | `tests/integration/whatsapp-scenarios.test.ts` | 12 | inbound image → downloaded, stored in `crop-images`, diagnosed, reply matched against the shared formatter · inbound text → answered through the ChatService in that farmer's active WhatsApp conversation · inbound audio → stored in `voice-messages`, transcribed, answered; `aac`/`amr` refused before a byte is downloaded · unsupported type → the accepts-photos-text-and-voice reply, nothing spent · redelivery → acknowledged with nothing downloaded, invoked or spent · expired soft deadline → send-again reply, timeout recorded, no work started, and every message of an expired batch answered · rate limit on the primary model → retried on the fallback and still answered · both providers failing → temporarily-busy reply and a recorded failed delivery · every delivery on the `whatsapp` channel, nothing leaked to the other farmer |
 
-Every specific case this section used to list as "covered at the integration level nowhere" — the
+Every specific case this section once listed as "covered at the integration level nowhere" — the
 blurry image, the non-plant image, multiple leaves, the unknown question, the 120 s boundary, the
 noisy transcript, the invalid WhatsApp type, the duplicate delivery, the soft-deadline timeout, the
-provider rate limit driving the fallback — is in the table above. **None of them has been observed
-passing.** They are written and gated, and the run that would produce an outcome is the one section
-1.3 describes.
+provider rate limit driving the fallback — is in the table above, and **all of them have now been
+observed passing** in the `5d4aca2` run. Section 1.3 has the commands that reproduce it.
 
 The unit-level coverage those channels also have is unchanged and still worth knowing about, because
 it is the coverage that *did* execute: `src/services/diagnosis.service.test.ts` (32),
@@ -118,54 +179,63 @@ Also relevant, and also changed since this section was written:
 - **Task 35.2** (Property 31, tenant isolation over deletion) — **implemented**, as
   `tests/property/deletion-isolation.property.test.ts` (7 tests, passing). Section 1.1 records that
   `design.md` now carries the Property 31 entry and that its statement is a reconstruction.
-- **Task 31.1** (the automatable release-acceptance sequence) — implemented, and still subject to
-  section 1.3's gate: **its 7 tests report as skipped and have not been executed.**
+- **Task 31.1** (the automatable release-acceptance sequence) — implemented, and as of `5d4aca2`
+  **its 7 tests have executed and passed.** It remains subject to section 1.3's gate, so it reports
+  as skipped on a machine with no stack.
 - Three further integration suites exist beyond the six named so far —
   `tests/integration/idempotency.test.ts` (10), `knowledge.test.ts` (22) and
-  `quota-atomicity.test.ts` (11) — and are gated identically.
+  `quota-atomicity.test.ts` (11) — gated identically, and passing in the same run.
 
-### 1.3 The integration project self-skips, and has never run against a live database
+### 1.3 The integration project self-skips, and first ran against a live database at `5d4aca2`
 
 `tests/integration/database.ts` gates every integration suite behind `describeIntegration`, which
 is `describe` when `JAMEE_TEST_DATABASE_URL` is set and `describe.skip` otherwise. The reasoning is
 sound — a developer with no local stack still gets a green run, and CI opts in — but it has a
-consequence this document has to state plainly:
+consequence this document has to state plainly, and which does not go away now that the suite has
+run once:
 
 > **`npm test` reporting green on a machine with no local Supabase stack does not mean the
 > integration suite passed. It means the suite did not execute.**
 
-That is the state of this record. **All 104 integration tests across all 9 files report as skipped
-and none has been executed against a live database as part of this report.** Their outcome is
-unknown, not passing.
+That warning held for the whole life of this record until `5d4aca2`, and section 1.2 records the two
+defects it hid. **The state now: all 104 integration tests across all 9 files have been executed
+against a live local Supabase stack and all 104 passed.** On a machine with no stack the same 104
+still report as skipped, so the sentence above is still the one to read before quoting a green tick.
 
-| File | Tests | What it asserts when it runs |
-| --- | --- | --- |
-| `harness.test.ts` | 13 | the seeded knowledge base, the profile trigger, and cross-farmer RLS on `profiles`, `diagnoses` and `usage_logs` (task 29.1) |
-| `image-scenarios.test.ts` | 10 | task 29.2's image matrix — see section 1.2 |
-| `chat-scenarios.test.ts` | 10 | task 29.3's chat matrix |
-| `voice-scenarios.test.ts` | 9 | task 29.4's voice matrix, boundaries included |
-| `whatsapp-scenarios.test.ts` | 12 | task 29.5's WhatsApp matrix, including redelivery and the fallback |
-| `knowledge.test.ts` | 22 | the five verified conditions, their sources, and grounded lookup against the real rows |
-| `quota-atomicity.test.ts` | 11 | the `0007` counter functions under concurrency — a race no stub can reproduce |
-| `idempotency.test.ts` | 10 | a redelivered WhatsApp message doing its work exactly once, at the database |
-| `release-acceptance.test.ts` | 7 | the automatable half of the release acceptance sequence (task 31.1) |
-| **Total** | **104** | **none executed** |
+| File | Tests | Result at `5d4aca2` | What it asserts |
+| --- | --- | --- | --- |
+| `harness.test.ts` | 13 | passed | the seeded knowledge base, the profile trigger, and cross-farmer RLS on `profiles`, `diagnoses` and `usage_logs` (task 29.1) |
+| `image-scenarios.test.ts` | 10 | passed | task 29.2's image matrix — see section 1.2 |
+| `chat-scenarios.test.ts` | 10 | passed | task 29.3's chat matrix |
+| `voice-scenarios.test.ts` | 9 | passed | task 29.4's voice matrix, boundaries included |
+| `whatsapp-scenarios.test.ts` | 12 | passed | task 29.5's WhatsApp matrix, including redelivery and the fallback |
+| `knowledge.test.ts` | 22 | passed | the five verified conditions, their sources, and grounded lookup against the real rows |
+| `quota-atomicity.test.ts` | 11 | passed | the `0007` counter functions under concurrency — a race no stub can reproduce |
+| `idempotency.test.ts` | 10 | passed | a redelivered WhatsApp message doing its work exactly once, at the database |
+| `release-acceptance.test.ts` | 7 | passed | the automatable half of the release acceptance sequence (task 31.1) |
+| **Total** | **104** | **104 passed** | |
+
+**One execution against one local stack is one data point, not a standing guarantee.** Nothing
+re-runs this automatically: CI has never executed (no git remote is configured), so the only thing
+keeping this row green is a human remembering to export the variable. A regression here reports as
+*skipped*, not as *failed*, on every machine that does not.
 
 Three of these are only meaningful against a real Postgres and have no unit-level equivalent
 anywhere: the cross-farmer RLS reads in `harness.test.ts`, the counter concurrency in
 `quota-atomicity.test.ts`, and the exactly-once redelivery behaviour in `idempotency.test.ts`. A
 policy and a race are properties of the database, not of the code that calls it.
 
-**`tests/integration/harness.test.ts` — 13 tests, skipped.** When it runs it asserts: exactly the
+**`tests/integration/harness.test.ts` — 13 tests, all passed.** It asserts: exactly the
 five verified conditions seeded with sources (Requirements 4.1, 4.2), `Tomato Healthy` carrying no
 treatment content (3.4), a farmer session failing to write `disease_knowledge` (13.4), a profile per
 farmer keyed to the auth user id and carrying the E.164 phone (1.4), owner-reads-yes /
 other-farmer-reads-zero on `profiles`, `diagnoses` and `usage_logs` (13.1, 13.2), a refused
 cross-owner insert, and the 0007 quota counter functions round-tripping. **The cross-farmer RLS
 reads are the assertions the whole harness exists for** — no fake client can stand in for a policy
-evaluated in Postgres — and they are among the skipped.
+evaluated in Postgres — and they are now observed, not assumed. Signing its test farmers in is also
+what surfaced the 73-byte bcrypt password of section 1.2.
 
-**`tests/integration/release-acceptance.test.ts` — 7 tests, skipped.** Task 31.1's suite: the
+**`tests/integration/release-acceptance.test.ts` — 7 tests, all passed.** Task 31.1's suite: the
 release acceptance sequence as far as a machine can walk it, as one continuous path through one
 farmer's data rather than seven independent scenarios.
 
@@ -184,18 +254,22 @@ Step 8's "no model training" half is absent because it is the *absence* of a cal
 observable at runtime can witness; `npm run check:shared-implementation` asserts it statically
 (section 1.4).
 
-Until a stack is up, this suite and the four scenario suites beside it are the largest single block
-of unverified behaviour in the release: together they are the only automated checks that grounding,
-follow-up resolution, language handling, the voice round trip, WhatsApp delivery, quota atomicity,
-redelivery and cross-channel history actually work end to end. 104 tests is now the size of that
-block, up from 20 when this section was first written — the gap has moved from *unwritten* to
-*unexecuted*, which is progress only if someone runs it.
+This suite and the four scenario suites beside it were the largest single block of unverified
+behaviour in the release: together they are the only automated checks that grounding, follow-up
+resolution, language handling, the voice round trip, WhatsApp delivery, quota atomicity, redelivery
+and cross-channel history work end to end. That block grew from 20 tests when this section was first
+written to 104, and at `5d4aca2` it moved from *unexecuted* to *executed and green*. **On any machine
+where the variable is not exported it reverts to unverified**, which is the whole reason the two
+sub-tables in section 1.1 are kept side by side.
 
-**To run it.** From `tests/integration/database.ts`, verbatim:
+**To run it.** The sequence `tests/integration/database.ts` documents, with one correction it has not
+yet absorbed — the repository **now ships `supabase/config.toml`**, so step 1 is a no-op on a fresh
+clone and `supabase init` would only offer to overwrite a real config. Skip it unless `supabase
+start` complains that the project is not initialized:
 
 ```sh
-# 1. Once per clone — the repository ships migrations but no supabase/config.toml.
-#    Answer "N" to overwriting anything under supabase/migrations.
+# 1. Only if supabase/config.toml is missing — it is committed, so normally it is not.
+#    If you do run it, answer "N" to overwriting anything under supabase/ .
 npx supabase init
 
 # 2. Start Postgres, Auth, PostgREST and Storage, then apply supabase/migrations in order.
@@ -216,34 +290,51 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=<ANON_KEY from step 3>
 SUPABASE_SERVICE_ROLE_KEY=<SERVICE_ROLE_KEY from step 3>
 ```
 
+**Two corrections to that block, both learned from the run that produced this section's result.**
+
+- **Take the ports from step 3's output, not from the two literals above.** They are the Supabase
+  defaults and are right on a machine with no competing stack, but the committed
+  `supabase/config.toml` may move them — read its header before assuming. Getting this wrong is not
+  a test failure: the suite quietly talks to whichever stack owns the port, and a `db reset` against
+  the wrong URL destroys that other project's data. `supabase/config.toml`'s header says this at
+  length and is worth the two minutes.
+- **`.env.local` alone does not arm the gate.** Nothing loads it into `process.env` for a vitest run
+  (section 1.1). The variables have to be exported into the shell that invokes the command.
+
 `npm run test:integration` then runs it. **Never set `JAMEE_TEST_DATABASE_URL` in production.**
 
 Note the deliberate asymmetry in the gate: a *missing* database URL skips; a database URL *present
 alongside missing keys* throws with instructions, because that is a half-finished setup rather than
 a machine without a stack.
 
-**CI is wired to run this suite for real, and has not yet done so.**
-`.github/workflows/release-gates.yml` has a second job that installs the Supabase CLI, runs
-`supabase init` / `supabase start`, exports the stack's values into `JAMEE_TEST_DATABASE_URL` and the
-key variables, runs `npm run test:integration`, and then **reads the JSON report and fails when zero
-tests executed** — so a broken stack cannot pass as coverage. That job's own comments record that it
-was authored but never executed, because the authoring machine has no Docker and no Actions run has
-confirmed it. The likeliest first-run adjustment it names is the `supabase init`-generated
-`supabase/config.toml`: some stacks refuse a phone on the admin create endpoint until the phone
-provider is enabled under `[auth.sms]`. So the honest status is: **the mechanism that would turn
-"skipped" into a real result exists and is untested.**
+**CI is wired to run this suite for real, and has still not done so.** The first real run was local,
+not automated. `.github/workflows/release-gates.yml` has a second job that installs the Supabase CLI,
+initializes the project *only if no config is committed*, runs `supabase start`, exports the stack's
+values into `JAMEE_TEST_DATABASE_URL` and the key variables, runs `npm run test:integration`, and then
+**reads the JSON report and fails when zero tests executed** — so a broken stack cannot pass as
+coverage. That job has never executed, because **no git remote is configured**, so no Actions run
+exists to confirm it.
 
-Result of the gated run, to be filled in by whoever first brings up a local stack:
+Two of that job's own comments are now behind the repository. They say the repo ships no
+`supabase/config.toml`; it does, as of `5d4aca2`. And the first-run adjustment they anticipate — some
+stacks refusing a phone on the admin create endpoint until the phone provider is enabled under
+`[auth.sms]` — is **already applied in the committed config**, which sets `[auth.sms] enable_signup =
+true` (with the Twilio provider left disabled, so nothing is ever sent). The job's conditional init
+step steps aside when a config is present, so its behaviour is right even where its comments are not.
+Honest status: **the mechanism that turns "skipped" into a real result works — it has been walked by
+hand — and the CI copy of it is still unexecuted.**
+
+Result of the gated run:
 
 | Field | Value |
 | --- | --- |
-| Date executed | _(not executed)_ |
-| Stack (local CLI version / hosted project) | _(not executed)_ |
-| Files / tests / passed / failed | _(not executed)_ |
-| `harness.test.ts` — cross-farmer RLS reads returned zero rows | _(not executed)_ |
-| `harness.test.ts` — five seeded conditions present, quota functions round-tripped | _(not executed)_ |
-| `release-acceptance.test.ts` — steps 2, 3, 4, 5, 7, 7, 8 outcome each | _(not executed)_ |
-| Notes | _(not executed)_ |
+| Date executed | first passing run committed as **`5d4aca2`**; reconfirmed at that commit |
+| Stack (local CLI version / hosted project) | local stack, Supabase CLI **2.117.0**, Postgres major 17, ports per the committed `supabase/config.toml` |
+| Files / tests / passed / failed | **9 / 104 / 104 / 0** — exit code 0, 13.3 s |
+| `harness.test.ts` — cross-farmer RLS reads returned zero rows | **yes** — the other farmer's `profiles`, `diagnoses` and `usage_logs` reads all returned zero, and the cross-owner insert was refused |
+| `harness.test.ts` — five seeded conditions present, quota functions round-tripped | **yes** — all 13 tests in the file passed |
+| `release-acceptance.test.ts` — steps 2, 3, 4, 5, 7, 7, 8 outcome each | **all 7 passed** |
+| Notes | Two defects in the test code itself surfaced on the first execution and were fixed in `5d4aca2` — the 73-byte bcrypt fixture password and the `+`-prefixed `from_phone` filter (section 1.2). Neither was a defect in the application. `tests/integration/idempotency.test.ts` still carries the second pattern in a position where nothing filters on it yet. **This was one local run; nothing re-runs it automatically.** |
 
 ### 1.4 Static guards that did run
 
@@ -706,7 +797,7 @@ the three. Any replacement must keep the agreement on `आप`, or it needs thre
 
 ### 3.2 Manual device pass (from task 26.1)
 
-The static half runs on every commit (`tests/unit/mobile-layout.test.ts`, 83 tests, green). These
+The static half runs on every commit (`tests/unit/mobile-layout.test.ts`, 87 tests, green). These
 are the checks it structurally cannot make. They overlap M4 deliberately — do them in the same
 session and record the findings once, here or there.
 
@@ -790,6 +881,19 @@ your handset sends `ogg`/`opus` or `mp4`, the path should work end to end.
      the two numbered acceptance steps specifically, and are what task 32 checks for completion.
      Append below this comment. No restructuring of this document is needed.
 -->
+<!--
+     REFRESHED AT `5d4aca2` — machine rows only, and this is the boundary of the refresh.
+
+     Sections 5.1 and 5.4 carried every automated row as "written, not executed", which stopped
+     being true when `npm run test:integration` ran 104/104 against a live local stack (section 1.3).
+     Those status cells, the count sentence under 5.1's table, and 5.4's verdict rows were updated
+     from that run. Nothing else here moved: A-1 and A-6 remain **outstanding** with empty record
+     tables, they are 31.2's own entries, and no other task may fill them in.
+
+     The distinction worth keeping if this happens again: a machine row's status is a **report of a
+     run** and goes stale on its own, while A-1 and A-6 are 31.2's authored procedure and only a
+     human tester's result can change them.
+-->
 
 The requirements' **Release Acceptance Criteria** is not a test matrix. It is one sequence of eight
 steps *"a tester completes without developer assistance"*, and the release is accepted when they
@@ -803,8 +907,10 @@ photo on WhatsApp, from the number that signed in) are recorded below as **A-1**
 other six-and-a-half steps are machine-verified, and section 5.1 says by what. Task 32 reads the
 verdicts in 5.4.
 
-**Both entries below are outstanding as of 2026-09-16.** No tester has executed either. Nothing in
-this part is a result; all of it is a procedure and an expected observation.
+**Both entries below are outstanding as of 2026-09-16.** No tester has executed either. A-1 and A-6
+carry no result at all: everything in 5.2 and 5.3 is a procedure and an expected observation. The
+machine rows in 5.1 and 5.4 *do* now carry results, from the run recorded in section 1.3 — which is
+exactly why the two human rows are the ones to read carefully before quoting this part.
 
 **A-1 and A-6 do not replace M1 and M3, and do not repeat them.** M1 covers the whole
 authentication surface — provider configuration, sender id, a wrong code, request throttling, the
@@ -822,20 +928,35 @@ not as a whole. This is the map.
 | Step | What the sequence asks | Verified by | Status |
 | --- | --- | --- | --- |
 | **1** | Sign in with a phone number and an SMS one-time passcode | **Human tester — A-1 below** | **outstanding** |
-| **2** | Upload a crop image and receive a possible disease result grounded in the Knowledge_Base | `tests/integration/release-acceptance.test.ts` — *step 2: grounds an uploaded crop image in the seeded row of the name it reported* | written, **not executed** (§1.3) |
-| **3** | Ask a follow-up in the same Conversation that resolves against that diagnosis | *step 3: answers a subject-less follow-up against that conversation diagnosis* | written, **not executed** |
-| **4** | Receive Hindi and Marathi explanations with the Canonical_Disease_Name unchanged | *step 4: returns Hindi and Marathi explanations with the canonical name unchanged* | written, **not executed** |
-| **5** | Send a voice message in Hindi, Marathi or English and receive a text answer | *step 5: returns a transcript and a text answer for one voice unit* | written, **not executed** |
-| **6** | Send a crop photo on WhatsApp from the same phone number and receive the same Diagnosis_Result content as the Web_App | **Human tester — A-6 below.** A partial machine proxy sits inside the step 7 test — see the note under this table | **outstanding** (and the proxy is also not executed) |
-| **7** | Open history on the website and view both the Web_App and WhatsApp diagnoses, including a detail view for one entry | *step 7: lists the web and WhatsApp diagnoses together, newest first* and *step 7: opens the detail view of one entry with every field it renders* | written, **not executed** |
-| **8a** | Every agricultural statement traces to a Knowledge_Base row | *step 8: traces every agricultural sentence of the whole run to a seeded row* | written, **not executed** |
+| **2** | Upload a crop image and receive a possible disease result grounded in the Knowledge_Base | `tests/integration/release-acceptance.test.ts` — *step 2: grounds an uploaded crop image in the seeded row of the name it reported* | **passed** at `5d4aca2` (§1.3) |
+| **3** | Ask a follow-up in the same Conversation that resolves against that diagnosis | *step 3: answers a subject-less follow-up against that conversation diagnosis* | **passed** at `5d4aca2` |
+| **4** | Receive Hindi and Marathi explanations with the Canonical_Disease_Name unchanged | *step 4: returns Hindi and Marathi explanations with the canonical name unchanged* | **passed** at `5d4aca2` |
+| **5** | Send a voice message in Hindi, Marathi or English and receive a text answer | *step 5: returns a transcript and a text answer for one voice unit* | **passed** at `5d4aca2` |
+| **6** | Send a crop photo on WhatsApp from the same phone number and receive the same Diagnosis_Result content as the Web_App | **Human tester — A-6 below.** A partial machine proxy sits inside the step 7 test — see the note under this table | **outstanding** (the proxy passed; it is not the step) |
+| **7** | Open history on the website and view both the Web_App and WhatsApp diagnoses, including a detail view for one entry | *step 7: lists the web and WhatsApp diagnoses together, newest first* and *step 7: opens the detail view of one entry with every field it renders* | **passed** at `5d4aca2`, both tests |
+| **8a** | Every agricultural statement traces to a Knowledge_Base row | *step 8: traces every agricultural sentence of the whole run to a seeded row* | **passed** at `5d4aca2` |
 | **8b** | Jamee performs no model training | `npm run check:shared-implementation` — static, because the absence of a call is a property of the codebase and not of a run | **PASS** (Part 6) |
 
-Read that column honestly: **one of the nine rows is green.** Step 8b passes, six rows are written
-and gated behind a database that has never been brought up (§1.3 has the commands), and the two
-human rows are unstarted. The sequence has no pass, and A-1 and A-6 are not the only reason.
+Read that column honestly: **seven of the nine rows are green, and the two that are not are the two
+that decide the release.** Six of the seven come from one command — `npm run test:integration`, 104
+tests across 9 files, all passed against a live local Supabase stack at `5d4aca2` (§1.3 has the run
+and the setup) — and the seventh is 8b's static check. Steps **1 and 6 are unstarted**, because both
+need a human and one of them needs an SMS provider that is not yet configured anywhere.
 
-**The machine proxy for step 6, and its limit.** Inside *step 7: lists the web and WhatsApp
+**What that does and does not buy.** Every step of the sequence a machine can walk has now been
+walked, which is a real change from "written and never run": the code paths behind steps 2, 3, 4, 5,
+7 and 8a were the largest block of unverified behaviour in the release, and they are verified.
+**It does not make the release acceptable.** Section 5.4 is unchanged in its verdict and the reason
+is in the definition: the sequence is one tester's eight steps end to end, and steps 1 and 6 have no
+substitute — a passing integration suite proves the services behave, not that a passcode arrives on
+a handset or that a WhatsApp client renders the reply. The six run-sourced rows are also weaker than
+they look on any other machine: **that run was one local execution and nothing re-runs it**
+(CI has never executed — no git remote), and on a machine without `JAMEE_TEST_DATABASE_URL` the same
+104 tests report as *skipped*. A skipped suite did not pass.
+
+**The machine proxy for step 6, and its limit.** It passed in the `5d4aca2` run along with the rest
+of the step 7 test, and step 6 is still outstanding — the two facts are compatible, and the paragraph
+below is why. Inside *step 7: lists the web and WhatsApp
 diagnoses together*, `diagnose()` is invoked a second time with `channel: 'whatsapp'` through the
 service-role client — a webhook carries no session, and that single argument is what makes it the
 WhatsApp path rather than a web request wearing a different label — and its `knowledge`,
@@ -987,41 +1108,56 @@ are still open, and why they can only close on a real delivery (§3.3).
 ### 5.4 Sequence verdict
 
 This is the table task 32 reads. The release acceptance sequence is not passed while any row lacks a
-result — including the machine rows, whose evidence exists but has not been executed (§1.3).
+result. The machine rows now have one; the two human rows do not, and that is the whole answer.
 
 | Row | Verdict |
 | --- | --- |
-| Step 1 — A-1, human | _(empty)_ |
-| Steps 2, 3, 4, 5 — `release-acceptance.test.ts` | **not executed** — record in §1.3's gated-run table |
-| Step 6 — A-6, human | _(empty)_ |
-| Step 7 — `release-acceptance.test.ts`, two tests | **not executed** — record in §1.3's gated-run table |
-| Step 8a — `release-acceptance.test.ts` | **not executed** — record in §1.3's gated-run table |
+| Step 1 — A-1, human | **outstanding** — no tester has run it, and no SMS provider is configured to make it runnable |
+| Steps 2, 3, 4, 5 — `release-acceptance.test.ts` | **PASS** — executed at `5d4aca2`, 4 of the file's 7 tests; the run is in §1.3's gated-run table |
+| Step 6 — A-6, human | **outstanding** — no tester has run it. The step 7 machine proxy passed and is not a substitute (§5.1) |
+| Step 7 — `release-acceptance.test.ts`, two tests | **PASS** — executed at `5d4aca2`, both tests |
+| Step 8a — `release-acceptance.test.ts` | **PASS** — executed at `5d4aca2` |
 | Step 8b — `npm run check:shared-implementation` | **PASS** |
-| **Whole sequence accepted — yes / no** | _(empty)_ |
-| If no: which step failed, and what was observed | _(empty)_ |
+| **Whole sequence accepted — yes / no** | **no** |
+| If no: which step failed, and what was observed | **Nothing failed. Steps 1 and 6 have not been performed** — A-1 needs a real SMS passcode, which needs an SMS provider that does not exist in any environment yet (`docs/DEPLOYMENT.md` step 2), and A-6 needs the same crop photo compared through WhatsApp and a handset against the web result. Neither has a machine substitute. Every automated row above is also one local run behind an opt-in gate, so re-read §1.3 before treating them as standing |
+
+**The release is not accepted.** Six acceptance steps moved from *not executed* to *PASS* at
+`5d4aca2`, which is the largest single change this table has seen, and it moves the blocker rather
+than removing it: what stands between the accepted row and a *yes* is now exactly three things, none
+of them code — the two human steps A-1 and A-6, a deployed environment to perform them against
+(`scripts/check-deployment.ts` has never run, so Requirement 17.6 is unevidenced too), and an SMS
+provider account for step 1.
+**104/104 does not mean shippable.** It means the services behave when a machine drives them; the
+sequence asks whether a farmer can walk the product end to end, and nobody has tried.
 
 ---
 
 ## Part 6 — Release gate status
 
-All six gates run locally from the repository root on **2026-09-17**. The same six are wired into CI
-at `.github/workflows/release-gates.yml` (task 28.6), whose second job additionally runs the
-integration suite against a real Supabase stack — **that workflow has never been executed** (section
-1.3), so every status below is a local result.
+All six gates run locally from the repository root at commit **`5d4aca2`**. The same six are wired
+into CI at `.github/workflows/release-gates.yml` (task 28.6), whose second job additionally runs the
+integration suite against a real Supabase stack — **that workflow has never been executed**, because
+no git remote is configured (section 1.3). Every status below is a local result.
 
 | Gate | Command | Status |
 | --- | --- | --- |
 | TypeScript strict | `npm run typecheck` | PASS — zero errors |
 | Lint | `npm run lint` | PASS — 0 errors, 0 warnings |
-| Build | `npm run build` | PASS |
-| Tests | `npm test` | PASS — 86 files / 1671 tests passed; **9 files / 104 tests skipped** (every integration suite, no `JAMEE_TEST_DATABASE_URL`) |
+| Build | `npm run build` | PASS — 14 routes |
+| Tests | `npm test` | PASS — **95 files / 1780 tests, all passed**, with `JAMEE_TEST_DATABASE_URL` exported against a live local stack. Without it: 86 files / 1676 tests passed and **9 files / 104 tests skipped** (every integration suite) |
 | Secret scope | `npm run check:secret-scope` | PASS |
 | Shared implementation | `npm run check:shared-implementation` | PASS |
 
-**Read the fourth row with the third rule of this document in mind.** A green `npm test` here means
-the unit and property projects passed and the integration project did not run. It is not evidence
-that RLS holds, that persistence works, or that any scenario passes end to end. Section 1.3 has the
-commands that turn that row into a real result.
+The integration project is inside the fourth row rather than beside it, the same way the
+accessibility scan is. Run on its own it is **`npm run test:integration` — PASS, 104 / 104 across 9
+files** (section 1.3).
+
+**Read the fourth row with the third rule of this document in mind.** The 1780-test figure is real,
+but it is conditional: the same command on the same commit reports 1676 passed and 104 skipped when
+the database URL is not exported into the environment, and **exits 0 either way**. So a green tick on
+that row is evidence that RLS holds, that persistence works and that the scenarios pass end to end
+*only if you know which of the two runs produced it*. Section 1.1 records both; section 1.3 has the
+commands. And the run is manual — nothing re-executes it, so this row can go stale silently.
 
 The accessibility scan task 28.6 also names among the gates is inside the `npm test` row, not beside
 it: task 26.3 put it in the `unit` project (section 1.5), so the fourth row is what fails on an axe
