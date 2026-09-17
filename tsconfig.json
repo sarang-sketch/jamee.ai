@@ -1,0 +1,47 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "ES2023"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+
+    /* Next 16 (Turbopack) requires the React automatic runtime and rewrites this key to
+       "react-jsx" on build if it is changed — leave it alone. */
+    "jsx": "react-jsx",
+
+    "allowJs": false,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "incremental": true,
+
+    /* Requirement 17.8 — the codebase compiles under strict mode with no type errors.
+       Nothing here may be relaxed to make a later task compile. */
+    "strict": true,
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "plugins": [{ "name": "next" }],
+
+    /* No `baseUrl`: deprecated in TypeScript 6 and removed in 7. `paths` entries are
+       resolved relative to this file. Mirrored in vitest.config.ts. */
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}

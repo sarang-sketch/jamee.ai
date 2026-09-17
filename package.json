@@ -1,0 +1,49 @@
+{
+  "name": "jamee",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jamee — crop disease detection for farmers, in English, Hindi and Marathi",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:property": "vitest run --project property",
+    "check:deployment": "node --experimental-strip-types scripts/check-deployment.ts",
+    "check:secret-scope": "node --experimental-strip-types scripts/check-secret-scope.ts",
+    "check:shared-implementation": "node --experimental-strip-types scripts/check-shared-implementation.ts"
+  },
+  "dependencies": {
+    "@google/genai": "2.22.0",
+    "@supabase/ssr": "0.12.7",
+    "@supabase/supabase-js": "2.116.0",
+    "@vercel/functions": "3.9.7",
+    "groq-sdk": "1.6.0",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.5.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "axe-core": "4.13.0",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.5",
+    "fast-check": "4.10.0",
+    "jsdom": "29.1.1",
+    "typescript": "6.0.3",
+    "vite": "8.3.0",
+    "vitest": "5.0.0"
+  },
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
+  }
+}

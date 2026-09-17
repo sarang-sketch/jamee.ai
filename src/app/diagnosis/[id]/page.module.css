@@ -1,0 +1,243 @@
+/*
+ * Diagnosis detail screen.
+ *
+ * Design: "Mobile layout and accessibility" — mobile-first, single column, relative sizes so a
+ * larger OS font setting widens the column with the text instead of squeezing it. The tap-target
+ * floor, the Devanagari leading floor and the wrap rule all come from `globals.css`.
+ *
+ * No colour carries meaning on its own. Severity, the needs-expert banner and the two photo notes
+ * are all readable as text; the tints below only separate regions.
+ *
+ * This is the longest screen in the app — a photo, four facts, an explanation, a grounded list and
+ * a whole conversation — so it accumulated its own type scale and its own leading before
+ * `globals.css` owned either. Both are now taken from the shared decision:
+ *
+ *  - **Leading is `--line-height-base` / `--line-height-tight`, never a local ratio.** The values
+ *    here happened to sit above the Devanagari floor, so nothing was visibly clipped; the problem
+ *    was that eight rules each held their own opinion, and the next edit to one of them had nothing
+ *    to check itself against.
+ *  - **Sizes are the app's steps** (1.75rem screen heading, 1.0625rem strong body, 0.9375rem
+ *    supporting text, 0.875rem field label, 0.8125rem timestamp), not a second scale
+ *    (1.6 / 1.1 / 0.95 / 0.9 / 0.85 / 0.8 / 0.75rem) that read a step smaller than the identical
+ *    elements on `/chat` and inside `DiagnosisResultCard`.
+ */
+
+.page {
+  max-width: 32rem;
+  margin: 0 auto;
+  /* Bottom padding keeps the last message clear of a phone's browser chrome. */
+  padding: 1.5rem 1rem 4rem;
+  color: #1f2937;
+}
+
+/*
+ * The only control on this screen, and the only way back to the list without the browser's own
+ * back gesture — so it has to clear the 44×44 floor like any other. As an `inline-block` sized
+ * only by a 0.95rem label it was roughly 24 px tall: a link that met the rule on no axis.
+ * `inline-flex` plus the token gives it the height without stretching to the full column width,
+ * and the horizontal padding gives it the second axis.
+ */
+.back {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-target-min);
+  min-width: var(--tap-target-min);
+  /* Pulled left by the padding so the label still lines up with the column edge. */
+  margin: 0 0 0.5rem -0.5rem;
+  padding: 0 0.5rem;
+  color: #15803d;
+  /* Base size: this is a control a farmer taps, not supporting text to be tucked away. */
+  font-size: 1rem;
+}
+
+.header {
+  margin-bottom: 1.25rem;
+}
+
+/* A canonical name is one long unhyphenated string; `globals.css` lets it wrap rather than overflow. */
+.heading {
+  margin: 0 0 0.375rem;
+  /* The same step as every other screen's `<h1>`; this one is not a lesser heading. */
+  font-size: 1.75rem;
+  line-height: var(--line-height-tight);
+}
+
+.meta {
+  margin: 0;
+  color: #4b5563;
+  font-size: 0.9375rem;
+}
+
+.figure {
+  margin: 0 0 1rem;
+}
+
+.photo,
+.photoSmall {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+  background-color: #f3f4f6;
+}
+
+/*
+ * A Thumbnail_Derivative is ~320 px on its longest edge (THUMBNAIL_MAX_EDGE_PX), so stretching it
+ * to the full column would render a blurred upscale. Capping the width keeps it honest about being
+ * the small copy, which is what the caption says.
+ */
+.photoSmall {
+  max-width: 20rem;
+}
+
+/* Requirements 12.9 and 12.10 — the plain-language note about a photo that is gone. */
+.photoNote {
+  margin: 0.5rem 0 1rem;
+  color: #4b5563;
+  font-size: 0.9375rem;
+  line-height: var(--line-height-base);
+}
+
+.banner {
+  margin: 0 0 1.25rem;
+  padding: 0.75rem;
+  /*
+   * `0.25rem`, matching the emphasis rule on every other banner in the app. The literal `4px` here
+   * was the only one left: it is the signal that carries this banner's meaning alongside its text,
+   * so it should thicken with the text when a farmer enlarges their system font rather than thin
+   * out beside it.
+   */
+  border-left: 0.25rem solid #b45309;
+  border-radius: 0.25rem;
+  background-color: #fffbeb;
+  color: #78350f;
+  line-height: var(--line-height-base);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin: 0 0 1.5rem;
+}
+
+.fact {
+  min-width: 6rem;
+}
+
+.factLabel {
+  margin: 0;
+  color: #4b5563;
+  /* The same step as `HistoryList`'s fact labels, which name the same four facts. */
+  font-size: 0.875rem;
+}
+
+.factValue {
+  margin: 0.125rem 0 0;
+  font-size: 1.0625rem;
+  font-weight: 600;
+}
+
+/*
+ * The severity dots (`src/lib/severity.ts`) — the design's icon half, beside the label text. The
+ * same ink at every level, inherited from `.factValue`: the number of filled circles is what carries
+ * the level, never a hue, so no severity colour scale is introduced here either.
+ */
+.severityIcon {
+  margin-inline-end: 0.375rem;
+  letter-spacing: 0.1em;
+  color: currentColor;
+}
+
+.explanation {
+  margin-bottom: 1.75rem;
+  line-height: var(--line-height-base);
+}
+
+.explanation p {
+  margin: 0 0 0.75rem;
+}
+
+.grounded {
+  margin-bottom: 1.5rem;
+}
+
+.sectionHeading {
+  margin: 0 0 0.5rem;
+  /* The same step `DiagnosisResultCard` gives the identical heading on `/diagnose`. */
+  font-size: 1.0625rem;
+  line-height: var(--line-height-tight);
+}
+
+.groundedList {
+  margin: 0;
+  padding-left: 1.25rem;
+  line-height: var(--line-height-base);
+}
+
+.source {
+  margin: 0;
+  color: #4b5563;
+  font-size: 0.9375rem;
+  line-height: var(--line-height-base);
+}
+
+.conversation {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e5e7eb;
+}
+
+.empty {
+  margin: 0;
+  color: #4b5563;
+  line-height: var(--line-height-base);
+}
+
+.thread {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fromFarmer,
+.fromJamee {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+}
+
+.fromFarmer {
+  background-color: #f0fdf4;
+}
+
+.fromJamee {
+  background-color: #f9fafb;
+}
+
+.speaker {
+  margin: 0 0 0.25rem;
+  color: #4b5563;
+  /* The same step `ChatThread` gives its speaker labels — the same words on the live screen. */
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.messageBody {
+  margin: 0;
+  line-height: var(--line-height-base);
+  /*
+   * Farmer-authored text may carry its own line breaks; keep them without collapsing spaces.
+   * `pre-wrap` still honours the inherited `overflow-wrap`, so a long token breaks rather than
+   * scrolling the screen sideways — `pre` would not.
+   */
+  white-space: pre-wrap;
+}
+
+.messageTime {
+  display: block;
+  margin-top: 0.375rem;
+  color: #6b7280;
+  /* The same step `ChatThread` gives its timestamps; 0.75rem was the smallest text in the app. */
+  font-size: 0.8125rem;
+}

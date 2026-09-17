@@ -1,0 +1,27 @@
+/*
+ * Sign-in screen shell.
+ *
+ * Design: "Mobile layout and accessibility" — mobile-first, single column, primary actions in
+ * thumb reach. Text sizes are relative so they follow the OS font setting; the max width is in
+ * `rem` for the same reason, so a larger font setting widens the column with the text instead
+ * of squeezing it. Leading comes from `globals.css`, which owns the Devanagari floor.
+ */
+
+.page {
+  max-width: 26rem;
+  margin: 0 auto;
+  /* Bottom padding keeps the form's controls clear of a phone's browser chrome. */
+  padding: 1.5rem 1rem 4rem;
+  color: #1f2937;
+}
+
+.appName {
+  margin: 0 0 0.25rem;
+  font-size: 1.75rem;
+  line-height: var(--line-height-tight);
+}
+
+.tagline {
+  margin: 0 0 1.75rem;
+  color: #374151;
+}

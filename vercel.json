@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/internal/retention-sweep",
+      "schedule": "0 2 * * *"
+    }
+  ]
+}

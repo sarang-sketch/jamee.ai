@@ -1,0 +1,80 @@
+/*
+ * The one error banner, and the one place its appearance is decided.
+ *
+ * Requirements: 15.4 (the returned message is displayed and a retry action is offered for the
+ *               failed operation), 9.1 / 9.3 (the same box holds English, Hindi and Marathi)
+ * Design: "Frontend — Mobile layout and accessibility"; "Error taxonomy"
+ *
+ * Before this file, six component modules carried a byte-identical `.error` rule and a seventh
+ * carried the same rule with a different margin. They are gone: what a farmer sees when something
+ * fails is now decided here, and a screen contributes only *where* the banner sits (see the
+ * `className` note in `ErrorBanner.tsx`) — spacing between siblings belongs to the container, the
+ * banner's own presentation does not.
+ *
+ * The two rules every stylesheet in this project follows, and which `tests/unit/mobile-layout.test.ts`
+ * enforces:
+ *
+ *  - **No `px` on anything a farmer reads or taps.** Sizes are `rem`, so a larger OS font setting
+ *    grows the text instead of clipping it, and the retry control's floor is `--tap-target-min`
+ *    from `globals.css`.
+ *  - **No transitions, no animations, no keyframes.** Requirement 15.2 forbids simulated progress,
+ *    and a banner that faded in would be one refactor away from being a timed indicator.
+ *
+ * **Colour is never the only signal.** The left rule carries the same information for a farmer who
+ * cannot distinguish the red, and `role="alert"` carries it for one who cannot see the box at all.
+ */
+
+.banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  /*
+   * Zero, deliberately. Every consumer is either a flex child of a form with its own `gap` or
+   * passes a placement class of its own, so a margin here would be added to a decision another
+   * stylesheet has already made.
+   */
+  margin: 0;
+  padding: 0.625rem 0.75rem;
+  color: #7f1d1d;
+  background-color: #fef2f2;
+  border-left: 0.25rem solid #b91c1c;
+  border-radius: 0.25rem;
+}
+
+/*
+ * The message the API returned, verbatim. The body token rather than a local ratio: this sentence
+ * can be Devanagari and can run to several lines on a 320 px viewport, and `globals.css` owns the
+ * leading that keeps its matras from clipping.
+ */
+.message {
+  margin: 0;
+  font-size: 1.0625rem;
+  line-height: var(--line-height-base);
+}
+
+/*
+ * The retry control, rendered only when the banner owns the retry AND the envelope says the same
+ * request could plausibly succeed. Sized as a real tap target in both axes: a control 44 px tall
+ * and 20 px wide is not a 44×44 target.
+ */
+.retry {
+  min-height: var(--tap-target-min);
+  min-width: var(--tap-target-min);
+  /* Not stretched across the box: a full-width control inside an error box reads as the primary
+     action of the screen, which it is not. */
+  align-self: flex-start;
+  padding: 0.625rem 1rem;
+  font: inherit;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: #ffffff;
+  background-color: #b91c1c;
+  border: 1px solid #b91c1c;
+  border-radius: 0.375rem;
+  cursor: pointer;
+}
+
+.retry:focus-visible {
+  outline: 3px solid #0f766e;
+  outline-offset: 2px;
+}

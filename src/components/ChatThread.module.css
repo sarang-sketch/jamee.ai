@@ -1,0 +1,95 @@
+/*
+ * The chat thread.
+ *
+ * Design: "Mobile layout and accessibility" — single column, relative units so text scales with
+ * the OS font setting, contrast at WCAG 2.1 AA, and meaning never carried by colour alone.
+ *
+ * Two rules carried over from `DiagnosisResultCard.module.css`, for the same reasons:
+ *
+ *  - **No `px` on anything a farmer reads.** Every size is in `rem`, so a larger OS font setting
+ *    grows the text instead of clipping it.
+ *  - **No transitions, no animations, no keyframes, and no spinner rule.** Requirement 15.2
+ *    forbids simulated progress, and the cheapest way to keep that true is to have no time-driven
+ *    CSS anywhere in the flow. The honest indicator is the real text the composer renders while
+ *    its request is open.
+ *
+ * Speaker is carried by the visible label in the markup; the alignment and the border below are
+ * secondary cues, not the message.
+ */
+
+.thread {
+  display: block;
+  margin: 0 0 1.25rem;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  /* The order is semantic, not decorative — the numbers would compete with the speaker labels. */
+  list-style: none;
+}
+
+.fromFarmer,
+.fromJamee {
+  padding: 0.625rem 0.75rem;
+  border-radius: 0.5rem;
+  /*
+   * `anywhere` rather than the `break-word` inherited from `globals.css`. A long Devanagari word,
+   * a pasted URL or a canonical condition name must not widen the column on a narrow phone, and
+   * the stronger value is what shrinks the bubble's min-content width rather than only breaking a
+   * word once it is already on a line of its own.
+   */
+  overflow-wrap: anywhere;
+}
+
+.fromFarmer {
+  background-color: #eff6ff;
+  border-left: 0.25rem solid #1d4ed8;
+}
+
+.fromJamee {
+  background-color: #f9fafb;
+  border-left: 0.25rem solid #4b5563;
+}
+
+/*
+ * An optimistic bubble whose request is still open. Deliberately understated: the sentence that
+ * says what is happening is the composer's `role="status"` line, and `aria-busy` is what a screen
+ * reader reads here. A dashed edge and slightly muted text are the visual echo of that, not a
+ * second claim about progress.
+ */
+.unconfirmed {
+  border-left-style: dashed;
+  color: #374151;
+}
+
+.speaker {
+  margin: 0 0 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.body {
+  margin: 0;
+  font-size: 1.0625rem;
+  /*
+   * The body token, not a local `1.5`. This is the most Devanagari-heavy text in the app — a
+   * farmer's question and Jamee's answer, both several lines of Hindi or Marathi — so it is the
+   * last place that should hold its own opinion about leading. `globals.css` owns the value and
+   * the reasoning behind it (upper matras of one line against the lower matras of the line above).
+   */
+  line-height: var(--line-height-base);
+  /* A farmer's question and Jamee's answer may both carry deliberate line breaks. */
+  white-space: pre-wrap;
+}
+
+.time {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8125rem;
+  color: #4b5563;
+}

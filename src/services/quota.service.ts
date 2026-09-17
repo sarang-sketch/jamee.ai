@@ -1,0 +1,576 @@
+import 'server-only';
+
+import { DAILY_QUOTAS } from '@/lib/config/verified';
+import { AppError } from '@/lib/errors';
+import type { Operation, QuotaStatus, WindowKind } from '@/lib/schemas';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { dayWindowKey, nextResetAtIso } from '@/lib/time';
+import type { Functions } from '@/types/database';
+
+/**
+ * The daily quota reserve, refund, and read — the only module that spends a unit.
+ *
+ * Requirements: 14.1 (20 image / 50 chat / 20 voice per Quota_Window), 14.2 (the Web_App and
+ *               WhatsApp channels count against ONE shared per-farmer limit per operation),
+ *               14.3 (a request past the limit is declined, states the limit and the reset time,
+ *               and invokes no model provider), 6.7 (an accepted inconclusive diagnosis counts
+ *               exactly one image analysis)
+ * Design: "Quota enforcement" — *When a unit is reserved, finalized, or refunded*
+ * Depends on: migration `0007_counters_and_quota_fn.sql`, `src/lib/time.ts`
+ *
+ * =============================================================================
+ * THE SPEND RULE, AND WHY IT IS ONE SENTENCE
+ * =============================================================================
+ *
+ * **A unit is spent if and only if at least one provider call was attempted for that request.**
+ *
+ * A biconditional, not a list of cases, because a list drifts. What it settles:
+ *
+ *  - An ownership 403 spends **zero** (Requirement 2.6) — `assertOwnership()` runs at step 4,
+ *    before the reserve at step 6, so nothing was taken to give back.
+ *  - A duplicate WhatsApp delivery spends **zero** (Requirement 11.5) — the `whatsapp_inbound`
+ *    idempotency insert is step 3, so a Meta redelivery never reaches the counter.
+ *  - An exhausted quota spends **zero** and calls no provider (Requirement 14.3).
+ *  - An accepted inconclusive diagnosis spends **exactly one** (Requirement 6.7). The
+ *    classification call happened; validation rejected its content. Spent.
+ *  - A provider fallback still spends **one**, plus a `used_fallback` audit row (14.4, 14.7).
+ *  - **Both providers failed, or the request timed out: spent, and NOT refunded.** Deliberate.
+ *    Those requests consumed real provider capacity, and refunding them would let a failing
+ *    provider drain the free tier through retries. The farmer is told honestly that Jamee is
+ *    busy; the retry costs a new unit.
+ *
+ * The order of operations in the design is the contract, and this module is step 6 (`reserve`),
+ * step 8's read (`status`), and step 9 (`refund`). It knows nothing about steps 1–5 or 7 on
+ * purpose: it cannot enforce an ordering it cannot see, so the guarantee lives in the sequence
+ * the services follow, and `refund` is documented at the point where it would be misused.
+ *
+ * =============================================================================
+ * BURST RATE LIMITING IS A DIFFERENT CONTROL (task 24.1, Requirement 13.8)
+ * =============================================================================
+ *
+ * The burst limiter writes the SAME `counters` table with `window_kind = 'minute'` and its own
+ * per-operation ceiling (`BURST_QUOTAS`), set independently of the daily quota. Three facts about
+ * it that belong here so the two are never confused:
+ *
+ *  1. It is checked at **step 5, BEFORE the reserve**. A refused burst request therefore never
+ *     increments the daily counter (the design's Property 28).
+ *  2. It is **never refunded**, precisely because it precedes the reserve — there is nothing to
+ *     hand back, and "spent" for it means "you asked too fast", not "Jamee did work".
+ *  3. It is `RATE_LIMITED` (429, retryable in seconds), not `QUOTA_EXCEEDED` (429, not retryable
+ *     today). Same status code, different truth about when a retry can work.
+ *
+ * Nothing in this file reads or writes a minute window. `CounterRpc` below carries `windowKind`
+ * so task 24.1 can reuse the same seam, but every public function here passes `'day'`.
+ *
+ * =============================================================================
+ * WHY `server-only` AND THE SERVICE-ROLE CLIENT
+ * =============================================================================
+ *
+ * `counters` grants `authenticated` no insert, update, or delete policy — that absence *is* the
+ * enforcement (migration 0007). The only writes possible are through the three `security definer`
+ * functions, and those are invoked with the service role. So this module is server-only, and the
+ * rule from `src/lib/supabase/admin.ts` applies to every call it makes: **every service-role
+ * query carries an explicit `user_id`.** Here that is structural — `p_user` is a required
+ * argument of all three functions, and there is no code path that omits it.
+ */
+
+/* ========================================================================== */
+/* The limits, and the window kind                                             */
+/* ========================================================================== */
+
+/**
+ * Requirement 14.1's three numbers live in `src/lib/config/verified.ts` and are read from there,
+ * never copied. There is no second copy in the database either: `counter_try_increment` takes the
+ * limit as a parameter rather than reading a table, so `DAILY_QUOTAS` is the single declaration
+ * site for 20 / 50 / 20 across the whole system.
+ */
+export function limitFor(operation: Operation): number {
+  return DAILY_QUOTAS[operation];
+}
+
+/**
+ * Daily quota rows only. The burst limiter's `'minute'` rows are task 24.1's business.
+ */
+const DAY_WINDOW: WindowKind = 'day';
+
+/* ========================================================================== */
+/* The RPC seam                                                                */
+/* ========================================================================== */
+
+/** Arguments shared by all three counter functions. `userId` is not optional anywhere. */
+interface CounterKey {
+  readonly userId: string;
+  readonly operation: Operation;
+  readonly windowKind: WindowKind;
+  /** From `src/lib/time.ts`. **No channel component** — see `reserve()`. */
+  readonly windowKey: string;
+}
+
+/**
+ * The three counter functions of migration `0007`, as this module uses them.
+ *
+ * A three-method seam rather than a slice of the Supabase client, for one reason that is worth
+ * the extra interface: **it is the boundary where a transport failure stops looking like an
+ * at-limit answer.** `counter_try_increment` signals "already at the limit" by returning SQL
+ * NULL, and a failed PostgREST call also arrives with `data: null`. Reading the second as the
+ * first would decline a farmer who is nowhere near their limit — silently, and with a message
+ * quoting a limit they have not reached. `adminCounterRpc()` below checks `error` first and
+ * throws, so by the time a `null` reaches `reserve()` it means exactly one thing.
+ *
+ * Unit tests stub this interface. Real atomicity is task 10.2, against a real Postgres.
+ */
+export interface CounterRpc {
+  /** `counter_try_increment`. The new count, or `null` when already at `limit`. */
+  tryIncrement(args: CounterKey & { readonly limit: number }): Promise<number | null>;
+  /** `counter_decrement`. The new count, or `null` when no row matched (already zero). */
+  decrement(args: CounterKey): Promise<number | null>;
+  /** `counter_used`. Zero for an absent row — the SQL coalesces, so there is no null case. */
+  used(args: CounterKey): Promise<number>;
+}
+
+type CounterFunctionName = 'counter_try_increment' | 'counter_decrement' | 'counter_used';
+
+/**
+ * The narrow slice of a Supabase client `adminCounterRpc()` needs.
+ *
+ * Structural rather than nominal, following `StorageClientLike` in `src/lib/storage.ts`: the
+ * service-role client satisfies it without this type naming it, which keeps the adapter testable
+ * without constructing a client that holds the RLS-bypassing key.
+ */
+export interface CounterRpcClient {
+  rpc(
+    fn: 'counter_try_increment',
+    args: Functions<'counter_try_increment'>['Args'],
+  ): PromiseLike<CounterRpcResponse>;
+  rpc(
+    fn: 'counter_decrement',
+    args: Functions<'counter_decrement'>['Args'],
+  ): PromiseLike<CounterRpcResponse>;
+  rpc(
+    fn: 'counter_used',
+    args: Functions<'counter_used'>['Args'],
+  ): PromiseLike<CounterRpcResponse>;
+}
+
+/**
+ * All three functions return one nullable integer, so one response shape covers them. `error` is
+ * `unknown` rather than `PostgrestError` so the seam does not pin a provider error type — the only
+ * thing this module does with it is decide that it is not an at-limit answer, and log it.
+ */
+export interface CounterRpcResponse {
+  readonly data: number | null;
+  readonly error: unknown;
+}
+
+function rpcFailure(fn: CounterFunctionName, cause: unknown, key: CounterKey): AppError {
+  return new AppError('INTERNAL_ERROR', {
+    cause,
+    context: {
+      reason: 'counter_rpc_failed',
+      fn,
+      userId: key.userId,
+      operation: key.operation,
+      windowKind: key.windowKind,
+      windowKey: key.windowKey,
+    },
+  });
+}
+
+/** `true` for anything PostgREST would put in `error`. `null` and `undefined` are "no error". */
+function isRpcError(error: unknown): boolean {
+  return error !== null && error !== undefined;
+}
+
+/**
+ * Bind the seam to the service-role client.
+ *
+ * The client is constructed lazily by the default parameter, so a caller that injects its own
+ * `CounterRpc` (every unit test) never reads `SUPABASE_SERVICE_ROLE_KEY` at all.
+ */
+export function adminCounterRpc(client: CounterRpcClient = createAdminClient()): CounterRpc {
+  return {
+    async tryIncrement(args) {
+      const { data, error } = await client.rpc('counter_try_increment', {
+        p_user: args.userId,
+        p_operation: args.operation,
+        p_window_kind: args.windowKind,
+        p_window_key: args.windowKey,
+        p_limit: args.limit,
+      });
+      if (isRpcError(error)) throw rpcFailure('counter_try_increment', error, args);
+      return data;
+    },
+
+    async decrement(args) {
+      const { data, error } = await client.rpc('counter_decrement', {
+        p_user: args.userId,
+        p_operation: args.operation,
+        p_window_kind: args.windowKind,
+        p_window_key: args.windowKey,
+      });
+      if (isRpcError(error)) throw rpcFailure('counter_decrement', error, args);
+      return data;
+    },
+
+    async used(args) {
+      const { data, error } = await client.rpc('counter_used', {
+        p_user: args.userId,
+        p_operation: args.operation,
+        p_window_kind: args.windowKind,
+        p_window_key: args.windowKey,
+      });
+      if (isRpcError(error)) throw rpcFailure('counter_used', error, args);
+      // `coalesce(..., 0)` in the SQL means an absent row reads as 0; the `?? 0` covers the
+      // PostgREST response type only, and is why a farmer's first request of the day needs no
+      // special case anywhere above this line.
+      return data ?? 0;
+    },
+  };
+}
+
+/* ========================================================================== */
+/* Options                                                                     */
+/* ========================================================================== */
+
+export interface QuotaOptions {
+  /** The RPC seam. Defaults to the service-role client, built on first use. */
+  readonly rpc?: CounterRpc | undefined;
+  /**
+   * The instant the window key and the reset instant are derived from. Defaults to now.
+   *
+   * Injectable because a quota window is a wall-clock fact in Asia/Kolkata, and a test that had
+   * to wait for 18:30 UTC to check the boundary would not be a test.
+   */
+  readonly now?: Date | undefined;
+}
+
+/* ========================================================================== */
+/* A reservation, and why it is unforgeable                                    */
+/* ========================================================================== */
+
+/**
+ * Brand. Not exported, and a real runtime symbol rather than a `declare const`, so a
+ * `QuotaReservation` can only be minted inside this module: no other file can write the key.
+ *
+ * That is what turns "a nested service must not reserve" from a rule someone remembers into
+ * something the type system carries — see `QuotaContext`.
+ */
+const RESERVATION = Symbol('jamee.quota.reservation');
+
+/**
+ * Proof that one unit is spent for the request in hand.
+ *
+ * Carries the `windowKey` it actually incremented, which matters for exactly one case and that
+ * case is real: a request that starts at 23:59:59 IST and fails at 00:00:01 IST. Refunding by
+ * "today's key" would then decrement TOMORROW's row — creating a spare unit tomorrow and leaving
+ * yesterday's spend in place. `refundReservation()` refunds this key instead of re-deriving one.
+ */
+export interface QuotaReservation {
+  readonly [RESERVATION]: true;
+  readonly userId: string;
+  readonly operation: Operation;
+  readonly windowKey: string;
+  /** The count AFTER the increment, straight from the atomic statement. */
+  readonly used: number;
+  readonly limit: number;
+  /** Next Asia/Kolkata midnight, ISO-8601 (Requirement 14.3). */
+  readonly resetsAt: string;
+  /**
+   * `true` when THIS service took the reserve; `false` when it inherited one from the request
+   * that called it. `refundReservation()` is a no-op on an inherited reservation — the owner
+   * refunds, and a nested refund would give back a unit the outer request is still holding.
+   */
+  readonly reservedHere: boolean;
+}
+
+export type ReserveOutcome =
+  | { readonly outcome: 'allowed'; readonly reservation: QuotaReservation }
+  /** Requirement 14.3: the caller declines with this and calls **no** provider. */
+  | { readonly outcome: 'at_limit'; readonly status: QuotaStatus };
+
+/* ========================================================================== */
+/* reserve (step 6)                                                            */
+/* ========================================================================== */
+
+/**
+ * Take one unit atomically, or report that the farmer is at their limit.
+ *
+ * ### The key is `(user_id, operation, 'day', window_key)` and has NO channel component
+ *
+ * Requirement 14.2's cross-channel sharing is therefore automatic rather than enforced by
+ * convention: this function accepts no channel, the SQL primary key has no column for one, and
+ * a web request and a WhatsApp request land on the same counter row because there is nothing
+ * that could separate them. `channel` is still recorded on the `usage_logs` row (Requirement
+ * 14.6) — that is an audit fact, and audit facts do not partition quota.
+ *
+ * ### The at-limit branch carries what the decline has to say
+ *
+ * A `null` from `counter_try_increment` means the row was already at `limit`. Requirement 14.3
+ * requires the decline to state the limit AND the reset time, so both travel back inside a
+ * `QuotaStatus` — `used` is reported as `limit`, because that is what the row holds. Pass that
+ * status to `quotaExceededError()` and the envelope's `details` is populated from the same values
+ * the check used, rather than from a caller's recollection of them.
+ *
+ * Never call this more than once per request. See `reserveForRequest()`.
+ */
+export async function reserve(
+  userId: string,
+  operation: Operation,
+  options: QuotaOptions = {},
+): Promise<ReserveOutcome> {
+  const now = options.now ?? new Date();
+  const rpc = options.rpc ?? adminCounterRpc();
+
+  const windowKey = dayWindowKey(now);
+  const limit = limitFor(operation);
+  const resetsAt = nextResetAtIso(now);
+
+  const used = await rpc.tryIncrement({
+    userId,
+    operation,
+    windowKind: DAY_WINDOW,
+    windowKey,
+    limit,
+  });
+
+  if (used === null) {
+    return { outcome: 'at_limit', status: { operation, used: limit, limit, resetsAt } };
+  }
+
+  return {
+    outcome: 'allowed',
+    reservation: {
+      [RESERVATION]: true,
+      userId,
+      operation,
+      windowKey,
+      used,
+      limit,
+      resetsAt,
+      reservedHere: true,
+    },
+  };
+}
+
+/* ========================================================================== */
+/* One reserve per REQUEST, not per service call                               */
+/* ========================================================================== */
+
+/**
+ * Whose reserve is it.
+ *
+ * The reserve is taken once per **request**, by whichever service owns that request's operation
+ * type. A `ChatService` invocation nested inside a `VoiceService` request must perform **no**
+ * reserve of its own: the voice unit already taken covers the answer that request produces, so
+ * one voice message must never spend both a voice unit and a chat unit.
+ *
+ * This union is how that is made hard to get wrong. A service that can run either as the entry
+ * point or nested takes a `QuotaContext` and hands it to `reserveForRequest()`; it never calls
+ * `reserve()` directly. The nested caller cannot fabricate coverage either — `coveredBy()` needs
+ * a `QuotaReservation`, and the branded symbol above means the only source of one is a real
+ * reserve. So the failure mode is a type error rather than a farmer charged twice.
+ *
+ * (`ChatInput.skipQuotaReserve` in `src/lib/schemas.ts` is the boolean form of the same fact.
+ * When task 16 builds `ChatService`, map it once at the top of the service —
+ * `skipQuotaReserve === true` → `coveredBy(reservation)`, otherwise `ownsRequest(...)` — so the
+ * boolean never reaches this module.)
+ */
+export type QuotaContext =
+  | { readonly role: 'owns_request'; readonly userId: string; readonly operation: Operation }
+  | { readonly role: 'covered'; readonly reservation: QuotaReservation };
+
+/** This service is the entry point for the request: it takes the reserve. */
+export function ownsRequest(userId: string, operation: Operation): QuotaContext {
+  return { role: 'owns_request', userId, operation };
+}
+
+/**
+ * This service was invoked inside a request that has already reserved: it takes nothing.
+ *
+ * The returned context carries the outer reservation with `reservedHere: false`, which is what
+ * makes a nested `refundReservation()` a no-op instead of a stray decrement.
+ */
+export function coveredBy(reservation: QuotaReservation): QuotaContext {
+  return { role: 'covered', reservation: { ...reservation, reservedHere: false } };
+}
+
+/**
+ * The reserve entry point for any service that might be nested.
+ *
+ * On a `covered` context this performs **no RPC at all** — not a read, not a write — and returns
+ * the inherited reservation. That is the safe path, and it is the default in the sense that
+ * matters: a caller that forgets to think about nesting cannot reach `counter_try_increment`
+ * without first constructing an `owns_request` context and saying so.
+ */
+export async function reserveForRequest(
+  context: QuotaContext,
+  options: QuotaOptions = {},
+): Promise<ReserveOutcome> {
+  if (context.role === 'covered') {
+    return { outcome: 'allowed', reservation: context.reservation };
+  }
+  return reserve(context.userId, context.operation, options);
+}
+
+/* ========================================================================== */
+/* refund (step 9)                                                             */
+/* ========================================================================== */
+
+export interface RefundOutcome {
+  /** `false` when the counter had nothing to give back — see below. */
+  readonly refunded: boolean;
+  /** The count after the attempt. */
+  readonly used: number;
+}
+
+/**
+ * Give one unit back.
+ *
+ * =============================================================================
+ * ONLY FOR A FAILURE BEFORE THE FIRST PROVIDER CALL WAS ATTEMPTED
+ * =============================================================================
+ *
+ * The design enumerates the whole list, and it is short:
+ *
+ *  - signed-URL issuance failure,
+ *  - an unreadable storage object,
+ *  - a knowledge-base read failure,
+ *  - an unhandled error thrown ahead of the gateway call.
+ *
+ * That is all. **Anything at or after the first provider attempt is not refundable** — including
+ * a both-providers-failed request and a timeout, which stay spent because they consumed real
+ * provider capacity and refunding them would let a failing provider drain the free tier through
+ * retries. If you are reaching for this function while holding a provider error, the spend rule
+ * says stop: log `quota_spent = true` and return the busy message.
+ *
+ * A refunded failure writes `quota_spent = false` on its `usage_logs` row, so the audit trail
+ * states which of the two happened rather than leaving it to be inferred from a counter.
+ *
+ * ### Why a double refund is not an error
+ *
+ * `counter_decrement` carries `and used > 0`, so a second refund matches no row and returns NULL
+ * — reported here as `refunded: false`. That guard is what makes the table's `used >= 0` check
+ * constraint unreachable: without it, a duplicate refund would raise a constraint violation and
+ * turn a harmless retry into a 500. Callers may treat `refunded: false` as "nothing to do".
+ *
+ * Prefer `refundReservation()` when you hold the reservation: this overload re-derives the window
+ * key from the clock, which is wrong for a request that crossed Kolkata midnight.
+ */
+export async function refund(
+  userId: string,
+  operation: Operation,
+  options: QuotaOptions = {},
+): Promise<RefundOutcome> {
+  const now = options.now ?? new Date();
+  const rpc = options.rpc ?? adminCounterRpc();
+
+  return applyDecrement(rpc, {
+    userId,
+    operation,
+    windowKind: DAY_WINDOW,
+    windowKey: dayWindowKey(now),
+  });
+}
+
+/**
+ * Refund the reservation actually taken — same window key, same operation, same farmer.
+ *
+ * Two guards, both structural rather than advisory:
+ *
+ *  1. **An inherited reservation refunds nothing** (`reservedHere === false`). The service that
+ *     owns the request owns the refund; a nested `ChatService` handing back a `VoiceService`'s
+ *     unit would decrement a reservation that is still in use.
+ *  2. **The window key comes from the reservation**, so a failure a second after Kolkata midnight
+ *     refunds yesterday's row rather than creating a spare unit in today's.
+ */
+export async function refundReservation(
+  reservation: QuotaReservation,
+  options: QuotaOptions = {},
+): Promise<RefundOutcome> {
+  if (!reservation.reservedHere) {
+    return { refunded: false, used: reservation.used };
+  }
+
+  const rpc = options.rpc ?? adminCounterRpc();
+  return applyDecrement(rpc, {
+    userId: reservation.userId,
+    operation: reservation.operation,
+    windowKind: DAY_WINDOW,
+    windowKey: reservation.windowKey,
+  });
+}
+
+async function applyDecrement(rpc: CounterRpc, key: CounterKey): Promise<RefundOutcome> {
+  const used = await rpc.decrement(key);
+  // NULL means "no row matched", which is either an absent row or one already at zero. Both are
+  // "nothing to give back", and both read as zero.
+  return used === null ? { refunded: false, used: 0 } : { refunded: true, used };
+}
+
+/* ========================================================================== */
+/* status (the successful response envelope)                                   */
+/* ========================================================================== */
+
+/**
+ * Read `used`, `limit`, and `resetsAt` for one farmer and operation.
+ *
+ * `counter_used` is `stable` and coalesces an absent row to zero, so a farmer's first request of
+ * the day reports `used: 0` with no special case. This is a READ: it never increments, which is
+ * why it is safe on a GET and why it is not the thing a request spends its unit through.
+ *
+ * After a successful reserve, prefer `quotaStatusOf(reservation)` — the atomic statement already
+ * returned the post-increment count, so a second round trip could only disagree with it.
+ */
+export async function status(
+  userId: string,
+  operation: Operation,
+  options: QuotaOptions = {},
+): Promise<QuotaStatus> {
+  const now = options.now ?? new Date();
+  const rpc = options.rpc ?? adminCounterRpc();
+
+  const used = await rpc.used({
+    userId,
+    operation,
+    windowKind: DAY_WINDOW,
+    windowKey: dayWindowKey(now),
+  });
+
+  return { operation, used, limit: limitFor(operation), resetsAt: nextResetAtIso(now) };
+}
+
+/** The response envelope's quota block, from the reservation. No I/O. */
+export function quotaStatusOf(reservation: QuotaReservation): QuotaStatus {
+  return {
+    operation: reservation.operation,
+    used: reservation.used,
+    limit: reservation.limit,
+    resetsAt: reservation.resetsAt,
+  };
+}
+
+/* ========================================================================== */
+/* The decline (Requirement 14.3)                                              */
+/* ========================================================================== */
+
+/**
+ * Build the `QUOTA_EXCEEDED` error for an at-limit outcome.
+ *
+ * Requirement 14.3 requires the decline to state the limit and the reset time, and the message
+ * templates in `src/lib/messages/*` read `{limit}`, `{operation}` and `{resetsAt}`. Filling those
+ * here, from the status the check itself produced, is what keeps the sentence and the structured
+ * `details` from disagreeing — the failure mode where a farmer is told "all 20 of today's chat
+ * requests" against a limit of 50.
+ *
+ * `operation` travels in `context` rather than `details` because `toEnvelope()` reads it from
+ * there for the template, and `errorDetailsSchema` has no operation field.
+ *
+ * The code is **not retryable** (`ERROR_SPECS`): the request will succeed after `resetsAt`, but a
+ * retry button that does nothing for hours is worse than no button.
+ */
+export function quotaExceededError(status: QuotaStatus): AppError {
+  return new AppError('QUOTA_EXCEEDED', {
+    details: { limit: status.limit, used: status.used, resetsAt: status.resetsAt },
+    context: { operation: status.operation },
+  });
+}

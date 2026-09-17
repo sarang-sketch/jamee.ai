@@ -1,0 +1,89 @@
+/**
+ * The protected screen surface, as data, plus the one predicate over it.
+ *
+ * Requirements: 1.6 (while a visitor holds no authenticated session, access to the diagnosis,
+ *               chat, voice, and history screens is restricted and the sign-in screen is
+ *               presented instead)
+ * Design: "Frontend" — screens and component boundaries; "Security boundary" — defence in depth
+ *
+ * ### Why the list lives here and not in the Proxy
+ *
+ * `src/proxy.ts` is a Next.js convention file: its export surface is `proxy` plus `config`, so
+ * anything exported from it for a test to read would be a export the framework does not expect.
+ * Keeping the list and the predicate in a module with **no imports at all** also means the whole
+ * decision is unit-testable without a request, a cookie store, or a Supabase client — see
+ * `protected-paths.test.ts`.
+ *
+ * ### Why a list rather than a check inside each page
+ *
+ * Most of the screens named below do not exist yet (tasks 12.2, 13.1, 16.1, 19.2 own them). A
+ * per-page `if (userId === null) redirect('/')` would make the gate a **convention** those tasks
+ * have to remember, and Requirement 1.6 would then be satisfied only for as long as everyone
+ * remembers it. One list, read by one Proxy that runs before any of those pages render, makes the
+ * gate something those pages inherit whether or not their authors know it exists.
+ */
+
+/**
+ * Where a gated visitor lands. `/` renders `SignInForm` (task 6.1), which is what Requirement
+ * 1.6's "present the sign-in screen instead" means concretely.
+ *
+ * `src/app/auth/callback/ensure-profile.ts` declares the same constant for its own no-session
+ * branch. It is not imported here: `src/lib/**` never imports from `src/app/**` (design, project
+ * structure), and that rule is worth more than deduplicating the string `'/'`.
+ */
+export const SIGN_IN_PATH = '/';
+
+/**
+ * Every screen that requires a session, as a path prefix.
+ *
+ * The first four are Requirement 1.6's own enumeration. The last two are the same farmer-private
+ * data reached by another URL, and are gated for that reason rather than by 1.6's letter:
+ *
+ *  - `/diagnosis` is the detail view of a single diagnosis (Requirement 12.3) — the diagnosis
+ *    screen with an id in the path, so leaving it open would gate the list and not the row;
+ *  - `/profile` shows and edits the farmer's own display name and language (Requirement 1.8).
+ *
+ * RLS would return nothing to an anonymous request on any of them (Requirement 13.2), so an
+ * ungated page could not leak a row — it would render an empty screen instead of a sign-in
+ * prompt, which is a worse answer to the same question.
+ *
+ * **`/api/**` is deliberately absent.** An unauthenticated API request must receive the
+ * `AUTH_REQUIRED` envelope with HTTP 401 (Requirement 1.7), not a 307 to an HTML page. That half
+ * of the gate belongs to `lib/api/authenticated-route.ts`, and the Proxy's matcher excludes `/api`
+ * so the two halves cannot answer the same request differently.
+ */
+export const PROTECTED_SCREEN_PATHS = [
+  '/diagnose',
+  '/diagnosis',
+  '/chat',
+  '/voice',
+  '/history',
+  '/profile',
+] as const;
+
+export type ProtectedScreenPath = (typeof PROTECTED_SCREEN_PATHS)[number];
+
+/**
+ * Trailing slashes carry no meaning here. Next normalizes `/history/` to `/history` for the
+ * *route*, but the Proxy sees the path as requested — so the predicate normalizes rather than
+ * letting `/history/` slip past a gate `/history` is behind.
+ */
+function normalize(pathname: string): string {
+  const trimmed = pathname.replace(/\/+$/, '');
+  return trimmed === '' ? '/' : trimmed;
+}
+
+/**
+ * Whether this pathname is part of the protected screen surface.
+ *
+ * Prefix matching is bounded at a segment: `/diagnosis/abc` is inside `/diagnosis`, while
+ * `/diagnose-later` is a different path and is **not** gated by `/diagnose`. Matching on a raw
+ * `startsWith` would silently gate paths nobody listed, which is the kind of over-reach that gets
+ * a gate loosened later.
+ */
+export function isProtectedScreenPath(pathname: string): boolean {
+  const path = normalize(pathname);
+  return PROTECTED_SCREEN_PATHS.some(
+    (protectedPath) => path === protectedPath || path.startsWith(`${protectedPath}/`),
+  );
+}

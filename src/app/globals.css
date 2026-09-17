@@ -1,0 +1,155 @@
+/*
+ * The layout shell: the four mobile-first rules, decided once.
+ *
+ * Design: "Frontend — Mobile layout and accessibility" — mobile-first, single column, tap targets
+ * at least 44×44 px, primary actions in thumb reach, body text in relative units so it scales
+ * with the OS font setting. Requirements 9.1 and 9.3 (English, Hindi and Marathi are all readable
+ * on the same screens).
+ *
+ * Every screen module and every component module reads the tokens below rather than restating the
+ * decision. Before this file owned them, the 44 px floor was spelled `2.75rem` in nine places with
+ * the arithmetic re-explained each time, and heading line-height had drifted to 1.2 across all
+ * seven screen shells — which is the one value Devanagari cannot survive (see `--line-height-tight`).
+ *
+ * ── The font stack ──────────────────────────────────────────────────────────────────────────
+ *
+ * Hindi and Marathi are written in Devanagari, so a Latin-only stack renders tofu boxes for two of
+ * the three Supported_Languages. No webfont is loaded — a farmer on a metered 2G connection should
+ * not pay for one — so the stack names the Devanagari families that actually ship on each target
+ * platform and lets the browser fall back per glyph: Latin text takes the first family that has the
+ * glyph, Devanagari text takes the first family that has *its* glyph, in the same declaration.
+ *
+ *   Android          Noto Sans Devanagari (bundled since 4.4; the platform Devanagari face)
+ *   iOS / macOS      Kohinoor Devanagari (iOS 9.3+), Devanagari Sangam MN (older iOS, macOS)
+ *   Windows          Nirmala UI (Windows 8+), Mangal (older)
+ *   Linux            Lohit Devanagari, Samyak Devanagari (common distro packages)
+ *
+ * The iOS entries are the reason this list is not shorter. iOS would eventually reach Kohinoor
+ * through its own fallback chain, but only after the named Latin families miss — an implicit path
+ * that changes between OS versions. Naming it makes the coverage a decision rather than a bet.
+ *
+ * ── Line height ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Devanagari needs more leading than Latin at the same font size. A base glyph carries the
+ * shirorekha (the headstroke) at its top; vowel signs stack *above* that (ि ी े ै ो ौ) and *below*
+ * the baseline (ु ू ृ), and conjuncts (क्त, द्ध) descend further still. The used ascent-plus-descent
+ * of a Devanagari face therefore exceeds 1.2 em, so at `line-height: 1.2` the upper matras of one
+ * line collide with the lower matras of the line above and clip against a container edge. Latin
+ * text at 1.2 looks fine, which is exactly why the drift was invisible.
+ *
+ * Two tokens, and nothing in the app may go below the tighter one:
+ *
+ *   --line-height-base    1.6   body copy, and the default everything inherits
+ *   --line-height-tight   1.35  headings and other short single- or two-line strings
+ *
+ * `tests/unit/mobile-layout.test.ts` enforces that floor across every stylesheet, because the
+ * failure mode is a clipped matra on a Marathi heading — invisible to anyone reading English.
+ *
+ * ── Tap targets ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `--tap-target-min` is 44 px at the default root font size and grows with the OS font setting.
+ * A literal `44px` would stay 44 px while the label inside it grew, so the text would clip out of
+ * a target that is nominally still the right size. The token is a floor in *both* axes: a control
+ * 44 px tall and 20 px wide is not a 44×44 target.
+ *
+ * ── No time-driven CSS, anywhere ────────────────────────────────────────────────────────────
+ *
+ * Requirement 15.2 forbids simulated or time-based progress. There is no `transition`, `animation`
+ * or `@keyframes` in any stylesheet in this project, and the same test asserts that. Having no
+ * animation primitive available is the point: an honest indicator is real text bound to a real
+ * request state, and a decorative pulse is one refactor away from becoming a fake progress bar.
+ *
+ * ── Contrast ────────────────────────────────────────────────────────────────────────────────
+ *
+ * The design targets WCAG 2.1 AA, which is 4.5:1 for body text. Task 26.2 recomputed every
+ * foreground/background pair declared in the same rule across all stylesheets, from the sRGB
+ * relative-luminance formula, and every one of them clears 4.5:1. The two figures the modules
+ * state in their own comments are accurate: `#ffffff` on `#15803d` — the primary control on
+ * `SignInForm`, `ProfileForm`, `ImageUploader`, `EmptyState` and `VoiceRecorder`'s hold button —
+ * is 5.02:1.
+ *
+ * The tightest pair in the app is `#64748b` on white (`HistoryList`'s fact labels) at 4.76:1, and
+ * 4.55:1 against the `#f8fafc` the entry takes on hover. Both pass, with less headroom than
+ * anything else here, so that is the pair to measure first if a colour ever moves.
+ *
+ * **This is a computed check on declared values, not a conformance claim.** It says nothing about
+ * text over an image, about a colour a device's night mode or contrast setting substitutes, or
+ * about what a rendered pixel actually measures. Contrast as rendered — and WCAG 2.1 AA as a
+ * whole, which the design already records as needing a screen-reader pass and expert review —
+ * belongs to the manual device pass in task 30.1.
+ *
+ * ── Colour is never the only carrier ────────────────────────────────────────────────────────
+ *
+ * Severity is label text **plus** a filled-dot count that is the same ink at every level
+ * (`src/lib/severity.ts`). Error banners pair their red with a left rule and `role="alert"`. The
+ * recorder's held state changes its border width as well as its fill, and states itself in words
+ * in the adjacent status line. No rule in this project encodes meaning in hue alone.
+ */
+:root {
+  --font-sans:
+    'Noto Sans', 'Noto Sans Devanagari', 'Kohinoor Devanagari', 'Devanagari Sangam MN',
+    'Nirmala UI', Mangal, 'Lohit Devanagari', 'Samyak Devanagari', system-ui, -apple-system,
+    'Segoe UI', Roboto, Arial, sans-serif;
+
+  --font-size-base: 1rem;
+  --line-height-base: 1.6;
+  --line-height-tight: 1.35;
+
+  /* 2.75rem = 44 px at the default root size (design: tap targets ≥ 44×44 px). */
+  --tap-target-min: 2.75rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Respect the browser/OS root font size — never pin it to a px value. */
+  font-size: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+
+  /*
+   * The single-column guarantee, and the one rule that most needs to be global.
+   *
+   * Requirement 9.4 keeps a Canonical_Disease_Name in its Latin scientific form inside otherwise
+   * Devanagari text, so `Alternaria solani` — one long unbreakable token to the line breaker —
+   * lands in the middle of a Marathi sentence on a 320 px viewport. Left alone it widens the
+   * layout and the whole screen scrolls sideways, which is what breaks single column in practice.
+   *
+   * `overflow-wrap` is an inherited property, so declaring it here covers every descendant.
+   * A module may still escalate to `anywhere` where a fixed-width cell needs a mid-word break
+   * (`HistoryList`, `ChatThread`) — that is a deliberate strengthening, not a different rule.
+   */
+  overflow-wrap: break-word;
+}
+
+/*
+ * Nothing may be intrinsically wider than its column. A crop photo straight off a phone camera is
+ * ~4000 px wide, and one unconstrained `<img>` is enough to turn a single-column screen into a
+ * horizontally scrolling one.
+ */
+img,
+svg,
+video {
+  max-width: 100%;
+}
+
+/*
+ * Headings inherit the Devanagari-safe tight leading by default, so a new screen gets it without
+ * having to know about it. `h1`–`h4` only: `h5`/`h6` render at body size and read as body copy.
+ */
+h1,
+h2,
+h3,
+h4 {
+  line-height: var(--line-height-tight);
+}

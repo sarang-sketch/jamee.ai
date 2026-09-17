@@ -1,0 +1,66 @@
+/*
+ * Empty-state block.
+ *
+ * Design: "Mobile layout and accessibility" — mobile-first, single column, tap targets at least
+ * 44x44 px, primary actions in thumb reach. Every size is relative so a larger OS font setting
+ * grows the block with the text instead of clipping it.
+ */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.5rem 1.25rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 0.75rem;
+  background: #f8fafc;
+}
+
+.message {
+  margin: 0;
+  color: #334155;
+}
+
+/*
+ * The tap-target floor from `globals.css` rather than a literal `px`, so this link keeps its
+ * 44 px minimum when a farmer has enlarged their system font instead of clipping its own label.
+ *
+ * Both axes, like every other target in the app: the label is short enough ("Check a crop") that a
+ * narrow translation plus this padding could come in under 44 px wide, and a control 44 px tall and
+ * 30 px wide is not a 44×44 target. `inline-flex` keeps it from stretching to the column width.
+ */
+.action {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-target-min);
+  min-width: var(--tap-target-min);
+  padding: 0.5rem 1.25rem;
+  border-radius: 0.5rem;
+  background: #15803d;
+  color: #ffffff;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/*
+ * Behind `hover: hover`, for the same reason `HistoryList` guards its own: a touch browser matches
+ * `:hover` on whatever was tapped last and holds it there, so an unguarded rule leaves this link
+ * looking pressed after a farmer has come back from following it. `:focus-visible` below is the
+ * signal that does belong on a device with no pointer, and it is unaffected.
+ */
+@media (hover: hover) {
+  .action:hover {
+    background: #166534;
+  }
+}
+
+/*
+ * A visible focus ring, and one that does not rely on the browser default being kept. Keyboard
+ * operability is part of the accessibility commitment in the design, and this link is the only
+ * control on the screen when it renders.
+ */
+.action:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
+}

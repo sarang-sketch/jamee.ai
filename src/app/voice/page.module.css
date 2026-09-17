@@ -1,0 +1,23 @@
+/*
+ * Voice screen shell.
+ *
+ * Design: "Mobile layout and accessibility" — mobile-first, single column, primary actions in
+ * thumb reach. Same shape and the same reasoning as `app/chat/page.module.css`: sizes are relative
+ * so a larger OS font setting widens the column with the text instead of squeezing it, and there is
+ * no time-driven CSS anywhere (Requirement 15.2). Leading comes from `globals.css`,
+ * which owns the Devanagari floor.
+ */
+
+.page {
+  max-width: 26rem;
+  margin: 0 auto;
+  /* Bottom padding keeps the record controls clear of a phone's browser chrome. */
+  padding: 1.5rem 1rem 4rem;
+  color: #1f2937;
+}
+
+.heading {
+  margin: 0 0 1.25rem;
+  font-size: 1.75rem;
+  line-height: var(--line-height-tight);
+}

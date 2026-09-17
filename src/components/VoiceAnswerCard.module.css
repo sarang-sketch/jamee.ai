@@ -1,0 +1,73 @@
+/*
+ * Transcript-above-answer rendering for `/voice`.
+ *
+ * Design: "Mobile layout and accessibility" — single column, relative units so text scales with
+ * the OS font setting, contrast at WCAG 2.1 AA.
+ *
+ * Two rules carried over from `DiagnosisResultCard.module.css`, for the same reasons:
+ *
+ *  - **No `px` on anything a farmer reads.** Every size is in `rem` so a larger OS font setting
+ *    grows the text instead of clipping it.
+ *  - **No transitions, no animations, no keyframes, and no spinner rule.** Requirement 15.2
+ *    forbids simulated progress, and the cheapest way to keep that true is to have no time-driven
+ *    CSS anywhere in the flow. The only indicators on this screen are the real state lines
+ *    `VoiceRecorder` renders while its recording, upload or request is open.
+ *
+ * The transcript and the answer are plain stacked blocks rather than chat bubbles: this screen
+ * shows one turn, and Requirement 8.6's ordering is carried by DOM order and headings, which is
+ * what a screen reader follows. Nothing here reorders them visually.
+ */
+
+/*
+ * The live region. Present in the DOM from first render — including while empty — because a polite
+ * live region that is inserted together with its text is not reliably announced.
+ */
+.region {
+  display: block;
+  margin-top: 1.5rem;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+  color: #1f2937;
+  background-color: #ffffff;
+  border: 1px solid #4b5563;
+  border-radius: 0.5rem;
+}
+
+.block {
+  display: block;
+}
+
+/*
+ * "What Jamee heard" / "Jamee's answer". Real headings rather than styled paragraphs, so the two
+ * blocks are navigable and the transcript is announced as a labelled section rather than as text
+ * that happens to precede the answer.
+ */
+.blockHeading {
+  margin: 0 0 0.375rem;
+  font-size: 1.0625rem;
+  line-height: var(--line-height-tight);
+}
+
+/*
+ * A transcript arrives as one long line, so it leans on the inherited `overflow-wrap` from
+ * `globals.css` rather than restating it, and on `--line-height-base` for the Devanagari leading —
+ * matras sit above and below the baseline, which is why that value is not the Latin default.
+ */
+.body {
+  margin: 0;
+  font-size: 1.0625rem;
+  line-height: var(--line-height-base);
+}
+
+/*
+ * Placement only — `ErrorBanner.module.css` owns how the banner looks. The recorder above it is not
+ * a flex container, so the separation is a margin here rather than a `gap` there.
+ */
+.errorSlot {
+  margin-top: 1rem;
+}

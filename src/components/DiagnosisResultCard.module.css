@@ -1,0 +1,150 @@
+/*
+ * Diagnosis result rendering.
+ *
+ * Design: "Mobile layout and accessibility" — single column, relative units so text scales with
+ * the OS font setting, contrast at WCAG 2.1 AA, and severity never conveyed by colour alone.
+ *
+ * Two rules carried over from `ImageUploader.module.css`, for the same reasons:
+ *
+ *  - **No `px` on anything a farmer reads.** Every size is in `rem` so a larger OS font setting
+ *    grows the text instead of clipping it.
+ *  - **No transitions, no animations, no keyframes, and no spinner rule.** Requirement 15.2
+ *    forbids simulated progress, and the cheapest way to keep that true is to have no
+ *    time-driven CSS anywhere in the flow. The only honest indicator in this screen is the real
+ *    text the uploader renders while its request is open.
+ *
+ * There is deliberately **no severity colour scale** here either. Requirement 15.4's
+ * accessibility note and the design both require severity to be carried by label text; a red
+ * card for `high` would invite exactly the colour-only reading the design rules out, and the
+ * `severity` catalog entry ("Mild" / "Moderate" / "Severe") already says it in words.
+ */
+
+/*
+ * The live region. Present in the DOM from first render — including while empty — because a
+ * polite live region that is inserted together with its text is not reliably announced.
+ */
+.region {
+  display: block;
+  margin-top: 1.5rem;
+}
+
+/*
+ * There is no off-screen label rule here any more. The region is named by the screen's own visible
+ * `<h1>` (task 26.2, matching `/chat` and `/voice`), so the app has no visually-hidden heading left
+ * to keep translated — and no class whose whole job is to hide text from the farmer who paid for it.
+ */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  padding: 1rem;
+  color: #1f2937;
+  background-color: #ffffff;
+  border: 1px solid #4b5563;
+  border-radius: 0.5rem;
+}
+
+/*
+ * The canonical condition name, or the inconclusive label. Latin script for the former
+ * (Requirement 9.4), so the element carries its own direction and is isolated from a
+ * Devanagari surrounding.
+ */
+.conditionName {
+  margin: 0;
+  font-size: 1.375rem;
+  line-height: var(--line-height-tight);
+}
+
+.canonical {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Severity and confidence as a description list: label text, then value text. */
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+}
+
+.factLabel {
+  margin: 0;
+  font-weight: 600;
+}
+
+.factValue {
+  margin: 0;
+}
+
+/*
+ * The severity dots (`src/lib/severity.ts`). Deliberately the SAME colour at every level: what
+ * distinguishes `high` from `low` is how many circles are filled, which is a quantity rather than a
+ * hue, and giving them a per-severity colour would put back exactly the colour-only encoding the
+ * header rules out. `currentColor` is inherited from `.card`, so it also cannot drift from the
+ * label text next to it.
+ *
+ * `letter-spacing` because three circles set solid read as one blob at body size; the tenth of an em
+ * is what makes them countable. `margin-inline-end` separates the icon from the word without a
+ * non-breaking space in the markup, so a screen reader that ever did read this subtree would not
+ * find the two run together.
+ */
+.severityIcon {
+  margin-inline-end: 0.4375rem;
+  letter-spacing: 0.1em;
+  color: currentColor;
+}
+
+.explanation {
+  margin: 0;
+  font-size: 1.0625rem;
+  /* The body token rather than a local ratio — `globals.css` owns the Devanagari leading. */
+  line-height: var(--line-height-base);
+}
+
+/*
+ * The needs-expert banner. Not `role="alert"`: it is part of a result the surrounding polite
+ * live region already announces, and an assertive alert would interrupt that announcement
+ * mid-sentence. The left rule plus the heavier weight carry it without relying on colour.
+ */
+.needsExpert {
+  margin: 0;
+  padding: 0.75rem;
+  font-weight: 600;
+  color: #713f12;
+  background-color: #fefce8;
+  border-left: 0.25rem solid #a16207;
+  border-radius: 0.25rem;
+}
+
+.sectionHeading {
+  margin: 0 0 0.375rem;
+  font-size: 1.0625rem;
+}
+
+.list {
+  margin: 0;
+  /* Room for the marker without a hanging indent that fights a long Devanagari line. */
+  padding-left: 1.25rem;
+  line-height: var(--line-height-base);
+}
+
+.list > li + li {
+  margin-top: 0.25rem;
+}
+
+.source {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: #374151;
+}
+
+/*
+ * Placement only. The banner's appearance lives in `ErrorBanner.module.css`; what this screen
+ * decides is that a failure sits the same distance below the uploader as the result region does,
+ * because it stands in the same place in the column.
+ */
+.errorSlot {
+  margin-top: 1.5rem;
+}

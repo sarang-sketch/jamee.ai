@@ -1,0 +1,38 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next.js build output
+/.next/
+/out/
+/build
+next-env.d.ts
+
+# testing
+/coverage
+
+# typescript
+*.tsbuildinfo
+
+# local env files — never commit real secrets (.env.example is committed, see task 2.2).
+# Ignore EVERY .env* file and re-admit only the example. Listing variants instead (.env,
+# .env.local, .env*.local) left .env.production, .env.development and .env.test committable.
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# logs — deliberately broad: captured test/build output (e.g. baseline-test.log from a
+# vitest run) belongs here and must never be versioned, since it goes stale immediately.
+*.log
+# The package-manager entries stay: their trailing * also covers rotated/compressed
+# variants (npm-debug.log.1, yarn-error.log.gz) that *.log alone would not match.
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# editors / os
+.DS_Store
+*.pem

@@ -1,0 +1,52 @@
+/*
+ * Language switcher styles.
+ *
+ * Design: "Mobile layout and accessibility" — tap targets at least 44×44 px, body text in
+ * relative units so it scales with the OS font setting, contrast at WCAG 2.1 AA.
+ *
+ * Same two rules as SignInForm.module.css, for the same reasons:
+ *
+ *  - **No `px` on anything a farmer reads or taps.** Every size is `rem`, and the tap-target
+ *    floor is `--tap-target-min` from `globals.css` — 44 px at the default root size, growing
+ *    with the OS font setting. A literal `44px` would stay 44 px while its label grew and clip.
+ *  - **No transitions, no animations.** Requirement 15.2 forbids simulated progress, and having
+ *    no time-driven CSS at all is the cheapest way to keep that true.
+ */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  /* Narrow enough not to look like a text input, wide enough for `English` plus the caret. */
+  max-width: 12rem;
+  /*
+   * The one piece of outer spacing this component owns. The switcher sits at the top of a screen
+   * in every use, and leaving it flush against the heading below reads as a rendering fault
+   * rather than as a design choice.
+   */
+  margin: 0 0 1.5rem;
+}
+
+.label {
+  font-weight: 600;
+}
+
+.select {
+  min-height: var(--tap-target-min);
+  min-width: var(--tap-target-min);
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  /* 1.125rem keeps iOS from zooming the viewport on focus, and stays relative. */
+  font-size: 1.125rem;
+  /* Inherit the shell's Devanagari-capable stack rather than the UA's form-control default. */
+  font-family: inherit;
+  color: #1f2937;
+  background-color: #ffffff;
+  border: 1px solid #4b5563;
+  border-radius: 0.375rem;
+}
+
+.select:focus-visible {
+  outline: 3px solid #0f766e;
+  outline-offset: 2px;
+}
