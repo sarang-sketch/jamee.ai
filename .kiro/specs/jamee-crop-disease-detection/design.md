@@ -2,7 +2,7 @@
 
 ## Overview
 
-Jamee is a Next.js App Router application (TypeScript strict mode) deployed on Vercel, backed by Supabase for auth, Postgres, and private object storage. It reaches farmers through two channels — the browser and WhatsApp — and both channels are thin transports in front of the same three domain services: `DiagnosisService`, `ChatService`, `VoiceService` (Requirement 16).
+Jamee is a Next.js App Router application (TypeScript strict mode) deployed on Vercel, backed by Supabase for auth, Postgres, and private object storage. It reaches farmers through two channels — the browser and Telegram — and both channels are thin transports in front of the same three domain services: `DiagnosisService`, `ChatService`, `VoiceService` (Requirement 16). The browser channel is free to every signed-in farmer; the Telegram channel answers only a farmer who has linked a Telegram account and holds a one-time `Bot_Entitlement` (Requirements 21, 22).
 
 Three design commitments shape everything below:
 
@@ -10,7 +10,7 @@ Three design commitments shape everything below:
 2. **The verified-condition enum is the safety gate.** It lives in one place, is shared by the TypeScript types, the Zod schemas, and a Postgres check constraint. A model naming anything else fails validation and collapses into a single `Inconclusive_Result` shape (Requirements 5.6, 6.1, 6.4).
 3. **The browser never sends bytes to the API.** Images and audio go browser → Supabase Storage directly; route handlers receive only a storage reference (Requirements 2.1, 8.1). This keeps request bodies far under the platform body limit (Requirement 2.7).
 
-This design covers Phases 1–6. Requirements 18 and 19 are deferred and appear only in the forward-compatibility note.
+This design covers Phases 1–6, plus Requirements 21 and 22, which the Telegram channel turned out to require. Requirements 19 and 20 (video frames, expert calling) are deferred and appear only in the forward-compatibility note.
 
 ### Three kinds of limits, kept separate
 
@@ -26,6 +26,19 @@ Jamee's application quotas are the only limit this codebase enforces. Provider l
 
 ---
 
+## Amendment A1 — Telegram channel, Google sign-in, linking, and payment
+
+> Status: IN FORCE. This amendment tracks requirements Amendment A1 together with the two requirements added after it, 21 (Telegram Account Linking) and 22 (Payment And Bot Entitlement). It **supersedes** parts of this document rather than extending them, so a reader who implemented the earlier design should treat the following as replaced and re-read the sections named:
+>
+> 1. **The second channel is Telegram, and every WhatsApp mechanism in this document is withdrawn.** Gone: the Meta Graph API version pin, the `X-Hub-Signature-256` HMAC over the raw body, the GET verification handshake, the two-step media retrieval, the WAMID as the deduplication key, and the 24-hour customer-service window. The section formerly titled *WhatsApp adapter* is now *Telegram adapter*; the `whatsapp_inbound` table is now `telegram_inbound`, keyed on `update_id`; and the `channel` value is `'telegram'` everywhere it was `'whatsapp'`. The reason is cost rather than capability: WhatsApp conversation pricing sits outside the zero-cost footprint this release targets.
+> 2. **Web sign-in is Google OAuth through `signInWithOAuth({ provider: 'google' })`.** Gone: phone OTP, the SMS provider, the `SignInForm` phone-and-code flow, the `OTP_INVALID` error code, the manual "real SMS delivery" test, and V2. Removing SMS removed this project's only standing bill; the Payment_Provider added below is not a replacement for it, because its charge is a per-transaction fee out of money a farmer pays rather than an amount Jamee owes (Requirements 1.10, 22.26).
+> 3. **Identity is the Supabase auth user id, and `profiles.phone` is no longer an identity column.** It becomes nullable optional contact information with neither `NOT NULL` nor `UNIQUE`, and it takes part in no resolution of any kind. Inbound Telegram senders resolve through `profiles.telegram_user_id` (nullable, `UNIQUE`), which is written only by the linking flow. See **D8**, which is amended in place and explains why the E.164 normalizer disappears with the identity it existed for.
+> 4. **Two capabilities are new and in scope:** account linking by single-use expiring token (**D13**) and a one-time payment that grants a permanent entitlement gating the bot (**D14**, **D15**). Both add tables, routes, and RLS policies; neither touches the three shared services.
+> 5. **D7, D8, and D11 are amended in place and keep their numbers.** D12 through D16 are new. D1–D6, D9, and D10 are untouched. Properties 1–31 keep their numbers and their statements; the ones this amendment falsifies are listed at the head of *Correctness Properties* and restated by a follow-up task, not here.
+> 6. **What this amendment does not change.** Supabase remains auth, database, and storage. The three shared services, the two-stage validation of D2, the single inconclusive shape of D3, the quota and counter design, the error-envelope shape, and the whole media-lifecycle and retention design are untouched in substance — only their channel names and their phone references are corrected. One thing improves: Requirement 10.6 becomes satisfiable, because Telegram voice notes are OGG/Opus and V10's accepted container list includes `ogg`, so the `audio/aac` and `audio/amr` hole recorded against V14 closes along with the channel that opened it.
+
+---
+
 ## Values to verify before coding
 
 Every item below depends on a third-party detail that changes over time. **No value in this table is asserted as fact anywhere else in this design.** The first implementation task resolves this table and records the findings in the API/deployment documentation.
@@ -33,7 +46,7 @@ Every item below depends on a third-party detail that changes over time. **No va
 | # | Value | Where it is used | Doc to check |
 | --- | --- | --- | --- |
 | V1 | Supabase JS client package name and version; browser vs. server client factory names; App Router cookie/session wiring | `src/lib/supabase/*` | Supabase JavaScript client and Next.js server-side auth guides |
-| V2 | Phone/SMS OTP sign-in enablement and which SMS provider must be configured in the Supabase dashboard | Requirement 1.1, deployment docs | Supabase phone auth documentation |
+| V2 | **RETIRED by Amendment A1.** Was: phone/SMS OTP enablement and which SMS provider to configure. Jamee registers no SMS provider at all. Superseded by **V23** | — | — |
 | V3 | Signed URL creation call, its expiry argument, and units (seconds vs. ms) | Requirements 2.8, 12.5 | Supabase Storage signed URL reference |
 | V4 | Storage RLS policy helper for path segments (the function that extracts the first folder of an object name) and the bucket-privacy setting name | Requirements 13.5, 13.6 | Supabase Storage access control docs |
 | V5 | Whether a trigger on `auth.users` is the supported profile-bootstrap pattern, and the required `security definer` / `search_path` form | Requirement 1.4 | Supabase auth + Postgres function security docs |
@@ -43,21 +56,28 @@ Every item below depends on a third-party detail that changes over time. **No va
 | V9 | **Whether Groq currently hosts a vision-capable model**, and its identifier if so. This single fact decides whether an image-interpretation fallback exists at all (see Fallback matrix) | `src/lib/groq.ts` | Groq models documentation |
 | V10 | Speech-to-text: which host serves Whisper, the exact model identifier, the endpoint/SDK method, accepted audio container/codec list, and the provider's own max file size and max duration | `src/lib/groq.ts` (or a dedicated transcription adapter) | Provider's audio transcription documentation |
 | V11 | Provider error shapes: how a rate-limit condition and an unavailability condition are signalled (HTTP status, error code, header names for retry-after) for both Gemini and Groq | `AiGateway` fallback trigger | Both providers' error-handling docs |
-| V12 | Meta WhatsApp Business Cloud API version string to pin, and the exact inbound webhook payload field paths for text, image, and audio messages, plus the message id field | `src/lib/whatsapp.ts` | Meta WhatsApp Cloud API webhooks reference |
-| V13 | Meta signature header name and HMAC algorithm/encoding for POST verification | Requirement 11.3 | Meta webhook payload-verification docs |
-| V14 | Meta two-step media retrieval (media id → media URL → authenticated binary fetch), and required auth header on the binary fetch | Requirement 10.4 | Meta WhatsApp media reference |
-| V15 | Meta send-message endpoint shape for a text reply, and any 24-hour customer-service-window constraint on unsolicited replies | Requirement 10.x replies | Meta WhatsApp messages reference |
+| V12 | **RETIRED by Amendment A1.** Was: the Graph API version string to pin and the inbound WhatsApp field paths. Telegram publishes one unversioned Bot API surface, so there is no version to pin. Superseded by **V24** | — | — |
+| V13 | **RETIRED by Amendment A1.** Was: Meta's signature header name and HMAC algorithm/encoding. Telegram authenticates by a shared secret token, so there is no digest and no hex-vs-base64 encoding question (**D12**). Superseded by **V24** | — | — |
+| V14 | **RETIRED by Amendment A1.** Was: Meta's two-step media retrieval and its inbound audio container set — the row that recorded the unsatisfiable half of Requirement 10.6. Superseded by **V25** and **V26** | — | — |
+| V15 | **RETIRED by Amendment A1.** Was: Meta's send-message endpoint and the 24-hour customer-service window. Telegram has no reply window and no template requirement (see **D11**). Superseded by **V24** | — | — |
 | V16 | Vercel serverless **request body limit** (spec assumes 4.5 MB) and the **maximum `maxDuration`** permitted on the target plan (spec assumes 60 s) | Requirements 2.7, 3.6, 10.10 | Vercel functions limits documentation |
 | V17 | Next.js route segment config for per-route duration (`maxDuration` export) and its accepted values | `src/app/api/*/route.ts` | Next.js route segment config documentation |
-| V18 | Whether Vercel exposes a supported post-response continuation primitive (e.g. `waitUntil`) on the target plan/runtime | WhatsApp acknowledgement strategy | Vercel functions documentation |
+| V18 | Whether Vercel exposes a supported post-response continuation primitive (e.g. `waitUntil`) on the target plan/runtime | Telegram acknowledgement strategy (D11) | Vercel functions documentation |
 | V19 | Free-tier allowances: Gemini RPM/RPD, Groq RPM/TPD, Supabase database size / storage / egress, Vercel invocation and duration allowances | Requirement 17.7 sizing note | Each provider's pricing/limits page |
 | V20 | MediaRecorder MIME support on target Android browsers (which container/codec actually records) and whether it matches V10's accepted list | `src/components/VoiceRecorder.tsx` | MDN MediaRecorder compatibility data |
 | V21 | Whether the deployment platform offers a **scheduled invocation** primitive on the target plan, its minimum interval, and how it authenticates the call it makes | Retention sweep trigger (Requirement 18.3, 18.4) | Deployment platform scheduled-jobs documentation |
 | V22 | Storage object **deletion and age query** surface: the batch delete call and its path semantics, whether deleting an absent object errors, and whether `storage.objects` exposes a creation timestamp usable for age filtering | `src/lib/storage.ts`, `src/services/retention.service.ts` (Requirements 8.9, 18.3, 18.4, 18.10) | Supabase Storage delete reference and storage schema docs |
+| V23 | Supabase Google OAuth: the `signInWithOAuth({ provider: 'google' })` call shape and its `redirectTo` option, the callback-route code-exchange helper name, where the Google client id and secret are configured, which redirect URLs must be registered, and which claim carries the Google email onto `auth.users` | `src/lib/supabase/*`, `src/app/auth/callback/route.ts` (Requirements 1.1–1.4) | Supabase social login (Google) and server-side auth docs |
+| V24 | Telegram Bot API **method and update shapes**: `setWebhook` including its `secret_token` parameter and any length/character constraints on that token; the exact header name Telegram presents it in; the `Update` field paths for `update_id`, `message.from.id`, `message.text`, `message.photo[]`, `message.voice`, and the `/start` payload; `sendMessage` request shape and its text length cap; and Telegram's **retry behaviour on a non-200 response**, which D11's acknowledgement reasoning depends on | `src/lib/telegram.ts`, `src/app/api/telegram/route.ts` (Requirements 10.1–10.11, 11.1–11.8) | Telegram Bot API reference |
+| V25 | Telegram **file retrieval**: `getFile(file_id)` → `file_path`, the download URL form built from the bot token and that path, the documented validity window of a `file_path`, and the bot-download size ceiling | Telegram adapter media fetch (Requirements 10.4, 10.6) | Telegram Bot API `getFile` reference |
+| V26 | Telegram **inbound media facts**: that a `voice` message is always OGG/Opus and how it differs from `audio` and `document`, the `mime_type` and `file_size` fields actually present on each, and which entry of the `photo[]` size array to take for diagnosis. This row carries the fact that makes Requirement 10.6 satisfiable, so it is load-bearing rather than incidental | `src/lib/telegram.ts` (Requirements 10.4, 10.6, 10.9) | Telegram Bot API message-type reference |
+| V27 | Razorpay: order-creation endpoint and request/response shape, which identifiers the browser checkout needs, the **webhook signature scheme** (header name, HMAC algorithm, encoding, and which secret keys it), the **event names** for a captured and a failed payment, the payload paths for the payment id, order id, amount, and status, and the difference between test and live mode credentials (requirements O22-3) | `src/lib/razorpay.ts`, `src/app/api/payment/*` (Requirements 22.1–22.11, 22.25) | Razorpay orders, checkout, and webhooks documentation |
 
 Rule for implementation: if a V-item cannot be confirmed, the code must fail loudly at startup (missing env var / unsupported model) rather than fall back to a guessed value.
 
 V21 and V22 were added by the media-lifecycle amendment. They are the only third-party facts the retention design depends on, and neither blocks the *deletion logic* — V21 blocks only the automatic trigger, for which a documented manual fallback exists (see *Media lifecycle and retention*).
+
+V23 through V27 were added by Amendment A1, and V2 and V12–V15 were retired by it. The retired rows are left in place with their numbers rather than deleted, because `docs/VERIFIED_VALUES.md` resolved several of them with source URLs and dated notes, and a reader arriving from that file needs to find the number they came for and learn that it no longer applies. Note what the retirement costs: V14's resolved row is the only record of why Requirement 10.6 was unsatisfiable under the old channel, and V13's is the only record of the signature-encoding ambiguity Jamee had to accept. Both problems are now historical, and **D12** says why the replacement is not a downgrade.
 
 ---
 
@@ -75,15 +95,57 @@ V21 and V22 were added by the media-lifecycle amendment. They are the only third
 
 **D6 — The "temporarily busy" literal is the English rendering of a coded error.** Requirement 14.5 specifies exact English text; Requirement 15.3 requires localization. Decision: error code `PROVIDERS_UNAVAILABLE` renders as exactly `Jamee is temporarily busy. Please try again shortly.` for `en`, with hi/mr equivalents in the catalog. Tests assert the English string byte-for-byte.
 
-**D7 — Channel parity means one code path and identical structured fields, not identical prose.** Requirement 10.7 says WhatsApp returns "the same Diagnosis_Result content" as the web. Language models are not bit-deterministic. Parity is defined as: same `DiagnosisService` invocation, same knowledge-base row, identical `status`, `disease_name`, `severity`, and `needs_expert`. Explanation wording may differ between two runs of the same image on either channel. Classification runs at the lowest available temperature (V7) to maximize agreement.
+**D7 — Channel parity means one code path and identical structured fields, not identical prose — and it is asserted only where the farmer holds a Bot_Entitlement.** *Amended by Amendment A1.* Requirements 10.7 and 10.13 require the Telegram channel to agree with the web channel on the content of a Diagnosis_Result. Language models are not bit-deterministic, so parity is defined structurally: same `DiagnosisService` invocation, same knowledge-base row, identical `status`, `disease_name`, `severity`, and `needs_expert`. Explanation wording may differ between two runs of the same image on either channel. Classification runs at the lowest available temperature (V7) to maximize agreement.
 
-**D8 — Profile creation uses a database trigger plus an idempotent server-side upsert.** Requirement 1.4 attributes profile creation to the Web_App. A purely client-driven insert can be skipped (user closes the tab), which would silently break WhatsApp phone resolution (Requirement 10.2). Mechanism: `on auth.users insert` trigger writes the row with the E.164 phone; the post-sign-in server action upserts defensively. Observable outcome matches 1.4.
+The amendment adds a guard and takes nothing away. Under Requirement 22.13 an update from a linked farmer who holds no entitlement produces no Diagnosis_Result at all — the gate replies and returns before any service is invoked — so there is nothing on the Telegram side to compare, and an unguarded parity claim would be *unsatisfiable* for that farmer rather than merely unexercised. Parity is therefore stated as: **where the submitting farmer holds a Bot_Entitlement**, the two channels agree on those four fields. Where the guard does not hold, the correct Telegram outcome is the gated reply of 22.14, and that is not a parity failure. Note what the guard does not do: it does not weaken parity where it applies, and it introduces no entitlement-dependent branch inside `DiagnosisService`. The gate lives in the adapter, ahead of the service (**D14**), so the service still has exactly one behaviour and the parity test still exercises one code path.
+
+**D8 — Profile creation uses a database trigger plus an idempotent server-side upsert, and it copies no phone number.** *Amended by Amendment A1.* Requirement 1.4 attributes profile creation to the Web_App. A purely client-driven insert can be skipped — the farmer closes the tab on the callback — and a farmer with no `profiles` row has no preferred language, no linking state, and nothing for an entitlement to hang off. So the obligation survives unchanged: an `on auth.users insert` trigger writes the row, and the post-sign-in server action upserts defensively. V5 records that Supabase documents the trigger as the supported pattern *and* warns that a failing trigger blocks sign-up, which is precisely why the upsert is the second half rather than the whole mechanism.
+
+What changes is what gets copied. The trigger now writes `(id, email)` from the new `auth.users` row and writes **no** phone (Requirement 1.4 is explicit that the bootstrap stores no phone number). The `profiles.phone` column survives as nullable optional contact information with no constraint and no reader (Requirement 1.9).
+
+**The E.164 normalizer goes away with it, and this is worth stating rather than leaving a reader to notice a deletion.** Under phone identity the bootstrap had a production-blocking defect: Supabase Auth stores `auth.users.phone` with the leading `+` stripped, while `profiles.phone` carried a `check (phone ~ '^\+[1-9][0-9]{7,14}$')` constraint and inbound WhatsApp senders arrived as a bare `wa_id`. The trigger, the constraint, and the adapter therefore disagreed about the same value's format, and every path that touched a phone needed a normalizer plus a test asserting the `+` was restored — a normalizer that, if it ever ran in only two of the three places, would have produced a sign-up that failed or a sender that resolved to nobody. None of that exists now. There is no format to reconcile, because the identity is a uuid the database generates and the trigger copies verbatim: `auth.users.id` → `profiles.id`. The normalizer is **not lost, it is unnecessary** — the problem it patched is gone with the identity that created it. Telegram senders resolve through `profiles.telegram_user_id`, a numeric id written only by the linking flow (**D13**), never parsed out of a message and never reformatted.
 
 **D9 — Chat language follows the message, resolved by the model, not by a script detector.** Requirement 9.6 requires answering in the language of the submitted message. Hindi and Marathi share the Devanagari script and cannot be separated by a character-range check. The chat prompt receives the farmer's preferred language *and* an instruction to answer in the message's language when that language is en/hi/mr. Requirement 9.5 still rejects unsupported explicit language codes at the edge with HTTP 400.
 
 **D10 — `usage_logs` is an append-only audit table and is not the quota source of truth.** The requirements rename the spec's `api_usage` to `usage_logs` (glossary) and require it to record fallbacks (14.7) and validation rejections (5.7) in addition to billable operations. Those rows are not 1:1 with quota units, so quota lives in a separate counter table (see Quota enforcement).
 
-**D11 — WhatsApp processes inline and acknowledges after processing, guarded by a soft deadline.** Discussed under WhatsApp adapter.
+**D11 — The Telegram adapter processes inline and acknowledges after processing, guarded by a soft deadline.** *Amended by Amendment A1 — naming only; the reasoning is unchanged.* Discussed under *Telegram adapter*. The shape of the decision survives the channel change intact: the `update_id` is claimed before anything billable, the reply is sent, `markProcessed` runs after the reply, and the unit of work is one update rather than one batch. One input to the old reasoning disappears — Telegram has no 24-hour customer-service window and no template requirement, so a late or deferred reply is a latency problem and not a deliverability one (V15 is retired; V24 supplies Telegram's retry behaviour on a non-200).
+
+**D12 — Webhook authenticity is a shared secret token compared in constant time, not an HMAC over the body.** Requirement 11.2 registers a `Webhook_Secret_Token` through `setWebhook` and has Telegram present it in the `X-Telegram-Bot-Api-Secret-Token` header of every delivery. Jamee compares that header against the configured value in constant time **before parsing the body**, answers 401 on a missing or mismatched value, and treats an unconfigured secret as a failed verification rather than a skipped one (Requirement 11.4). There is no GET handshake, because Telegram has no verification challenge: registration is an authenticated call Jamee makes outbound.
+
+This reads like a weaker primitive than an HMAC and is not, for three reasons worth recording because the instinct is to assume otherwise. First, the threat the old HMAC defended against was a forged *body*, and the body is not what Jamee trusts here — the secret token is a bearer credential over TLS that Jamee itself generated and that only Telegram was ever told, so an attacker who cannot read the header cannot produce it, and one who can read it could equally have stolen an app secret. Second, the failure modes are strictly fewer: an HMAC has to be computed over the exact bytes the sender signed, which forced the old design to read the body as text, verify, and only then `JSON.parse` — a constraint a future refactor to `request.json()` would silently break. A header comparison has no such coupling to body bytes, so the ordering requirement of 11.2 ("before parsing") is a cheap invariant instead of a fragile one. Third, it retires a genuine unknown rather than trading it for another: V13 could not confirm from first-party documentation whether Meta's digest was hex or base64, and the design had to accept an ambiguity in the one comparison that must not be wrong. A fixed string has no encoding. What Jamee gives up is that the token does not attest to the *payload*, so a replayed body from a party who has the token is still accepted — which is exactly what the `update_id` claim of Requirement 11.7 exists to make harmless, and it is enforced by a `UNIQUE` primary key rather than by trust.
+
+**D13 — Linking is proved by an explicit single-use expiring token, and the bind and the consume are one statement.** Requirement 21 has to bind one Telegram account to one Jamee account with no phone number anywhere in the picture. Three mechanisms were available and two are unsafe.
+
+*Implicit matching is not available at all.* A Google identity carries no phone number, and a Telegram update carries no email, so there is no shared attribute to join on. Matching on a display name, or on "the most recently signed-in farmer", would bind an account on a coincidence. Requirement 21.2 forbids deriving any part of the token from an `Auth_User_Id`, a `Google_Email`, a `Telegram_User_Id`, or a timestamp, which closes the door on a "derive it deterministically and skip the storage" variant: anything derivable by Jamee from public-ish inputs is derivable by an attacker who can send `/start` to a public bot.
+
+*So the binding is proved in both directions.* The farmer proves control of the Jamee account by minting the token inside an authenticated session, and proves control of the Telegram account by delivering that same token from it, as the payload of `/start` carried by a `https://t.me/<bot>?start=<token>` deep link. The token is a capability and nothing else: it authorizes exactly one binding and grants no session, no read, and no second use (Requirement 21.5).
+
+*Single-use and expiring are not belt-and-braces, they bound distinct exposures.* The deep link travels through whatever the farmer used to open it — a browser history entry, a screenshot, a copied message — so a token's lifetime is the window in which a leaked link is still a binding. Expiry (a compile-time constant, minutes, Requirement 21.4) bounds that window in time; single-use bounds it in count, so a link that is leaked *after* a successful bind is already spent. Either one alone leaves a hole the other closes.
+
+*The bind and the consume must be one atomic operation* (Requirement 21.7). Two concurrent `/start` deliveries of one token — trivially producible, since Telegram redelivers on a non-200 and a farmer can tap a link twice — would otherwise both read an unconsumed row, both write a `telegram_user_id`, and both reply "linked". The consequence is not a duplicate reply, it is that the second write can land a *different* sender's id on the profile. So the mechanism is a single conditional `update … where consumed_at is null and expires_at > now()` whose `RETURNING` clause is the authorization: if it returns no row, the token was not valid at the instant of the write, and no binding is attempted. There is no read-then-write, for the same reason the quota counter and the `update_id` claim have none.
+
+*The replies for unknown, expired, and consumed are byte-identical* (Requirement 21.8). Distinguishing them would turn the bot into a token-validity oracle: a party who can send arbitrary `/start` payloads to a public bot could tell "no such token" from "that token existed and has expired", which leaks whether a guess was structurally right and makes enumeration measurably cheaper. The three cases share one message and one code path that never learns which of them it is in.
+
+**D14 — The entitlement gate sits in the adapter, after the claim and the resolution, and is keyed to the auth user id.** Requirement 22.16 fixes the order, and each position earns its place. Secret-token verification is first because an unauthenticated request must not cost a database round trip (**D12**). The `update_id` claim is second because it must precede anything billable, and a database read to resolve a profile is the cheapest thing it must precede (Requirement 11.7). Profile resolution is third because the entitlement is a property of the profile, so there is nothing to check before one exists. The entitlement check is fourth and last, immediately before the first line of farmer-facing work. It therefore gates the photo, text, and voice handling of 10.4, 10.5, and 10.6, and exempts exactly three things: the `/start` exchange, the linking instructions of 10.3, and the gated reply of 22.14 itself (Requirement 22.15).
+
+Putting the gate in the adapter rather than inside the services is what keeps **D7**'s parity claim testable and Requirement 22.17's "the web stays free" true by construction: the services have no entitlement parameter, cannot consult one, and so cannot accidentally start gating the web channel. A gated update reserves no quota unit, persists no row, and invokes no service (Requirement 22.13), which puts it in the same class as a duplicate delivery — acknowledged with 200 and audited by the `telegram_inbound` row alone.
+
+**The entitlement is keyed to the `Auth_User_Id`, never to a `Telegram_User_Id`** (Requirements 22.12, 22.20). The farmer paid, not the chat account. Keying it to the chat account would mean that unlinking discards a purchase, that re-linking from a new phone requires paying twice, and that a farmer who loses access to a Telegram account loses a permanent entitlement — three support problems manufactured by a schema choice. With the auth user id as the key, `unlink` clears one nullable column and costs nothing (Requirement 21.15), the entitlement row is untouched, and the farmer's next binding is served without further payment (Requirement 22.19). It also makes the `UNIQUE` constraint the right one: at most one entitlement per farmer, which is exactly the "one-time, permanent" semantics, whereas a Telegram-keyed row would permit one farmer to accumulate several.
+
+**D15 — The payment webhook is trusted only after a signature over the raw body, and its idempotency is a claim rather than a read.** This is the one Jamee write path reachable with no farmer session at all (Requirement 22.24), so three properties carry the whole boundary.
+
+*The signature is verified over the exact raw bytes, before any parse* (Requirement 22.5). `request.json()` discards those bytes and re-serializing the parsed object will not reproduce them — key order, whitespace, and unicode escaping all differ — so the body is read once as text, verified, and only then parsed. This is the same discipline the retired WhatsApp POST path used, and it is the one thing from that path worth keeping: the argument was never about which provider signs, it was about what "the body" means.
+
+*An absent secret is a failed verification, not a skipped one* (Requirement 22.6). The tempting implementation is `if (secret) verify(...)`, which is a deployment where someone forgot an environment variable turning into a deployment where anyone can grant themselves an entitlement by POSTing a JSON body. The check is written so the unconfigured case falls into the same 401 branch as a wrong signature, and `serverEnv` fails loudly at first use besides.
+
+*Idempotency is a `UNIQUE` claim on the provider's payment id, not a read-then-write* (Requirement 22.11). Razorpay retries, and a retry that arrives while the first delivery is still inside the handler would pass a `select … where payment_id = ?` check twice. So the grant is an `insert … on conflict do nothing` on a column carrying a `UNIQUE` constraint, and a zero-row result **is** the duplicate signal — acknowledge 200, change nothing (Requirement 22.10). This is the third instance of the same pattern in this design (the quota counter, the `update_id` claim, this), and the reason is identical each time: under `read committed`, a check and a write in two statements is a race, and the database is the only thing that can make them one.
+
+*Only the verified payload plus the recorded Payment_Order determine who paid what* (Requirement 22.7). The browser reports a checkout success too, and that report grants nothing — it only tells the UI to start showing an optimistic "confirming your payment" state. The amount, the currency, and the owning farmer are all server-side (Requirement 22.2), so a tampered request body cannot buy an entitlement for a different farmer or at a different price.
+
+**D16 — The payment webhook is rate limited per caller, which needs a limiter that does not require a farmer.** Requirement 13.9 asks for a bound on the work one caller can drive on the payment webhook route, and this collides with the existing limiter: `counters` is keyed on `user_id` with a `not null` foreign key to `profiles`, and on this route there is no farmer to key on until a signature verifies — and a caller whose signatures never verify never produces one. Reusing `counters` is therefore impossible rather than merely awkward.
+
+Decision: a separate `webhook_throttle` table keyed on an opaque caller key and a minute window, with no foreign key and no farmer column, incremented by the same single-statement `on conflict … where used < limit` pattern as `counter_try_increment` (see migration 0013). The caller key is a hash of the platform-reported client address, never the raw address, so the table holds no retained network identifier. This is stated with its limitation rather than oversold: a client address is shared behind NAT and forgeable at scale, so this bound is a cost control, not an authentication control. The actual defence is ordering — verification is one HMAC over an already-read body and precedes every database write and every allocation — so an unauthenticated flood costs an invocation and a hash, and the limiter's job is only to stop even that from consuming the free-tier invocation allowance. The same table serves the Telegram webhook route, which has the identical shape of problem for the same reason.
 
 ---
 
@@ -94,7 +156,8 @@ V21 and V22 were added by the media-lifecycle amendment. They are the only third
 | Layer | Responsibility | Must not |
 | --- | --- | --- |
 | **Route handlers** (`src/app/api/*`) | Session check, Zod-parse the request, resolve language, call one service, map result/error to HTTP | Contain agronomy, prompt text, provider calls, or SQL |
-| **Domain services** (`src/services/*`) | Diagnosis, Chat, Voice orchestration: ownership check → quota reserve → provider call → validation → KB grounding → persistence. Accept `channel` as a parameter (Requirement 16.5) | Know anything about HTTP, cookies, or WhatsApp payloads |
+| **Domain services** (`src/services/*`) | Diagnosis, Chat, Voice orchestration: ownership check → quota reserve → provider call → validation → KB grounding → persistence. Accept `channel` as a parameter (Requirement 16.5) | Know anything about HTTP, cookies, or Telegram payloads; consult a Bot_Entitlement (D14) |
+| **Access services** (`src/services/linking.service.ts`, `entitlement.service.ts`, `payment.service.ts`) | Mint and atomically consume a Link_Token, bind or clear a `telegram_user_id`, create a Payment_Order, grant a Bot_Entitlement, answer "does this farmer hold one" | Produce farmer-facing agronomy, call a model provider, or touch a quota counter |
 | **AI gateway** (`src/lib/ai/gateway.ts`) | Capability-based provider selection, fallback policy (Requirement 14.4), returns raw provider text plus which provider served it | Interpret content or decide farmer-facing messaging |
 | **Provider adapters** (`gemini.ts`, `groq.ts`) | One provider each: request shaping, error classification into `RATE_LIMIT` / `UNAVAILABLE` / `OTHER` | Retry across providers |
 | **Repositories + storage** (`src/lib/db/*`, `src/lib/storage/*`) | Typed Supabase access, signed URLs, service-role isolation | Leak the service-role client toward the browser |
@@ -105,7 +168,7 @@ V21 and V22 were added by the media-lifecycle amendment. They are the only third
 graph TB
     subgraph Clients
         BROWSER["Browser (Next.js client components)"]
-        WA["WhatsApp (farmer's phone)"]
+        TG["Telegram (farmer's app)"]
     end
 
     subgraph Vercel["Vercel - Next.js App Router"]
@@ -113,7 +176,10 @@ graph TB
             RD["/api/diagnose"]
             RC["/api/chat"]
             RV["/api/voice"]
-            RW["/api/whatsapp"]
+            RT["/api/telegram"]
+            RL["/api/link/token"]
+            RPO["/api/payment/order"]
+            RPW["/api/payment/webhook"]
         end
         subgraph Domain["Shared domain services"]
             DS["DiagnosisService"]
@@ -121,7 +187,12 @@ graph TB
             VS["VoiceService"]
             QS["QuotaService"]
         end
-        WAA["WhatsAppAdapter<br/>verify + signature + idempotency"]
+        subgraph Access["Access services"]
+            LS["LinkingService<br/>mint + atomic consume"]
+            ES["EntitlementService<br/>gate lookup"]
+            PS["PaymentService<br/>order + grant"]
+        end
+        TGA["TelegramAdapter<br/>secret token + update_id claim<br/>+ profile resolve + entitlement gate"]
         GW["AiGateway<br/>capability routing + fallback"]
         VAL["Validation_Layer (Zod)"]
         REPO["Repositories + Storage helpers"]
@@ -131,11 +202,12 @@ graph TB
         GEM["Gemini multimodal - VERIFY model id"]
         GRQ["Groq text - VERIFY model id"]
         WHS["Whisper STT - VERIFY host + model id"]
-        META["Meta WhatsApp Cloud API - VERIFY version"]
+        TAPI["Telegram Bot API - VERIFY method shapes"]
+        RZP["Razorpay - VERIFY order + webhook scheme"]
     end
 
     subgraph Supabase
-        AUTH["Auth - phone OTP"]
+        AUTH["Auth - Google OAuth"]
         DB[("Postgres + RLS")]
         ST[("Private buckets<br/>crop-images / voice-messages")]
     end
@@ -144,19 +216,29 @@ graph TB
     BROWSER -->|"JSON: storage ref + language"| RD
     BROWSER --> RC
     BROWSER --> RV
-    BROWSER -->|"OTP sign-in"| AUTH
-    WA --> META
-    META -->|"webhook POST"| RW
-    RW --> WAA
-    WAA -->|"media download"| META
-    WAA -->|"service-role upload"| ST
+    BROWSER -->|"Google sign-in"| AUTH
+    BROWSER -->|"mint Link_Token"| RL
+    BROWSER -->|"start checkout"| RPO
+    BROWSER -->|"checkout"| RZP
+    RZP -->|"signed webhook POST"| RPW
+    TG --> TAPI
+    TAPI -->|"webhook POST + secret token"| RT
+    RT --> TGA
+    TGA -->|"getFile + file download"| TAPI
+    TGA -->|"sendMessage reply"| TAPI
+    TGA -->|"service-role upload"| ST
 
     RD --> DS
     RC --> CS
     RV --> VS
-    WAA --> DS
-    WAA --> CS
-    WAA --> VS
+    TGA --> DS
+    TGA --> CS
+    TGA --> VS
+    TGA --> LS
+    TGA --> ES
+    RL --> LS
+    RPO --> PS
+    RPW --> PS
 
     DS --> QS
     CS --> QS
@@ -174,9 +256,15 @@ graph TB
     DS --> REPO
     CS --> REPO
     QS --> DB
+    LS --> DB
+    ES --> DB
+    PS --> DB
+    PS --> RZP
     REPO --> DB
     REPO --> ST
 ```
+
+Two edges in that diagram are the whole access story. `TGA --> ES` is the gate: it resolves before any edge into `Domain` is taken, so a farmer with no entitlement never reaches a shared service (**D14**). `RPW --> PS` is the only path that grants one, and it is the only inbound edge in the diagram with no farmer session behind it, which is why **D15** treats its signature check as the entire boundary.
 
 ### Diagnosis sequence — both channels converge
 
@@ -184,9 +272,10 @@ graph TB
 sequenceDiagram
     autonumber
     participant B as Browser
-    participant W as Meta Cloud API
-    participant RH as Route handler<br/>(/api/diagnose or /api/whatsapp)
-    participant AD as WhatsAppAdapter
+    participant T as Telegram Bot API
+    participant RH as Route handler<br/>(/api/diagnose or /api/telegram)
+    participant AD as TelegramAdapter
+    participant ES as EntitlementService
     participant DS as DiagnosisService (shared)
     participant Q as QuotaService
     participant ST as Supabase Storage
@@ -200,22 +289,27 @@ sequenceDiagram
     ST-->>B: storage reference
     B->>RH: POST {bucket, path, language, conversationId?}
     RH->>RH: session check (401 if absent)
+    note right of RH: no Bot_Entitlement check here (Req 22.17)
     end
 
     rect rgb(240,255,240)
-    note over W,AD: WhatsApp path
-    W->>RH: webhook POST (signed)
-    RH->>AD: verify signature (401 on failure)
-    AD->>DB: insert provider_message_id (unique)
+    note over T,ES: Telegram path - order fixed by Req 22.16
+    T->>RH: webhook POST + X-Telegram-Bot-Api-Secret-Token
+    RH->>AD: constant-time secret token compare (401, body unparsed)
+    AD->>DB: insert update_id (unique)
     note right of AD: duplicate -> 200, zero quota, no service call
-    AD->>DB: resolve profiles.phone -> profile
-    note right of AD: no profile -> sign-in instructions, zero quota
-    AD->>W: download media
+    AD->>DB: resolve profiles.telegram_user_id -> profile
+    note right of AD: no profile -> linking instructions, zero quota
+    AD->>ES: holdsEntitlement(profile.id)
+    ES-->>AD: yes / no
+    note right of AD: no -> unlock reply (22.14), zero quota,<br/>no service call, no row persisted
+    AD->>T: getFile(file_id) -> file_path
+    AD->>T: GET file endpoint + file_path
     AD->>ST: service-role upload to crop-images/{user_id}/...
     end
 
     RH->>DS: diagnose({userId, storageRef, language, channel, conversationId?})
-    AD->>DS: diagnose({userId, storageRef, language, channel:'whatsapp', conversationId})
+    AD->>DS: diagnose({userId, storageRef, language, channel:'telegram', conversationId})
 
     DS->>ST: verify bucket + {user_id}/ prefix ownership
     ST-->>DS: object metadata
@@ -239,8 +333,57 @@ sequenceDiagram
     DS-->>RH: Diagnosis_Result
     DS-->>AD: Diagnosis_Result
     RH-->>B: JSON result
-    AD->>W: send text reply
-    AD-->>W: HTTP 200
+    AD->>T: sendMessage reply
+    AD-->>T: HTTP 200
+```
+
+### Linking and payment sequences
+
+Neither path reaches a shared service, reserves a quota unit, or calls a model provider (Requirements 21.18, 22.13).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant RL as /api/link/token
+    participant LS as LinkingService
+    participant DB as Postgres
+    participant T as Telegram Bot API
+    participant AD as TelegramAdapter
+
+    B->>RL: POST (authenticated session)
+    RL->>LS: mint(authUserId)
+    LS->>DB: insert link_tokens (token_hash, user_id, expires_at)
+    LS-->>B: deep link - t.me/BOT?start=TOKEN
+    B->>T: farmer opens the deep link, sends /start TOKEN
+    T->>AD: webhook update (secret token verified, update_id claimed)
+    AD->>DB: single UPDATE - consume token AND bind telegram_user_id
+    note right of AD: RETURNING no row -> "link no longer valid",<br/>identical wording for unknown / expired / consumed (21.8)
+    AD->>T: confirmation reply in the Profile's language (21.19)
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant RPO as /api/payment/order
+    participant PS as PaymentService
+    participant RZP as Razorpay
+    participant RPW as /api/payment/webhook
+    participant DB as Postgres
+
+    B->>RPO: POST (authenticated session, empty body)
+    RPO->>PS: createOrder(authUserId)
+    note right of PS: amount, currency, owner all server-side (22.2)
+    PS->>RZP: create order for BOT_UNLOCK_PRICE
+    PS->>DB: insert payment_orders (provider_order_id, user_id, 'created')
+    PS-->>B: checkout identifiers only
+    B->>RZP: checkout
+    RZP->>RPW: POST event + signature header
+    RPW->>RPW: HMAC over RAW body, constant time; absent secret = fail (22.6)
+    RPW->>PS: onVerifiedEvent(payload)
+    PS->>DB: insert bot_entitlements (user_id, provider_payment_id) - UNIQUE claim
+    note right of PS: zero rows claimed -> duplicate -> 200, no state change (22.10)
 ```
 
 ---
@@ -258,14 +401,17 @@ src/
     history/page.tsx               # server component, RLS-scoped list
     diagnosis/[id]/page.tsx        # detail view (Requirement 12.3)
     profile/page.tsx               # display name + preferred language (Requirement 1.8)
-    auth/callback/route.ts         # session exchange + ensure-profile (D8)
+    auth/callback/route.ts         # OAuth code exchange + ensure-profile (D8, V23)
     api/
       diagnose/route.ts            # POST, JSON storage ref (D1)
       chat/route.ts                # POST
       voice/route.ts               # POST
-      whatsapp/route.ts            # GET challenge + POST webhook
+      telegram/route.ts            # POST webhook only - secret token (D12)
+      link/token/route.ts          # POST mint Link_Token (21.1), DELETE unlink (21.15)
+      payment/order/route.ts       # POST create Payment_Order (22.1)
+      payment/webhook/route.ts     # POST, no session, signature-authenticated (22.24)
   components/
-    SignInForm.tsx                 # phone + OTP, client
+    GoogleSignInButton.tsx         # signInWithOAuth({provider:'google'}), client
     ImageUploader.tsx              # validation + direct upload, client
     DiagnosisResultCard.tsx        # severity, confidence, needs_expert banner
     ChatThread.tsx / ChatComposer.tsx
@@ -273,12 +419,17 @@ src/
     LanguageSwitcher.tsx
     HistoryList.tsx / EmptyState.tsx
     ErrorBanner.tsx                # code -> localized message + retry
+    TelegramLinkCard.tsx           # linked state + link / unlink action (21.20)
+    BotUnlockCard.tsx              # price, checkout, active-entitlement state (22.18)
   services/
     diagnosis.service.ts           # single image-analysis implementation (16.3)
     chat.service.ts                # single grounding/rephrase implementation (16.4)
     voice.service.ts
     quota.service.ts
     conversation.service.ts        # find-or-create per channel
+    linking.service.ts             # mint + atomic consume-and-bind (D13)
+    entitlement.service.ts         # holdsEntitlement + grant (D14)
+    payment.service.ts             # order creation + verified-webhook grant (D15)
   lib/
     supabase/
       client.ts                    # browser client (anon key)
@@ -289,7 +440,8 @@ src/
       errors.ts                    # RATE_LIMIT | UNAVAILABLE | OTHER
     gemini.ts                      # primary adapter (V6, V7)
     groq.ts                        # text fallback + transcription (V8, V9, V10)
-    whatsapp.ts                    # verify, parse, media, send (V12-V15)
+    telegram.ts                    # secret token, parse, getFile, sendMessage (V24-V26)
+    razorpay.ts                    # order create + webhook signature (V27)
     prompts.ts                     # classification + rephrase + chat prompts
     schemas.ts                     # all Zod schemas (single source)
     knowledge.ts                   # KB lookup + verified-condition enum
@@ -297,7 +449,13 @@ src/
       en.ts  hi.ts  mr.ts
     errors.ts                      # AppError + code -> status mapping
     storage.ts                     # path builder, signed URLs, ownership check
-    rate-limit.ts                  # per-farmer burst limiter (13.8)
+    rate-limit.ts                  # per-farmer burst limiter (13.8) + per-caller
+                                   #   webhook throttle (13.9, D16)
+    config/
+      media.ts                     # MEDIA_RETENTION_DAYS (18.1)
+      access.ts                    # LINK_TOKEN_TTL_MINUTES (21.4),
+                                   #   BOT_UNLOCK_PRICE (22.4) - one place each,
+                                   #   never an env var
     time.ts                        # Asia/Kolkata window keys + reset time
   types/
     domain.ts  api.ts  database.ts # generated Supabase types
@@ -310,9 +468,12 @@ supabase/
     0005_diagnoses.sql
     0006_usage_logs.sql
     0007_counters_and_quota_fn.sql
-    0008_whatsapp_inbound.sql
+    0008_telegram_inbound.sql
     0009_storage_buckets_policies.sql
     0010_seed_disease_knowledge.sql
+    0011_link_tokens.sql                 # Requirement 21
+    0012_payment_orders_entitlements.sql # Requirement 22
+    0013_webhook_throttle.sql            # Requirement 13.9 (D16)
 docs/
   API.md  DEPLOYMENT.md  TESTING_REPORT.md
 .env.example
@@ -324,9 +485,11 @@ docs/
 
 ## Data model and migrations
 
-Six domain tables plus two operational tables. Enum-like columns are `text` with check constraints rather than Postgres enums, so a new severity or channel is a migration edit instead of a type alteration; the check constraint keeps the database as strict as the Zod layer.
+Six domain tables, three access tables (Requirements 21 and 22), and three operational tables. Enum-like columns are `text` with check constraints rather than Postgres enums, so a new severity or channel is a migration edit instead of a type alteration; the check constraint keeps the database as strict as the Zod layer.
 
 `updated_at` is maintained by one shared trigger function so no route handler has to remember it.
+
+**Amendment A1 edits migrations in place rather than shipping a column-altering follow-up.** Nothing in `supabase/migrations/` has been applied to a deployed project yet — this is a pre-pilot release — so `0002` is rewritten, `0003` / `0005` / `0006` have their `channel` check constraints corrected, and `0008` is renamed and re-keyed. Amending is the honest option here: an `alter table … drop constraint` follow-up would leave the original phone-identity schema readable as though it had once been real, and a future reader would have to replay two migrations to learn what the table is. Three new migrations, `0011`–`0013`, add the access tables. If a project has already been migrated, the corrections have to arrive as `0014` instead, and the in-place edits above become a documentation-only change.
 
 ### 0001–0002: extensions and profiles
 
@@ -345,28 +508,33 @@ end $$;
 ```sql
 -- 0002_profiles.sql
 create table public.profiles (
-  id           uuid primary key references auth.users(id) on delete cascade,
-  phone        text not null unique,                        -- E.164, single identity (Req 1.5)
-  display_name text,
-  language     text not null default 'en'
-                 check (language in ('en','hi','mr')),      -- Req 9.1
-  created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now(),
-  constraint profiles_phone_e164 check (phone ~ '^\+[1-9][0-9]{7,14}$')
+  id               uuid primary key references auth.users(id) on delete cascade,
+                                                             -- Auth_User_Id IS the identity (Req 1.5)
+  email            text,                                      -- Google_Email (Req 1.4)
+  telegram_user_id bigint unique,                             -- nullable + UNIQUE (Req 21.16)
+  phone            text,                                      -- optional contact info only (Req 1.9):
+                                                              --   no not null, no unique, no check,
+                                                              --   no reader anywhere in the codebase
+  display_name     text,
+  language         text not null default 'en'
+                     check (language in ('en','hi','mr')),    -- Req 9.1
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
 );
 
-create index profiles_phone_idx on public.profiles (phone);  -- WhatsApp resolution (Req 10.2)
+-- Telegram sender resolution (Req 10.2). The UNIQUE constraint above already
+-- creates the index this lookup uses, so no second index is declared.
 
 create trigger profiles_set_updated_at
   before update on public.profiles
   for each row execute function public.set_updated_at();
 
--- D8: bootstrap on first session
+-- D8: bootstrap on first session. Copies the email, never a phone (Req 1.4).
 create or replace function public.handle_new_user()
-returns trigger language plpgsql security definer set search_path = public as $$
+returns trigger language plpgsql security definer set search_path = '' as $$
 begin
-  insert into public.profiles (id, phone)
-  values (new.id, new.phone)
+  insert into public.profiles (id, email)
+  values (new.id, new.email)
   on conflict (id) do nothing;
   return new;
 end $$;
@@ -385,7 +553,11 @@ create policy profiles_insert_own on public.profiles
   for insert with check (auth.uid() = id);
 ```
 
-The unique constraint on `phone` is load-bearing: Requirement 1.5 makes the phone the single cross-channel identity, and Requirement 10.2 resolves an inbound WhatsApp sender through it. Two profiles sharing a phone would make that resolution ambiguous.
+The load-bearing constraint moved. It is now `telegram_user_id bigint unique`: Requirement 10.12 says one Telegram account belongs to at most one Profile, and Requirement 21.16 requires that rule to be enforced by the database rather than by application code alone — so the `/start` handler of **D13** does not have to defend the invariant, it only has to handle the unique violation, which is the case of Requirement 21.13 (this Telegram account is already linked elsewhere). The column is nullable because an unlinked farmer is the normal state, and Postgres treats nulls as distinct, so any number of unlinked profiles coexist.
+
+`phone` keeps its column and loses everything else: no `not null`, no `unique`, no E.164 check constraint, and no index. **D8** records why the normalizer that used to accompany it is gone rather than misplaced. Nothing reads this column; it exists because Requirement 1.9 says it exists as optional contact information, and a CI check that greps for readers of `profiles.phone` outside a migration is the cheapest way to keep that true.
+
+`email` is nullable rather than `not null` on purpose. It is copied from `auth.users` by a trigger that V5 warns can fail without blocking the row, so a hard constraint here would turn a missing claim into a sign-up that cannot complete. The identity does not depend on it.
 
 ### 0003: conversations and messages
 
@@ -393,7 +565,7 @@ The unique constraint on `phone` is load-bearing: Requirement 1.5 makes the phon
 create table public.conversations (
   id         uuid primary key default gen_random_uuid(),
   user_id    uuid not null references public.profiles(id) on delete cascade,
-  channel    text not null check (channel in ('web','whatsapp')),
+  channel    text not null check (channel in ('web','telegram')),
   title      text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -409,7 +581,7 @@ create table public.messages (
   role            text not null check (role in ('farmer','jamee')),
   content         text not null,
   language        text not null check (language in ('en','hi','mr')),
-  channel         text not null check (channel in ('web','whatsapp')),
+  channel         text not null check (channel in ('web','telegram')),
   input_kind      text not null default 'text'
                     check (input_kind in ('text','voice','image')),
   transcript_of   text,                    -- storage path when input_kind='voice'
@@ -476,7 +648,7 @@ create table public.diagnoses (
   explanation     text not null,
   language        text not null check (language in ('en','hi','mr')),
   needs_expert    boolean not null default false,
-  channel         text not null check (channel in ('web','whatsapp')),  -- Req 16.5
+  channel         text not null check (channel in ('web','telegram')),  -- Req 16.5
   image_bucket    text not null check (image_bucket = 'crop-images'),
   image_path      text not null,
   -- Requirement 18.7: set by the retention sweep when the full-size original is deleted.
@@ -518,7 +690,7 @@ create table public.usage_logs (
   id               uuid primary key default gen_random_uuid(),
   user_id          uuid not null references public.profiles(id) on delete cascade,
   operation        text not null check (operation in ('image','chat','voice')),
-  channel          text not null check (channel in ('web','whatsapp')),
+  channel          text not null check (channel in ('web','telegram')),
   model_provider   text check (model_provider in ('gemini','groq','none')),
   outcome          text not null check (outcome in (
                      'success','inconclusive','validation_rejected',
@@ -595,28 +767,33 @@ create policy counters_select_own on public.counters
 -- writes only via the security-definer functions, invoked with the service role
 ```
 
-### 0008: WhatsApp inbound idempotency store
+### 0008: Telegram inbound idempotency store
 
 ```sql
-create table public.whatsapp_inbound (
-  provider_message_id text primary key,              -- Req 11.6
-  from_phone          text not null,
-  user_id             uuid references public.profiles(id) on delete set null,
-  message_type        text not null,                 -- text | image | audio | other
-  status              text not null default 'received'
-                        check (status in ('received','processed','failed','rejected')),
-  received_at         timestamptz not null default now(),
-  completed_at        timestamptz
+create table public.telegram_inbound (
+  update_id        bigint primary key,               -- Req 11.6 - Telegram's update_id
+  telegram_user_id bigint,                           -- null when the update carries no sender
+  user_id          uuid references public.profiles(id) on delete set null,
+  message_type     text not null,                    -- start | text | photo | voice | other
+  status           text not null default 'received'
+                     check (status in ('received','processed','failed',
+                                       'rejected','unlinked','not_entitled')),
+  received_at      timestamptz not null default now(),
+  completed_at     timestamptz
 );
 
-create index whatsapp_inbound_received_idx on public.whatsapp_inbound (received_at desc);
+create index telegram_inbound_received_idx on public.telegram_inbound (received_at desc);
 
 -- RLS on with no policies at all: the table is unreachable for anon and
 -- authenticated, and the service role bypasses RLS by design.
-alter table public.whatsapp_inbound enable row level security;
+alter table public.telegram_inbound enable row level security;
 ```
 
-The primary key *is* the idempotency mechanism (Requirement 11.5): the adapter inserts before doing anything billable, and a unique violation is the duplicate signal. No `select`-then-`insert`, so two concurrent deliveries of the same message cannot both proceed. The table holds no farmer-authored content, but `from_phone` is farmer PII, so RLS is enabled with **no** policies rather than left off — a table in `public` with RLS disabled would be readable through the data API. Only the service role touches it.
+The primary key *is* the idempotency mechanism (Requirements 11.5, 11.8): the adapter inserts before doing anything billable, and a unique violation is the duplicate signal. No `select`-then-`insert`, so two concurrent deliveries of the same update cannot both proceed. Requirement 11.8 states that ordering as an obligation rather than leaving it to the design, which is a tightening and not a change.
+
+Two amendment notes. The key is `bigint` rather than `text`, because `update_id` is a number Telegram assigns per bot and per webhook registration — a narrower and cheaper key than the 128-character WAMID it replaces, with no format to validate. And the `status` set gains `unlinked` and `not_entitled`, which is how a gated update stays auditable without a `usage_logs` row: Requirements 21.17 and 22.13 both produce a reply and no billable operation, so there is nothing for the usage audit to record, and this column is the only trace that the delivery was handled deliberately rather than dropped.
+
+The table holds no farmer-authored content. `telegram_user_id` is still an identifier for a person, so RLS is enabled with **no** policies rather than left off — a table in `public` with RLS disabled would be readable through the data API. Only the service role touches it.
 
 ### 0009: storage buckets and policies
 
@@ -651,7 +828,7 @@ crop-images/{user_id}/{YYYY}/{MM}/{uuid}.thumb.{jpg|png|webp}      <- Thumbnail_
 voice-messages/{user_id}/{YYYY}/{MM}/{uuid}.{ext}
 ```
 
-The `{user_id}` first segment does double duty: it is the storage RLS predicate, and it is what the API-side ownership check compares against the session user (Requirements 2.5, 2.6). WhatsApp media is uploaded with the service role but *still* under the resolved profile's `{user_id}/` prefix, so a farmer can later read their WhatsApp images from the web history through a normal signed URL.
+The `{user_id}` first segment does double duty: it is the storage RLS predicate, and it is what the API-side ownership check compares against the session user (Requirements 2.5, 2.6). Telegram media is uploaded with the service role but *still* under the resolved profile's `{user_id}/` prefix, so a farmer can later read their Telegram images from the web history through a normal signed URL. The prefix is the resolved `profiles.id`, never the `telegram_user_id` — the storage policy compares against `auth.uid()`, so a path keyed on a chat account would be unreadable by its owner's own session.
 
 **Thumbnail path derivation (Requirement 2.13).** A thumbnail path is a pure function of its original's path: insert the literal `.thumb` immediately before the final extension. `thumbPathFor()` and `originalPathFor()` live in `src/lib/storage.ts` and are exact inverses, so no column stores a thumbnail path and nothing has to be kept in sync.
 
@@ -754,6 +931,130 @@ values
 
 The seed is idempotent in practice because `disease_name` is unique; re-running adds an `on conflict (disease_name) do nothing` guard.
 
+### 0011: link tokens (Requirement 21)
+
+```sql
+create table public.link_tokens (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.profiles(id) on delete cascade,
+  token_hash  text not null unique,          -- sha-256 of the token, never the token
+  expires_at  timestamptz not null,          -- now() + LINK_TOKEN_TTL_MINUTES (Req 21.4)
+  consumed_at timestamptz,                   -- null until consumed (Req 21.3)
+  created_at  timestamptz not null default now()
+);
+
+create index link_tokens_user_idx on public.link_tokens (user_id, created_at desc);
+
+alter table public.link_tokens enable row level security;
+
+-- Req 21.3 / 13.1: a farmer reads only their own rows.
+create policy link_tokens_select_own on public.link_tokens
+  for select using (auth.uid() = user_id);
+-- No insert/update/delete policy: minting and consuming run server-side with the
+-- service role, so a farmer session cannot mint a token for another farmer, cannot
+-- extend an expiry, and cannot un-consume one.
+```
+
+**The token is stored hashed, and the plaintext exists only in the deep link.** Requirement 21 does not demand this; it follows from what a Link_Token is. It is a bearer capability that binds a chat account to a Jamee account, so a snapshot of this table — a support query, a log, a backup — would otherwise be a list of live capabilities. Hashing costs one `sha256` on a path that runs twice per link and nothing on any hot path. The `unique` constraint sits on `token_hash` rather than on a plaintext column for the same reason, and lookup is by hash, so the plaintext is never compared in SQL.
+
+`consumed_at` is a timestamp rather than a boolean because the single atomic statement of **D13** needs to distinguish "never consumed" from "consumed", and a timestamp additionally tells a support query *when* — for free, in the same column:
+
+```sql
+-- D13: one statement. Consume and bind together, or do neither.
+update public.link_tokens
+   set consumed_at = now()
+ where token_hash = $1
+   and consumed_at is null
+   and expires_at > now()
+returning user_id;
+-- No returned row => unknown, expired, or already consumed. One reply for all
+-- three (Req 21.8), and no binding is attempted.
+```
+
+The binding write that follows is bounded by the same transaction, so Requirement 21.7's "same atomic operation" holds: either the token is spent and the `telegram_user_id` is set, or neither happened. A unique violation on `profiles.telegram_user_id` inside that transaction rolls the consume back, which is exactly Requirement 21.13's "leave that Link_Token unconsumed".
+
+### 0012: payment orders and bot entitlements (Requirement 22)
+
+```sql
+create table public.payment_orders (
+  id                uuid primary key default gen_random_uuid(),
+  user_id           uuid not null references public.profiles(id) on delete cascade,
+  provider_order_id text not null unique,             -- Razorpay order id (V27)
+  amount_minor      integer not null check (amount_minor > 0),  -- server-side (Req 22.2)
+  currency          text not null,
+  status            text not null default 'created'
+                      check (status in ('created','captured','failed','cancelled')),
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+
+create index payment_orders_user_idx on public.payment_orders (user_id, created_at desc);
+
+create trigger payment_orders_set_updated_at
+  before update on public.payment_orders
+  for each row execute function public.set_updated_at();
+
+create table public.bot_entitlements (
+  user_id             uuid primary key references public.profiles(id) on delete cascade,
+                                        -- PRIMARY KEY => at most one per farmer (Req 22.12)
+  provider_payment_id text not null unique,   -- the idempotency claim (Req 22.11)
+  payment_order_id    uuid references public.payment_orders(id) on delete set null,
+  granted_at          timestamptz not null default now()      -- no expiry column (Req 22.9)
+);
+
+alter table public.payment_orders enable row level security;
+alter table public.bot_entitlements enable row level security;
+
+-- Req 22.23 / 13.1: read own rows only; every write is service-role.
+create policy payment_orders_select_own on public.payment_orders
+  for select using (auth.uid() = user_id);
+create policy bot_entitlements_select_own on public.bot_entitlements
+  for select using (auth.uid() = user_id);
+-- No insert/update/delete policies on either table. A farmer session cannot
+-- grant itself an entitlement, cannot mark an order captured, and cannot
+-- change an amount.
+```
+
+Three column choices carry requirements rather than taste:
+
+- **`user_id` is the primary key of `bot_entitlements`**, which is how Requirement 22.12's "at most one per Auth_User_Id" is enforced without a second constraint, and it is why **D14**'s "keyed to the farmer, not the chat account" is structural: there is no `telegram_user_id` column here to be tempted by, so unlinking cannot touch this table (Requirement 22.20).
+- **`provider_payment_id` carries its own `unique`**, and that constraint is the idempotency mechanism of Requirement 22.11 — a replayed webhook loses the insert race and the zero-row result is the duplicate signal (**D15**). It is separate from the primary key because two different payment ids must not both grant, and one payment id must not grant twice; the two constraints answer two different questions.
+- **There is no `expires_at`, and that absence is deliberate** (Requirement 22.9). A nullable expiry column would invite a future "just set it for trials" edit that silently converts a one-time purchase into a subscription. Adding expiry later should require a migration and a conversation, which is what its absence guarantees.
+
+`payment_orders` retains failed and abandoned rows rather than deleting them (Requirement 22.22). They grant nothing — only `bot_entitlements` grants — and keeping them is what makes a reconciliation query against the provider possible. A farmer with three abandoned orders can still start a fourth, because nothing in the create path reads the previous ones.
+
+### 0013: webhook throttle (Requirement 13.9, D16)
+
+```sql
+create table public.webhook_throttle (
+  route       text not null check (route in ('payment','telegram')),
+  caller_hash text not null,               -- sha-256 of the platform-reported address
+  window_key  text not null,               -- 'YYYY-MM-DDTHH:MM'
+  used        integer not null default 0 check (used >= 0),
+  updated_at  timestamptz not null default now(),
+  primary key (route, caller_hash, window_key)
+);
+
+-- Same single-statement pattern as counter_try_increment, and for the same reason.
+create or replace function public.webhook_throttle_try_increment(
+  p_route text, p_caller_hash text, p_window_key text, p_limit int
+) returns integer
+language sql security definer set search_path = '' as $$
+  insert into public.webhook_throttle (route, caller_hash, window_key, used)
+  values (p_route, p_caller_hash, p_window_key, 1)
+  on conflict (route, caller_hash, window_key) do update
+    set used = public.webhook_throttle.used + 1,
+        updated_at = now()
+    where public.webhook_throttle.used < p_limit
+  returning used;
+$$;
+
+-- RLS on, no policies: no farmer session has any business here.
+alter table public.webhook_throttle enable row level security;
+```
+
+This table exists because `counters.user_id` is `not null` with a foreign key to `profiles`, and neither webhook route has a farmer to key on — the payment route has none until a signature verifies, and the Telegram route has none until an update resolves (**D16**). It is not a second quota system: no farmer-facing limit is expressed here, nothing is ever refunded, and rows are pruned by the same periodic delete that prunes minute-window counter rows.
+
 ---
 
 ## Quota enforcement
@@ -772,7 +1073,7 @@ Both options were considered against the race requirement.
 
 **Decision: the dedicated `counters` table** (migration 0007). It is race-free in a single statement without advisory locks, constant-time, and it keeps `usage_logs` a pure append-only audit trail (D10). The trade-off accepted is one extra table and the need to refund explicitly rather than "just not logging".
 
-Double-spend is prevented by three things together: the single-statement atomic increment; one reserve per request, taken exactly once at a defined point; and, for WhatsApp, the idempotency insert that happens *before* the reserve so a Meta redelivery cannot reach the counter at all.
+Double-spend is prevented by three things together: the single-statement atomic increment; one reserve per request, taken exactly once at a defined point; and, on Telegram, the `update_id` claim that happens *before* the reserve so a redelivery cannot reach the counter at all (Requirement 11.7).
 
 ### When a unit is reserved, finalized, or refunded
 
@@ -782,7 +1083,7 @@ Order of operations in every service — the sequence is the contract:
 
 1. Authenticated session resolved, else 401 — **no reserve** (Requirement 1.7).
 2. Request body Zod-parsed; unsupported language → 400 — **no reserve** (Requirement 9.5).
-3. WhatsApp only: signature verified, then `whatsapp_inbound` insert. Unique violation → acknowledge 200, log `duplicate_ignored`, **no reserve** (Requirement 11.5).
+3. Telegram only, in the order Requirement 22.16 fixes: secret token compared, then the `telegram_inbound` insert of the `update_id` (unique violation → acknowledge 200, log `duplicate_ignored`, **no reserve**, Requirements 11.5, 11.7), then profile resolution, then the Bot_Entitlement check. No entitlement → the unlock reply of 22.14 and **no reserve** (Requirement 22.13). No profile → linking instructions and **no reserve** (Requirement 21.17).
 4. Storage reference checked: correct bucket and `{user_id}/` prefix owned by the caller. Mismatch → 403 — **no reserve** (Requirement 2.6, explicitly "quota unchanged").
 5. Burst rate limit checked (Requirement 13.8, `window_kind='minute'`) → 429 — **no reserve**.
 6. **Reserve**: `counter_try_increment(user, op, 'day', kolkataDay, limit)`. Null result → decline with the limit and the reset time, and **no provider call is made** (Requirement 14.3).
@@ -790,7 +1091,7 @@ Order of operations in every service — the sequence is the contract:
 8. **Finalize**: persist the domain rows and append a `usage_logs` row with the provider, outcome, and `used_fallback`. The counter is not touched again.
 9. **Refund** (`counter_decrement`) only when step 7 failed *before the first provider call was attempted* — signed-URL issuance failure, unreadable object, knowledge-base read failure, or an unhandled error thrown ahead of the gateway call. The `usage_logs` row records `quota_spent = false`.
 
-The reserve is taken once per *request*, by whichever service owns that request's operation type. A `ChatService` invocation nested inside a `VoiceService` request therefore performs **no** reserve of its own: the voice unit taken at step 6 covers the answer that request produces, so one voice message never spends both a voice unit and a chat unit. `ChatService` reserves only when it is itself the entry point — the chat endpoint, or an inbound WhatsApp text message.
+The reserve is taken once per *request*, by whichever service owns that request's operation type. A `ChatService` invocation nested inside a `VoiceService` request therefore performs **no** reserve of its own: the voice unit taken at step 6 covers the answer that request produces, so one voice message never spends both a voice unit and a chat unit. `ChatService` reserves only when it is itself the entry point — the chat endpoint, or an inbound Telegram text message.
 
 What this yields against the requirements:
 
@@ -798,6 +1099,7 @@ What this yields against the requirements:
 - Ownership 403 → zero (Requirement 2.6).
 - Duplicate webhook delivery → zero (Requirement 11.5).
 - Quota already exhausted → zero, and no provider is called (Requirement 14.3).
+- Update from an unlinked sender, or from a linked farmer holding no entitlement → zero, and no service is invoked (Requirements 21.17, 22.13). A `/start` command is zero on the same rule (Requirement 21.18).
 - Provider fallback used → still one unit, plus a `used_fallback` audit row (Requirements 14.4, 14.7).
 - Both providers failed, or the operation timed out → spent, no refund. This is deliberate: those requests consumed real provider capacity, and refunding them would let a failing provider drain the free tier through retries. The farmer is told honestly that Jamee is busy and can retry, and the retry costs a unit.
 
@@ -810,6 +1112,8 @@ Cross-channel sharing (Requirement 14.2) is automatic: the counter key is `(user
 ### Rate limiting versus daily quota
 
 Requirement 13.8's per-farmer rate limiting is a different control from Requirement 14.1's daily quota and is kept separate: same table, `window_kind = 'minute'`, its own per-operation ceiling (a small burst allowance chosen so a farmer cannot loop faster than a human works, and set independently of the daily quota), checked at step 5 and never refunded because it precedes the reserve. Minute rows are pruned by a periodic delete; at the 6-tester scale a prune is a convenience, not a requirement.
+
+Requirement 13.8 also covers the Payment_Order endpoint, which has a session and therefore keys on the farmer like every other limited route. Requirement 13.9's payment-webhook limit is the one that cannot, because it has no farmer at all — see **D16** and migration `0013`.
 
 ---
 
@@ -829,13 +1133,13 @@ Note what mechanism 1 does *not* change: Requirements 2.3 and 2.4 still gate on 
 
 | Object | Written by | Deleted when | Deleted by | Requirement |
 | --- | --- | --- | --- | --- |
-| `voice-messages/{user_id}/…` original | Browser (web) or service role (WhatsApp) | Immediately after its transcript is persisted as a `messages` row | `VoiceService`, service-role client | 8.9 |
+| `voice-messages/{user_id}/…` original | Browser (web) or service role (Telegram) | Immediately after its transcript is persisted as a `messages` row | `VoiceService`, service-role client | 8.9 |
 | `voice-messages/…` original, transcription failed or transcript empty | same | Retention sweep, once older than the window | `RetentionService`, service-role client | 8.10, 18.4 |
-| `crop-images/…/{uuid}.{ext}` — Full_Size_Image | Browser (web) or service role (WhatsApp) | Retention sweep, once its `diagnoses` row is older than the window | `RetentionService`, service-role client | 18.3 |
+| `crop-images/…/{uuid}.{ext}` — Full_Size_Image | Browser (web) or service role (Telegram) | Retention sweep, once its `diagnoses` row is older than the window | `RetentionService`, service-role client | 18.3 |
 | `crop-images/…/{uuid}.thumb.{ext}` — Thumbnail_Derivative | Browser only | Never | — | 18.5 |
 | `diagnoses`, `messages`, `conversations`, `usage_logs` rows | Services | Never by this design | — | 18.6 |
 
-**The browser never deletes.** Every deletion runs server-side with the service role, for one reason that applies to both paths: the WhatsApp path has no farmer session at all, so a session-scoped delete could not be the single implementation. Making the service role the only deleter keeps one code path and one audit story. It is also why the storage policies get narrowed to `select, insert` (see migration `0009` above) — a farmer session has no legitimate reason to hold `delete` on an object the history view depends on.
+**The browser never deletes.** Every deletion runs server-side with the service role, for one reason that applies to both paths: the Telegram path has no farmer session at all, so a session-scoped delete could not be the single implementation. Making the service role the only deleter keeps one code path and one audit story. It is also why the storage policies get narrowed to `select, insert` (see migration `0009` above) — a farmer session has no legitimate reason to hold `delete` on an object the history view depends on.
 
 **Why voice originals go on success rather than on a timer.** Requirement 8.8 rules out synthesized speech and nothing in the requirements reads a recording back; the transcript is the durable artefact, persisted as a `messages` row with `input_kind = 'voice'`. So once that row is committed, the object has no reader. Deleting it there removes roughly half the accumulation rate at its source rather than deferring it to a sweep.
 
@@ -852,7 +1156,7 @@ Deletion is idempotent by construction (Requirement 18.10): scan 1's `where full
 
 ### RLS, storage policies, and why the application check is the boundary
 
-The service role bypasses RLS and bypasses the storage path policies, so neither of them constrains the sweep. That is the same situation as the WhatsApp adapter and the quota functions, and it gets the same answer from *Security boundary → Defence in depth*: **every service-role operation carries an explicit `user_id` anchor, and one without it is a defect.**
+The service role bypasses RLS and bypasses the storage path policies, so neither of them constrains the sweep. That is the same situation as the Telegram adapter, the access services, and the quota functions, and it gets the same answer from *Security boundary → Defence in depth*: **every service-role operation carries an explicit `user_id` anchor, and one without it is a defect.**
 
 Concretely, for deletion that means the sweep never deletes a path it invented or a path it found by listing a bucket root:
 
@@ -928,7 +1232,7 @@ The list-render line is the one that changes character rather than magnitude: at
 Three things the amendment does not solve. None is a defect against Requirement 18; all three would be expensive to rediscover.
 
 - **A pathological voice day is not bounded by any window.** Requirement 8.2 admits recordings up to 10 MB, and 120 of those is 1.2 GB — past the whole allowance inside a single day, before any sweep could run, and none of it deleted on success if the transcriptions also fail. Reaching it needs all six pilot farmers to spend their full voice quota on maximum-size recordings, so it is abuse rather than use. The mechanisms that would actually bound it — a lower voice admission ceiling, or client-side audio re-encoding — are outside the approved scope of this amendment and are recorded here as the follow-up decision, not adopted.
-- **WhatsApp-originated diagnoses have no thumbnail.** Requirement 2.13 puts thumbnail production in the browser, and the WhatsApp path has no browser: the adapter downloads bytes into a function and uploads them with the service role. Producing a thumbnail there would mean server-side image decoding in the one code path where bytes already move through a function, which V19's Active-CPU note flags as the path worth measuring. So those entries take Requirement 12.7's fallback and render the full-size original in the list until the window elapses, then Requirement 12.10's no-image state. That is why 12.7 exists as a first-class criterion rather than as retention-only degradation — it carries the WhatsApp channel too.
+- **Telegram-originated diagnoses have no thumbnail.** Requirement 2.13 puts thumbnail production in the browser, and the Telegram path has no browser: the adapter downloads bytes into a function and uploads them with the service role. Producing a thumbnail there would mean server-side image decoding in the one code path where bytes already move through a function, which V19's Active-CPU note flags as the path worth measuring. So those entries take Requirement 12.7's fallback and render the full-size original in the list until the window elapses, then Requirement 12.10's no-image state. That is why 12.7 exists as a first-class criterion rather than as retention-only degradation — it carries the Telegram channel too. One thing the channel change improves here: Telegram's `photo[]` array offers several server-side size variants (V26), so the adapter can *choose* a smaller variant for the stored original instead of decoding anything, which narrows the gap without adding CPU. Whether that is worth doing is an implementation call, not a design commitment.
 - **Thumbnails accumulate without bound.** Covered in the arithmetic above. The alternative — sweeping thumbnails on a longer second window — would need a second configurable constant and would make history entries lose their image entirely, so it is not adopted here.
 
 All schemas live in `src/lib/schemas.ts`; all types are inferred from them, never hand-declared twice. The verified-condition list is declared once and reused by the Zod enum, the TypeScript union, and the SQL check constraints above.
@@ -948,7 +1252,7 @@ export const VERIFIED_CONDITIONS = [
 export const verifiedConditionSchema = z.enum(VERIFIED_CONDITIONS);
 export const severitySchema = z.enum(['none', 'low', 'moderate', 'high']);
 export const languageSchema  = z.enum(['en', 'hi', 'mr']);
-export const channelSchema   = z.enum(['web', 'whatsapp']);
+export const channelSchema   = z.enum(['web', 'telegram']);
 
 export type VerifiedCondition = z.infer<typeof verifiedConditionSchema>;
 export type Severity = z.infer<typeof severitySchema>;
@@ -1091,6 +1395,40 @@ export const voiceResponseSchema = z.object({
 
 Requirement 2.2 also permits a diagnosis request without a conversation id; Requirement 7.5 then requires the API to create one and attach the diagnosis, which is why `conversationId` is optional on diagnose and required on chat and voice.
 
+### Access contracts — linking and payment
+
+Both of these take **no request body at all**, and that is the contract rather than an omission. Requirement 21.1 binds the token to the session's farmer and Requirement 22.2 determines the amount, the currency, and the owner server-side, so there is nothing a client could legitimately send. An endpoint that accepted a `userId` or an `amount` would have to validate it against the session anyway, and the only outcome of accepting it is a field an attacker can try.
+
+```ts
+// POST /api/link/token       — mint (Requirement 21.1). No request body.
+export const linkTokenResponseSchema = z.object({
+  deepLink: z.string().url(),                       // https://t.me/<bot>?start=<token>
+  expiresAt: z.string().datetime(),                 // so the UI can say "valid for N minutes"
+});
+// DELETE /api/link/token     — unlink (Requirement 21.15). No request body, no response body.
+
+// GET  /api/profile/access   — what the profile screen renders (21.20, 22.18)
+export const accessStateSchema = z.object({
+  telegramLinked: z.boolean(),
+  entitlementActive: z.boolean(),
+  unlockPriceMinor: z.number().int(),               // from BOT_UNLOCK_PRICE (22.4)
+  currency: z.string(),
+});
+
+// POST /api/payment/order    — create (Requirement 22.1). No request body.
+export const paymentOrderResponseSchema = z.object({
+  providerOrderId: z.string().min(1),
+  providerKeyId: z.string().min(1),                 // publishable checkout key, not the secret
+  amountMinor: z.number().int().positive(),
+  currency: z.string(),
+});
+// POST /api/payment/webhook  — no schema is published for this route: its body is the
+// provider's, it is authenticated by signature alone (22.24), and it is parsed only
+// after verification (D15). Its shape is V27, not Jamee's.
+```
+
+The deep link is returned already assembled rather than as a bare token, so the bot username lives in exactly one place. `paymentOrderResponseSchema` returns the *publishable* key id and never the key secret; a `checkout key` that appears in a response body is fine by design, a secret that does is a leak. `accessStateSchema` returns `entitlementActive` as a boolean and not the entitlement row, because the browser has no use for the payment id and every reason not to hold it.
+
 ### Localized error envelope
 
 Every non-2xx response from the API layer uses one shape (Requirement 15.3):
@@ -1142,7 +1480,38 @@ export interface VoiceService {
 }
 ```
 
-`channel` being a required parameter is what makes Requirement 16.5 structurally true — a caller cannot forget it, and both route handlers and the WhatsApp adapter pass literals.
+`channel` being a required parameter is what makes Requirement 16.5 structurally true — a caller cannot forget it, and both route handlers and the Telegram adapter pass literals.
+
+Note what these three signatures do **not** carry: no entitlement flag, no linking state, and no Telegram identifier. That is **D14** expressed as a type. A service that cannot see an entitlement cannot gate on one, so Requirement 22.17's "the web stays free" cannot be broken by an edit inside a service, and **D7**'s parity claim stays a claim about one code path.
+
+The access services are separate interfaces, and each returns a decision rather than a reply — the adapter owns wording and language selection (Requirements 21.19, 22.14):
+
+```ts
+export type BindOutcome =
+  | { kind: 'bound' }                          // 21.6
+  | { kind: 'already_bound_to_this_account' }  // 21.10 - token consumed, no write
+  | { kind: 'replaced'; previousTelegramUserId: number }  // 21.11 + 21.12 notice
+  | { kind: 'taken_by_other_account' }         // 21.13 - token left unconsumed
+  | { kind: 'invalid' };                       // 21.8 - unknown | expired | consumed,
+                                               //   one kind on purpose, never three
+
+export interface LinkingService {
+  mint(authUserId: string): Promise<{ deepLink: string; expiresAt: string }>;
+  consumeAndBind(token: string, telegramUserId: number): Promise<BindOutcome>;  // one txn
+  unlink(authUserId: string): Promise<void>;    // clears the column, invalidates tokens
+}
+export interface EntitlementService {
+  holdsEntitlement(authUserId: string): Promise<boolean>;
+  grant(input: { authUserId: string; providerPaymentId: string;
+                 paymentOrderId: string }): Promise<'granted' | 'already_granted'>;
+}
+export interface PaymentService {
+  createOrder(authUserId: string): Promise<PaymentOrderResponse>;
+  handleVerifiedEvent(payload: unknown): Promise<'granted' | 'already_granted' | 'ignored'>;
+}
+```
+
+`BindOutcome` collapses unknown, expired, and consumed into a single `invalid` variant at the *type* level, which is how **D13**'s no-oracle rule survives refactoring: a future contributor adding a friendlier message for "expired" would have to widen the union first, and widening it is a visible change with a reason attached in this document. `holdsEntitlement` returns a boolean rather than the row for the same reason `accessStateSchema` does — the gate needs a yes or no, and anything more is an invitation to branch on payment details in the adapter.
 
 ---
 
@@ -1297,80 +1666,113 @@ Checks 2–4 are heuristics over *presentation*; the substantive guarantee is st
 
 ---
 
-## WhatsApp adapter
+## Telegram adapter
 
-One route, `src/app/api/whatsapp/route.ts`, with two verbs. The route handler stays thin; all logic sits in `src/lib/whatsapp.ts` and the shared services.
+*This section replaces the WhatsApp adapter section in full (Amendment A1).* One route, `src/app/api/telegram/route.ts`, with **one** verb. The route handler stays thin; all logic sits in `src/lib/telegram.ts`, the access services, and the shared services.
 
-### GET — webhook verification
+There is no GET handler. Telegram has no verification challenge: registration is an outbound `setWebhook` call Jamee makes once, supplying the `Webhook_Secret_Token` (Requirement 11.1), so there is no inbound handshake to answer and the old `WEBHOOK_VERIFY_TOKEN_INVALID` code retires with it.
 
-Compare the received verify token against `WHATSAPP_VERIFY_TOKEN` using a timing-safe comparison, echo the challenge with 200 on match (Requirement 11.1), respond 403 on mismatch (Requirement 11.2). Query parameter names are Meta's — **VERIFY (V12)**.
-
-### POST — signature verification over the raw body
-
-The signature is an HMAC over the **exact bytes Meta signed**. `request.json()` discards those bytes, and re-serializing the parsed object will not reproduce them (key order, whitespace, unicode escaping). So the body is read as text first, verified, and only then parsed:
+### POST — secret token before anything else
 
 ```ts
-export async function POST(request: Request) {
-  const raw = await request.text();                     // read ONCE, as text
-  const signature = request.headers.get(META_SIGNATURE_HEADER);   // VERIFY name (V13)
+export const maxDuration = 60;                          // Serverless_Duration_Ceiling
 
-  if (!verifySignature(raw, signature, process.env.WHATSAPP_APP_SECRET!)) {
-    return json({ error: { code: 'WEBHOOK_SIGNATURE_INVALID', … } }, 401);  // Req 11.4
+export async function POST(request: Request) {
+  const presented = request.headers.get('X-Telegram-Bot-Api-Secret-Token');  // VERIFY (V24)
+  const configured = serverEnv.TELEGRAM_WEBHOOK_SECRET_TOKEN;                // throws if absent
+
+  // Req 11.2: constant time, and BEFORE the body is read as an update at all.
+  // Req 11.4: an absent configured secret is a FAILED verification, not a skipped one —
+  // serverEnv throwing lands here rather than allowing the request through.
+  if (!timingSafeEqualStr(presented, configured)) {
+    return json({ error: { code: 'WEBHOOK_SECRET_TOKEN_INVALID' } }, 401);   // Req 11.3
   }
-  const payload = whatsappWebhookSchema.safeParse(JSON.parse(raw));         // Req 11.3 order
-  if (!payload.success) return new Response(null, { status: 200 });         // ack + ignore
-  return handleInbound(payload.data);
+
+  const update = telegramUpdateSchema.safeParse(await request.json());       // VERIFY (V24)
+  if (!update.success) return new Response(null, { status: 200 });           // ack + ignore
+  return handleInbound(update.data);
 }
 ```
 
-`verifySignature` uses a constant-time comparison over the computed digest. Algorithm and encoding are Meta's — **VERIFY (V13)**. Requirement 11.4 is explicit that no shared service is invoked on a signature failure, so verification precedes parsing, profile resolution, and every service call. This 401 is the one deliberate exception to Requirement 10.11's "acknowledge with 200": an unsigned request is not an accepted delivery.
+Three things about that shape. The comparison is over a header rather than a digest, so nothing couples it to the raw body bytes — **D12** explains why that is a simplification rather than a weakening, and why `request.json()` is safe here when it was forbidden on the retired WhatsApp path. `timingSafeEqualStr` handles the null case by comparing against a fixed-length dummy, so a missing header takes the same time as a wrong one. And the 401 is the one deliberate exception to Requirement 10.11's "acknowledge with 200": an unauthenticated request is not an accepted delivery, and Requirement 11.3 requires the body to go unparsed.
+
+A well-formed request whose *payload* does not parse is acknowledged with 200 and dropped. That is not laxity: Telegram retries a non-200, and a payload Jamee cannot parse will not parse on the retry either, so answering anything else buys an infinite redelivery loop for an update Jamee was never going to handle.
 
 ### Inbound processing order
 
+Requirement 22.16 fixes the first four steps as an ordering obligation, so this list is the contract rather than an implementation preference.
+
 ```
-1. Parse payload → { providerMessageId, fromPhone, type, textBody?, mediaId? }   [VERIFY V12]
-2. INSERT INTO whatsapp_inbound (provider_message_id, …)
+1. Parse update → { updateId, telegramUserId, type, textBody?, fileId?,
+                    startPayload? }                            [VERIFY V24, V26]
+2. INSERT INTO telegram_inbound (update_id, …)
      - unique violation → log duplicate_ignored, return 200, ZERO quota,
-       no service call                                        [Requirements 11.5, 11.6]
-3. Resolve profiles.phone = fromPhone                          [Requirement 10.2]
-     - no profile → send sign-in instructions, mark 'rejected', 200, zero quota  [10.3]
-4. Reject unsupported type (not text/image/audio) → reply "photos, text, voice
+       no service call                          [Requirements 11.5, 11.6, 11.7, 11.8]
+3. /start short-circuit                                        [Requirement 21]
+     - with a token payload  → LinkingService.consumeAndBind (one txn), reply per
+       BindOutcome, mark 'processed', 200, ZERO quota            [21.6–21.13, 21.18]
+     - with no token payload → linking instructions, 200, zero quota        [21.9]
+     - no shared service is invoked on this branch either way              [21.18]
+4. Resolve profiles.telegram_user_id = telegramUserId           [Requirement 10.2]
+     - no profile → linking instructions, mark 'unlinked', 200, zero quota
+       (the reply is IN ADDITION TO the 200, not instead of it)      [10.3, 21.17]
+5. EntitlementService.holdsEntitlement(profile.id)              [Requirement 22.13]
+     - false → unlock reply naming the price and where to pay, in the Profile's
+       language; mark 'not_entitled'; 200; zero quota; NO Message and NO
+       Diagnosis_Result persisted                                    [22.13, 22.14]
+6. Reject unsupported type (not text/photo/voice) → reply "photos, text, voice
    notes", mark 'rejected', 200, zero quota                    [Requirement 10.9]
-5. Find-or-create the farmer's active WhatsApp conversation    [Requirements 10.5, 10.8]
-6. Dispatch by type:
-     image → download media → service-role upload → DiagnosisService  [10.4]
-     text  → ChatService with the conversation id                     [10.5]
-     audio → download media → service-role upload → VoiceService      [10.6]
-7. Send the reply text via the Cloud API
-8. Mark whatsapp_inbound.status = 'processed', return 200       [Requirement 10.11]
+7. Find-or-create the farmer's active Telegram conversation    [Requirements 10.5, 10.8]
+8. Dispatch by type:
+     photo → getFile + download → service-role upload → DiagnosisService  [10.4]
+     text  → ChatService with the conversation id                         [10.5]
+     voice → getFile + download → service-role upload → VoiceService      [10.6]
+9. Send the reply via sendMessage
+10. Mark telegram_inbound.status = 'processed', return 200      [Requirement 10.11]
 ```
 
-Step 2 sitting above steps 3–6 is what makes Requirement 11.5 true in the strong sense: a redelivery cannot spend quota, cannot call a provider, and cannot produce a second reply, because the insert fails before any of that is reachable.
+Step 2 sitting above steps 3–8 is what makes Requirement 11.5 true in the strong sense, and Requirement 11.7 now says so directly: a redelivery cannot spend quota, cannot call a provider, cannot download media, and cannot produce a second reply, because the insert fails before any of that is reachable. It also protects the linking flow — a redelivered `/start` cannot produce a second binding attempt, which is a second guard over the same property **D13**'s atomic statement guarantees on its own.
 
-One consequence of that ordering: step 2 precedes profile resolution, while `usage_logs.user_id` is `not null`. The `duplicate_ignored` row is therefore written with the `user_id` already stored on the conflicting `whatsapp_inbound` row. When that column is null — the original delivery came from an unresolvable number — the duplicate is recorded by the `whatsapp_inbound` status alone and no `usage_logs` row is written. Requirement 14.6 asks for a usage row per completed model operation, and a duplicate completes none, so the audit stays correct either way.
+Step 3 sits above resolution deliberately. A `/start` carrying a valid token arrives precisely *because* the sender resolves to nothing yet, so a resolution check ahead of it would reject the one update whose whole purpose is to create the resolution.
+
+Steps 4 and 5 both reply and both spend nothing, and they are separate steps because they mean different things to the farmer: step 4 says "Jamee does not know who you are yet, here is how to link", step 5 says "Jamee knows exactly who you are, and the bot needs a one-time unlock". Collapsing them into one message would leave a farmer who has paid but not linked, or linked but not paid, with no idea which half is missing. Requirement 22.18 covers the same distinction from the web side.
+
+One consequence of the ordering: step 2 precedes profile resolution, while `usage_logs.user_id` is `not null`. The `duplicate_ignored` row is therefore written with the `user_id` already stored on the conflicting `telegram_inbound` row. When that column is null — the original delivery came from an unlinked sender — the duplicate is recorded by the `telegram_inbound` status alone and no `usage_logs` row is written. Requirement 14.6 asks for a usage row per completed model operation, and a duplicate completes none, so the audit stays correct either way. Gated and unlinked updates are recorded the same way, through `status = 'not_entitled'` or `'unlinked'`, for the same reason: they complete no model operation.
 
 ### Media download and upload
 
-Meta's media retrieval is a two-step flow (media id → a short-lived media URL → an authenticated binary fetch) — **VERIFY the exact steps and required auth header (V14)**. The adapter then uploads the bytes with the **service-role** client, because a webhook carries no farmer session, writing to `crop-images/{profile.id}/{YYYY}/{MM}/{uuid}.{ext}`. Keeping the `{user_id}/` prefix means the object is readable later by that farmer's own session under the storage policy, which is what lets WhatsApp diagnoses appear in the web history with working thumbnails (Requirements 12.2, 12.5).
+Telegram's retrieval is also two calls, but they are not Meta's two calls, and the difference matters to the code. `getFile(file_id)` returns a `file_path`; the bytes are then fetched from the Bot API **file endpoint** with that path appended, and the bot token is part of the URL rather than an `Authorization` header — **VERIFY the exact URL form, the `file_path` validity window, and the bot-download size ceiling (V25)**. Consequences worth stating because they read as trivia until they bite:
 
-Content type and size are checked against the same limits as the web path before upload; an oversized or unsupported media item gets a plain-language reply and spends nothing.
+- **The bot token appears in a URL.** So that URL is never logged, never put in an error message, and never returned to a farmer. The existing rule that no provider payload enters the error envelope (Requirement 15.6) already covers the farmer-facing half; the logging half is a review item on `src/lib/telegram.ts`.
+- **A `file_path` expires.** It is fetched immediately before the download and never cached across invocations, which suits an inline handler (**D11**) and would not suit a deferred one.
+- **The container question is answered rather than open.** A `voice` message is OGG/Opus (V26), which V10's accepted list includes, so Requirement 10.6 is satisfiable — this is the criterion the retired V14 row recorded as unsatisfiable. The adapter still checks the reported `mime_type` against V10's list before downloading, because "always OGG/Opus" is a documented guarantee and not a verified runtime fact, and the check is one comparison. A `voice` note and an `audio` file are different update types with different guarantees, so the adapter admits `voice` and treats `audio` and `document` as the unsupported type of Requirement 10.9.
+
+The adapter then uploads the bytes with the **service-role** client, because a webhook carries no farmer session, writing to `crop-images/{profile.id}/{YYYY}/{MM}/{uuid}.{ext}`. Keeping the `{user_id}/` prefix means the object is readable later by that farmer's own session under the storage policy, which is what lets Telegram diagnoses appear in the web history (Requirements 12.2, 12.5) — through Requirement 12.7's full-size fallback, since this path produces no thumbnail.
+
+Content type and size are checked against the same limits as the web path before upload; an oversized or unsupported media item gets a plain-language reply and spends nothing. Telegram reports no duration on a voice note either, so the web recorder's 120-second check has nothing to compare on this channel and the size cap is the operative bound — the same honest gap the retired V14 row recorded, carried forward because it is a property of inbound chat media rather than of any one provider.
 
 ### Conversation find-or-create
 
-`ConversationService.findOrCreateActive(userId, 'whatsapp')` returns the most recently updated `channel = 'whatsapp'` conversation for that farmer, creating one when none exists. Because Requirement 10.8 requires follow-ups to resolve against the most recent diagnosis in *that* conversation, the WhatsApp channel deliberately keeps a single long-running thread rather than starting a new conversation per image — a new image simply appends a new diagnosis to the thread, and "why?" resolves to the latest one. Web conversations are separate rows (`channel = 'web'`), so a web thread and a WhatsApp thread never bleed into each other while still sharing one identity and one quota.
+`ConversationService.findOrCreateActive(userId, 'telegram')` returns the most recently updated `channel = 'telegram'` conversation for that farmer, creating one when none exists. Because Requirement 10.8 requires follow-ups to resolve against the most recent diagnosis in *that* conversation, the Telegram channel deliberately keeps a single long-running thread rather than starting a new conversation per image — a new image simply appends a new diagnosis to the thread, and "why?" resolves to the latest one. Web conversations are separate rows (`channel = 'web'`), so a web thread and a Telegram thread never bleed into each other while still sharing one identity and one quota.
+
+The conversation is keyed on the resolved `profiles.id`, not on the `telegram_user_id`. So a farmer who unlinks and re-links — from a different Telegram account, even — comes back to the same thread, and Requirement 21.15's "retain every Conversation, Message, and Diagnosis_Result" holds with no migration of rows. That is the same reasoning **D14** applies to the entitlement, applied to history.
 
 ### Acknowledgement versus processing
 
-Requirement 10.11 wants a 200 for every accepted delivery; Requirement 10.10 wants the whole invocation inside the function duration ceiling. Meta redelivers on non-200, and a late 200 risks a redelivery that duplicates work.
+Requirement 10.11 wants a 200 for every accepted delivery; Requirement 10.10 wants the whole invocation inside the function duration ceiling. Telegram redelivers on a non-200, and a late 200 risks a redelivery that duplicates work.
 
-**Decision (D11): process inline in one invocation, then acknowledge, with a soft deadline and an idempotency guard.** Reasoning:
+**Decision (D11): process inline in one invocation, then acknowledge, with a soft deadline and an idempotency guard.** *Amended by Amendment A1 — the reasoning is unchanged; the provider names and one retired constraint are.* Reasoning:
 
 - A serverless function on this platform cannot be relied on to keep working after the response is sent unless a supported continuation primitive exists — **VERIFY (V18)**. Designing on an unverified primitive would be the riskier choice.
-- The observed work is one classification call plus one rephrase call plus two Supabase round trips. That fits comfortably inside the assumed 60 s ceiling for a single message.
-- The `whatsapp_inbound` insert already happened, so even if Meta redelivers after a slow 200, the redelivery is dropped as a duplicate. Correctness does not depend on the acknowledgement being fast.
-- A soft deadline (a fraction of the configured ceiling, same constant as the gateway budget) fires before the platform kills the function: the adapter sends "Jamee is taking longer than usual on this photo — please send it again in a moment", marks the row `failed`, and returns 200. Marking it `failed` rather than `processed` is deliberate — it keeps the audit honest, and the farmer's next send is a new `provider_message_id` so it is processed normally.
+- The observed work is one classification call plus one rephrase call plus two Supabase round trips. That fits comfortably inside the assumed 60 s ceiling for a single update.
+- The `telegram_inbound` insert already happened, so even if Telegram redelivers after a slow 200, the redelivery is dropped as a duplicate. **Correctness does not depend on the acknowledgement being fast** — that is the load-bearing sentence in this decision, and it is why the claim precedes anything billable rather than merely preceding the reply.
+- A soft deadline (a fraction of the configured ceiling, same constant as the gateway budget) fires before the platform kills the function: the adapter sends "Jamee is taking longer than usual on this photo — please send it again in a moment", marks the row `failed`, and returns 200. Marking it `failed` rather than `processed` is deliberate — it keeps the audit honest, and the farmer's next send carries a new `update_id` so it is processed normally.
+- `markProcessed` runs **after** the reply is sent, not before. A row marked `processed` on an update whose reply never left the function would make a redelivery a silent no-op and lose the farmer's answer outright.
+- The unit of work is **one update**, not one batch. Telegram delivers updates individually to a webhook, but even if a delivery carried several, each would be claimed and marked on its own `update_id` — a batch-level claim would make one slow item discard the rest.
 
-If V18 confirms a supported continuation primitive, the upgrade path is contained: return 200 immediately after step 2 and move steps 3–8 into the continuation. Nothing in the services changes, because they already take a `channel` and are already idempotent-guarded.
+One input to the old version of this decision is gone: there is no 24-hour customer-service window and no template requirement on this channel (V15 is retired), so a reply emitted late is a latency problem and not an undeliverable message. Telegram's own retry cadence on a non-200 is **V24**.
+
+If V18 confirms a supported continuation primitive, the upgrade path is contained: return 200 immediately after step 2 and move steps 3–10 into the continuation. Nothing in the services changes, because they already take a `channel` and are already idempotent-guarded. The entitlement gate would move with the rest, which is safe because it reads state rather than writing it.
 
 ---
 
@@ -1380,13 +1782,13 @@ If V18 confirms a supported continuation primitive, the upgrade path is containe
 
 | Route | Rendering | Notes |
 | --- | --- | --- |
-| `/` | Server component; `SignInForm` is client | Redirects to `/diagnose` when a session exists |
+| `/` | Server component; `GoogleSignInButton` is client | One control, one provider (Requirement 1.1). Redirects to `/diagnose` when a session exists; shows the "sign-in did not complete" message and offers a retry when the callback returned no exchangeable authorization (Requirement 1.3) |
 | `/diagnose` | Server shell (session + preferred language) + client `ImageUploader` and `DiagnosisResultCard` | Upload, progress, result |
 | `/chat` | Server shell loads conversation + messages via RLS; client `ChatComposer` | Optimistic farmer bubble, server-confirmed answer |
 | `/voice` | Server shell; client `VoiceRecorder` | Needs `MediaRecorder`, so client-only |
 | `/history` | Server component; data via the RLS-scoped server client | Signed thumbnail URLs minted server-side (Requirement 12.5); `EmptyState` invites a first upload when the farmer has no diagnoses (Requirement 12.4) |
 | `/diagnosis/[id]` | Server component | Image, condition or inconclusive label, confidence, severity, full explanation, conversation messages (Requirement 12.3) |
-| `/profile` | Server shell + client form | Display name + preferred language (Requirement 1.8) |
+| `/profile` | Server shell + client form, plus `TelegramLinkCard` and `BotUnlockCard` | Display name + preferred language (Requirement 1.8). The server shell reads the access state so the two cards render from one round trip: linked or not, with the link or unlink action accordingly (Requirement 21.20); entitlement active with no further order offered, or the unlock action with the price (Requirement 22.18). A fresh Link_Token is minted by the action, never on page render, so opening the profile screen does not litter the table with unused capabilities |
 
 Rule of thumb applied throughout: data fetching and signed-URL minting are server-side; anything touching `navigator`, `MediaRecorder`, or local component state is a client component. No route handler is called just to read data a server component can query directly under RLS.
 
@@ -1431,11 +1833,18 @@ Accessibility specifics: every control has a visible label plus an accessible na
 | `SUPABASE_SERVICE_ROLE_KEY` | **Server only** | `lib/supabase/admin.ts` |
 | `GEMINI_API_KEY` | **Server only** | `lib/gemini.ts` |
 | `GROQ_API_KEY` | **Server only** | `lib/groq.ts` |
-| `WHATSAPP_ACCESS_TOKEN` | **Server only** | Media download, send |
-| `WHATSAPP_PHONE_NUMBER_ID` | **Server only** | Send endpoint |
-| `WHATSAPP_VERIFY_TOKEN` | **Server only** | GET challenge |
-| `WHATSAPP_APP_SECRET` | **Server only** | POST signature (Requirement 11.3) |
-| `WHATSAPP_API_VERSION` | Server only | Pinned Meta version (V12) |
+| `TELEGRAM_BOT_TOKEN` | **Server only** | `getFile`, file download, `sendMessage` (V24, V25) |
+| `TELEGRAM_WEBHOOK_SECRET_TOKEN` | **Server only** | Webhook authenticity (Requirements 11.1–11.4, D12) |
+| `NEXT_PUBLIC_TELEGRAM_BOT_USERNAME` | Public (browser) | Assembling the Link_Deep_Link. Not a secret: it is in the link every farmer opens |
+| `RAZORPAY_KEY_ID` | **Server only** | Order creation (V27) |
+| `NEXT_PUBLIC_RAZORPAY_KEY_ID` | Public (browser) | Checkout only. Same value as above, deliberately duplicated under two names so the *secret-adjacent* one is never accidentally read from a client component |
+| `RAZORPAY_KEY_SECRET` | **Server only** | Order creation signing |
+| `RAZORPAY_WEBHOOK_SECRET` | **Server only** | Payment webhook signature (Requirement 22.5, D15) |
+| `RETENTION_SWEEP_SECRET` | **Server only** | Retention sweep gate (Requirement 18.12) |
+
+No SMS provider variable appears, and none is required (Requirement 1.10). The Google OAuth client id and secret are configured in the Supabase dashboard rather than in Jamee's environment, so they are not in this table — V23 confirms where they live and which redirect URLs must be registered.
+
+The duplicated Razorpay key id deserves its note. A single `RAZORPAY_KEY_ID` read from both a server module and a client component would work right up until someone moved the read, at which point the build would silently ship `undefined` to checkout. Two names make the exposure a declaration instead of an accident, and a CI check asserts the unprefixed name never appears in a file containing `'use client'`. `BOT_UNLOCK_PRICE` and `LINK_TOKEN_TTL_MINUTES` are deliberately **not** in this table at all: Requirements 22.4 and 21.4 require them to be compile-time constants read from one place, reviewable in a diff, not values an environment can change without a code review.
 
 Only `NEXT_PUBLIC_`-prefixed values can reach the browser bundle, which is the mechanical guarantee behind Requirement 13.7. Three further layers make an accidental leak hard:
 
@@ -1443,11 +1852,15 @@ Only `NEXT_PUBLIC_`-prefixed values can reach the browser bundle, which is the m
 2. The service-role client is created inside a function (never at module scope) and that function throws when `typeof window !== 'undefined'`.
 3. Secrets are read through a small `serverEnv` accessor in a `server-only` module that validates presence at first use with Zod and fails loudly; no `process.env.X!` scattered through the codebase.
 
-A CI grep asserts that `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and the WhatsApp secrets appear only under `src/lib/**` server modules and `src/app/api/**`, and never in a file containing `'use client'`.
+A CI grep asserts that `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` appear only under `src/lib/**` server modules and `src/app/api/**`, and never in a file containing `'use client'`. `scripts/check-secret-scope.ts` is the existing home for that check.
 
 ### Defence in depth
 
-RLS is the primary authorization boundary and is enabled on all six farmer-facing tables (Requirement 13.1) plus `counters`. Route handlers additionally check the session (Requirement 1.7) and object ownership (Requirement 2.5) rather than relying on RLS alone, because service-role paths (the WhatsApp adapter, quota functions) bypass RLS by design — so for those paths the application check *is* the boundary. Every service-role query is written with an explicit `user_id` predicate for exactly that reason, and code review treats a service-role query without a `user_id` filter as a defect.
+RLS is the primary authorization boundary and is enabled on all six farmer-facing tables plus the three access tables `link_tokens`, `payment_orders`, and `bot_entitlements` (Requirements 13.1, 21.3, 22.23), plus `counters`, `telegram_inbound`, and `webhook_throttle`. Route handlers additionally check the session (Requirement 1.7) and object ownership (Requirement 2.5) rather than relying on RLS alone, because service-role paths (the Telegram adapter, the access services, the quota functions, the retention sweep) bypass RLS by design — so for those paths the application check *is* the boundary. Every service-role query is written with an explicit `user_id` predicate for exactly that reason, and code review treats a service-role query without a `user_id` filter as a defect.
+
+The three access tables carry a `select`-own policy and **no** write policy at all, which is Requirement 22.23's "restrict every write to server-side modules using the Service_Role_Key" expressed the way Postgres enforces it: with RLS enabled and no `insert`, `update`, or `delete` policy, those verbs are unreachable for `anon` and `authenticated`, and only the service role — which bypasses RLS — can write. A farmer session therefore cannot mint a token for someone else, extend an expiry, un-consume a token, mark an order captured, or grant itself an entitlement, and none of that depends on application code being careful.
+
+Two service-role writes in this amendment are worth naming because their tenant anchor is not a `user_id` the caller supplied. The linking bind takes its `user_id` from the token row's own `RETURNING user_id`, never from anything in the Telegram update — a sender cannot nominate whose profile to bind to. The entitlement grant takes its `user_id` from the recorded `payment_orders` row, never from the webhook payload (Requirement 22.7) — a forged-but-somehow-verified payload cannot redirect a grant.
 
 ---
 
@@ -1458,7 +1871,7 @@ One `AppError` type carrying a stable code; one mapping table to HTTP status and
 | Code | HTTP | Retryable | Message intent | Requirement |
 | --- | --- | --- | --- | --- |
 | `AUTH_REQUIRED` | 401 | no | Sign in to continue | 1.7 |
-| `OTP_INVALID` | 400 | yes | Code is incorrect or expired | 1.3 |
+| `OAUTH_INCOMPLETE` | 401 | yes | Sign-in did not complete; offers to sign in again. Replaces `OTP_INVALID`, retired with phone auth. One code for a cancelled authorization, a provider error, and a callback with nothing to exchange — the farmer's next action is identical in all three, and distinguishing them would only describe Google's internals | 1.3 |
 | `LANGUAGE_UNSUPPORTED` | 400 | no | Names `en`, `hi`, `mr` in `details.supportedLanguages` | 9.5 |
 | `MESSAGE_INVALID` | 400 | no | The question could not be read; type it again. The text counterpart of `STORAGE_REF_INVALID`, so `/api/chat`'s body-contract fallback does not name a photo | 7.1, 15.3 |
 | `STORAGE_REF_INVALID` | 400 | no | Reference is not a usable object | 2.2 |
@@ -1473,14 +1886,17 @@ One `AppError` type carrying a stable code; one mapping table to HTTP status and
 | `TRANSCRIPTION_FAILED` | 502 | yes | Could not hear the recording | 8.4 |
 | `PROVIDERS_UNAVAILABLE` | 503 | yes | `en` renders exactly `Jamee is temporarily busy. Please try again shortly.` | 14.5, 14.8, D6 |
 | `DIAGNOSIS_TIMEOUT` | 504 | yes | Names the diagnosis operation | 3.7 |
-| `WEBHOOK_SIGNATURE_INVALID` | 401 | n/a | No body content | 11.4 |
-| `WEBHOOK_VERIFY_TOKEN_INVALID` | 403 | n/a | No body content | 11.2 |
+| `WEBHOOK_SECRET_TOKEN_INVALID` | 401 | n/a | No body content. Missing header, wrong value, and unconfigured secret all land here (D12) | 11.3, 11.4 |
+| `WEBHOOK_SIGNATURE_INVALID` | 401 | n/a | No body content. Now the **payment** webhook's code: missing signature, failed verification, and unconfigured secret are one branch (D15) | 22.6 |
+| `PAYMENT_ORDER_FAILED` | 502 | yes | The payment could not be started; try again shortly. The provider's error text never reaches the farmer | 22.1 |
 | `CONVERSATION_NOT_FOUND` | 404 | no | The conversation could not be found — a `conversationId` that is not a uuid, or is not this farmer's. One code for one meaning, so the response is not an oracle | 7.1 |
 | `DIAGNOSIS_NOT_FOUND` | 404 | no | The result could not be found. Raised by the diagnosis detail screen, a server component rather than an endpoint | 12.3 |
 | `SWEEP_UNAUTHORIZED` | 401 | no | No body content; the sweep route has no human caller | 18.12 |
 | `INTERNAL_ERROR` | 500 | yes | Generic message; no stack trace, no provider payload | 15.6 |
 
 `Inconclusive_Result` is **not** in this table. An inconclusive diagnosis is a successful 200 response carrying `status: 'unknown'` — the request worked, the photo could not be judged. Modelling it as an error would break the single-shape rule (Requirement 6.4) and the quota rule (Requirement 6.7).
+
+**Four Telegram outcomes are not in this table either, for the same kind of reason.** The linking instructions of Requirement 10.3, the invalid-link reply of 21.8, the already-linked-elsewhere reply of 21.13, and the unlock reply of 22.14 are all *successful* handling of a well-formed authenticated delivery. They are farmer-facing sentences from the message catalogs (D5), selected by the adapter and sent over `sendMessage`, and every one of them is accompanied by HTTP 200 to Telegram (Requirements 10.11, 21.17). Giving them error codes would put them in an envelope no farmer ever sees — Telegram is not an HTTP client reading Jamee's JSON — and would make the `webhook 200` rule look like it had exceptions it does not have. Their audit trail is the `telegram_inbound.status` column, not `usage_logs`.
 
 A single `withErrorHandling` wrapper in the API layer catches `AppError` and maps it, and catches everything else as `INTERNAL_ERROR` after logging the real cause server-side only.
 
@@ -1496,19 +1912,24 @@ Unit and property tests are complementary: property tests cover the universal ru
 - **Grounding.** Rephrase requests contain the knowledge-base arrays and no other agronomic content; `Tomato Healthy` produces no treatment text; canonical names survive `en`/`hi`/`mr` untouched (Requirements 3.4, 4.6, 9.4).
 - **Quota atomicity.** Against a real Postgres instance: fire the reserve concurrently at the limit boundary and assert the total never exceeds the limit and no reservation is lost; assert refund never drives `used` below zero.
 - **Spend rule.** Ownership 403 → zero; duplicate delivery → zero; inconclusive → exactly one; pre-provider failure → refunded to zero.
-- **Signature verification.** Valid signature passes; flipped byte, truncated digest, absent header, and a re-serialized body all fail; comparison is constant-time (Requirement 11.3).
-- **Idempotency.** Two concurrent inserts of the same `provider_message_id`: one proceeds, one is dropped, no service call and no reply from the second.
+- **Webhook secret token.** Matching header passes; absent header, wrong value, right value with a flipped byte, and an unconfigured secret all yield 401 with the body unparsed; the comparison is constant-time and takes the same time for an absent header as a wrong one (Requirements 11.2–11.4).
+- **Payment signature.** Valid signature over the raw body passes; flipped byte, truncated digest, absent header, unconfigured secret, and a re-serialized body all fail; comparison is constant-time (Requirements 22.5, 22.6).
+- **Idempotency.** Two concurrent inserts of the same `update_id`: one proceeds, one is dropped, no service call and no reply from the second. Two concurrent verified webhooks carrying the same `provider_payment_id`: one grants, one is dropped, exactly one `bot_entitlements` row exists (Requirements 22.10, 22.11).
+- **Link token consume-and-bind.** Two concurrent `/start` deliveries of one token produce exactly one binding; an expired token and a consumed token and an unknown token produce byte-identical replies; a token whose target `telegram_user_id` is already on another profile leaves both profiles unchanged and the token unconsumed (Requirements 21.7, 21.8, 21.13).
+- **Entitlement gate.** A linked farmer with no entitlement gets the unlock reply for a photo, a text, and a voice note, with zero quota spent, no `messages` row, and no `diagnoses` row; the same farmer's `/start` is still served; the same farmer's web requests are served unchanged (Requirements 22.13–22.15, 22.17).
 - **Fallback matrix.** Primary `RATE_LIMIT` → fallback used and `used_fallback` recorded; primary `OTHER` → no fallback; single-member chain failing → `PROVIDERS_UNAVAILABLE` (Requirement 14.8).
 - **Window keys.** Asia/Kolkata day boundary, including a UTC-evening timestamp that belongs to the next Kolkata day.
 - **Error mapping.** Every code yields its status and a non-empty message in all three languages; the `en` `PROVIDERS_UNAVAILABLE` string matches Requirement 14.5 byte-for-byte.
 
 ### Static architecture check (CI)
 
-The single-implementation claims are structural, not behavioural, so they are verified by a static check rather than by a property test: exactly one `DiagnosisService` module and one `ChatService` module exist; both the route handlers and the WhatsApp adapter import those modules rather than reimplementing image analysis, grounding, or rephrasing; and nothing under `src/services/**` or `src/lib/**` imports from `src/app/**`. That last rule is what keeps the first two true as the codebase grows (Requirements 3.8, 7.7, 16.1–16.4).
+The single-implementation claims are structural, not behavioural, so they are verified by a static check rather than by a property test: exactly one `DiagnosisService` module and one `ChatService` module exist; both the route handlers and the Telegram adapter import those modules rather than reimplementing image analysis, grounding, or rephrasing; and nothing under `src/services/**` or `src/lib/**` imports from `src/app/**`. That last rule is what keeps the first two true as the codebase grows (Requirements 3.8, 7.7, 16.1–16.4).
+
+Two checks are added by Amendment A1, and both are structural for the same reason — they assert an *absence*, which no behavioural test can do convincingly. First, no module under `src/services/diagnosis|chat|voice` imports `entitlement.service`, which is **D14** and Requirement 22.17 enforced by the dependency graph rather than by vigilance. Second, `profiles.phone` has no reader outside `supabase/migrations/**`, which keeps Requirement 1.9's "takes part in no identity resolution" true as the codebase grows rather than only on the day it was written.
 
 ### Integration tests (mocked providers, real Postgres)
 
-Providers are mocked at the adapter seam so the gateway, services, validation, persistence, and RLS are all real. Scenarios follow the requirements' own test matrix: healthy crop, clear diseased crop, blurry image, non-plant image, multiple leaves; chat in three languages plus a subject-less follow-up and an unknown question; voice with empty and noisy transcripts; WhatsApp text, image, audio, unsupported type, duplicate delivery, timeout, and provider rate limit. RLS is verified by attempting cross-farmer reads with a second farmer's session and asserting zero rows.
+Providers are mocked at the adapter seam so the gateway, services, validation, persistence, and RLS are all real. Scenarios follow the requirements' own test matrix: healthy crop, clear diseased crop, blurry image, non-plant image, multiple leaves; chat in three languages plus a subject-less follow-up and an unknown question; voice with empty and noisy transcripts; Telegram text, photo, voice note, unsupported type, unlinked sender, **linked sender holding no entitlement**, duplicate update, timeout, and provider rate limit; account linking across a valid first-time link, an expired token, a consumed token, a Telegram account already linked elsewhere, and a `/start` with no payload; payment across an abandoned checkout, a replayed webhook, a forged signature, a captured payment opening a previously gated sender, and a flood of unauthenticated calls on the webhook route. RLS is verified by attempting cross-farmer reads with a second farmer's session and asserting zero rows — now including `link_tokens`, `payment_orders`, and `bot_entitlements`, and including a write attempt on each, which must fail rather than return zero rows.
 
 ### Manual tester validation
 
@@ -1516,8 +1937,9 @@ Some things cannot be automated honestly:
 
 - Hindi and Marathi **transcription quality** on real farmer speech with field background noise. Automated tests can assert a non-empty transcript; only a human speaker can judge whether it is right.
 - Hindi and Marathi **explanation readability** — whether a rephrased knowledge-base entry is actually plain language for a smallholder farmer.
-- **WhatsApp end-to-end** from a real handset: send a photo, receive a diagnosis, ask a follow-up, confirm the same content appears in the web history (Requirements 10.7, 12.2).
-- **Real SMS OTP delivery** through the configured provider (Requirement 1.1).
+- **Telegram end-to-end** from a real handset, in the order the release acceptance criteria fix: pay the one-time unlock, see the web app present the entitlement as active, open the deep link and link the account, send a photo, receive a diagnosis, ask a follow-up, and confirm the same content appears in the web history (Requirements 10.7, 12.2, 22.18, 22.19). The order is not a preference — a tester who sends the photo first sees the gated reply of 22.14, and that is correct behaviour rather than a defect.
+- **Google sign-in on a real device**, including the cancel path, which must produce the "sign-in did not complete" message and a working retry (Requirement 1.3).
+- **One real checkout**, in whichever provider mode the deployment is configured for. Requirements O22-1 (the price) and O22-3 (live versus test mode) are both undecided, so this step cannot be fully specified here; what the testing report records either way is which mode ran and whether a captured payment opened a previously gated sender.
 - **Screen-reader and mobile-device accessibility** pass.
 
 Results are recorded in `docs/TESTING_REPORT.md` (Requirement 17.5).
@@ -1526,26 +1948,27 @@ Results are recorded in `docs/TESTING_REPORT.md` (Requirement 17.5).
 
 ## Deployment
 
-Steps for `docs/DEPLOYMENT.md` (Requirement 17.3), each with the V-items it must resolve:
+Ten steps for `docs/DEPLOYMENT.md` (Requirement 17.3), each with the V-items it must resolve:
 
 1. Create the Supabase project; record URL, anon key, service-role key.
-2. Enable phone OTP auth and configure the SMS provider (V2).
-3. Run `supabase/migrations/*` in order; assert `select count(*) = 5 from disease_knowledge` (Requirement 4.1) and that both buckets exist and are private (Requirement 13.5).
+2. Configure the Google OAuth client and register the callback redirect URLs for local and deployed origins, then enable the Google provider in Supabase (V23). No SMS provider is configured, and none is needed (Requirement 1.10).
+3. Run `supabase/migrations/*` in order; assert `select count(*) = 5 from disease_knowledge` (Requirement 4.1), that both buckets exist and are private (Requirement 13.5), and that RLS is enabled on all nine farmer-facing and access tables (Requirements 13.1, 21.3, 22.23).
 4. Obtain `GEMINI_API_KEY` and `GROQ_API_KEY`; resolve model identifiers (V6, V8, V9, V10) and record them in `docs/API.md`.
-5. Create the Meta app and WhatsApp Business number; set `WHATSAPP_*` variables; pin the API version (V12).
-6. Deploy to Vercel with all environment variables; confirm the permitted `maxDuration` on the plan (V16, V17).
-7. Register the webhook callback URL and verify token with Meta; confirm the GET challenge returns 200 and a wrong token returns 403.
-8. Smoke test the release acceptance sequence from the requirements, end to end, on a phone.
-9. Record free-tier headroom for 6 farmers from the resolved V19 numbers.
+5. Create the Telegram bot with BotFather; record `TELEGRAM_BOT_TOKEN` and the bot username; generate `TELEGRAM_WEBHOOK_SECRET_TOKEN` from a cryptographically secure source (V24).
+6. Create the Razorpay account; record the key id, key secret, and webhook secret; register the payment webhook endpoint and subscribe it to the captured and failed payment events; record whether this environment is in test or live mode (Requirements 22.25, O22-3; V27).
+7. Deploy to Vercel with all environment variables; confirm the permitted `maxDuration` on the plan (V16, V17).
+8. Register the webhook with `setWebhook`, supplying the deployed route URL and the `secret_token` (Requirement 11.1); confirm a POST with no secret-token header returns 401 and that a real message from the bot reaches the route.
+9. Smoke test the release acceptance sequence from the requirements, end to end, on a phone — payment before linking, linking before the photo, as step 6 of that sequence requires.
+10. Record free-tier headroom for 6 farmers from the resolved V19 numbers.
 
 TypeScript strict mode with zero errors is a release gate, enforced in CI (Requirement 17.8).
 
 ### Documentation deliverables (Requirement 17)
 
-- `.env.example` — every variable name with a placeholder, no real secret (17.2).
-- `docs/API.md` — each endpoint's method, request schema, response schema, and error codes, generated from the Zod schemas so it cannot drift (17.4).
-- `docs/DEPLOYMENT.md` — the nine steps above plus the resolved values-to-verify table (17.3).
-- `docs/TESTING_REPORT.md` — image, chat, voice, and WhatsApp scenario outcomes (17.5).
+- `.env.example` — every variable name with a placeholder, no real secret, including the three Razorpay names (17.2, 22.25). `BOT_UNLOCK_PRICE` and `LINK_TOKEN_TTL_MINUTES` do **not** appear here; they are compile-time constants (Requirements 21.4, 22.4).
+- `docs/API.md` — each endpoint's method, request schema, response schema, and error codes, generated from the Zod schemas so it cannot drift (17.4). The two webhook routes are documented with their authentication mechanism in place of a request schema, since neither body is Jamee's.
+- `docs/DEPLOYMENT.md` — the ten steps above, the resolved values-to-verify table, the retention arithmetic (18.2), the recorded Bot_Unlock_Price (22.4), and the note that the Payment_Provider adds no fixed or recurring cost (22.26).
+- `docs/TESTING_REPORT.md` — image, chat, voice, Telegram, account-linking, and payment scenario outcomes (17.5).
 - `supabase/migrations/` — tables, RLS policies, buckets, and the five seed rows (17.6).
 
 ---
@@ -1554,8 +1977,10 @@ TypeScript strict mode with zero errors is a release gate, enforced in CI (Requi
 
 Two seams exist so the deferred requirements do not force a rewrite, and neither is built in this release:
 
-- **Video frame analysis (Requirement 18).** `DiagnosisService` already separates "obtain image bytes" from "classify and ground". A future frame-sampling step would produce N images and reduce them to one `Diagnosis_Result` through the existing validation and grounding path. The `video-inputs` bucket is **not created** in this release.
-- **Expert video calling (Requirement 19).** `needs_expert` is already persisted on every inconclusive diagnosis, so a future "request an expert" action has a query to hang off with no schema change.
+- **Video frame analysis (Requirement 19).** `DiagnosisService` already separates "obtain image bytes" from "classify and ground". A future frame-sampling step would produce N images and reduce them to one `Diagnosis_Result` through the existing validation and grounding path. The `video-inputs` bucket is **not created** in this release.
+- **Expert video calling (Requirement 20).** `needs_expert` is already persisted on every inconclusive diagnosis, so a future "request an expert" action has a query to hang off with no schema change.
+
+*(These two were numbered 18 and 19 in the pre-amendment requirements. They are 19 and 20 now — 18 is Media Lifecycle And Retention, which this release implements.)*
 
 Neither is designed here, tasked, or tested. They appear only to record that the release architecture does not block them.
 
@@ -1568,6 +1993,18 @@ Neither is designed here, tasked, or tested. They appear only to record that the
 Each property below survived a consolidation pass: overlapping acceptance criteria were merged so that no property is implied by another. Criteria classified as example, edge case, integration, or smoke during prework are covered by the testing strategy above rather than by a property here — notably transcription *quality* in Hindi and Marathi (Requirement 8.5), latency against the platform ceiling (Requirements 3.6, 10.10), the architectural single-implementation claims (Requirements 3.8, 7.7, 16.1–16.4, covered by the static architecture check), and free-tier headroom (Requirement 17.7).
 
 Providers are stubbed at the adapter seam for every property test, so 100+ iterations cost nothing at a provider.
+
+> **Amendment A1 — which of these statements the amendment falsified.** The properties below keep their numbers and their wording; restating them and adding the ones the new requirements need is a separate task, so this note records the gap rather than closing it. Nothing here should be read as still true:
+>
+> - **Property 1** is asserted over "any valid E.164 phone number" and over resolving an inbound sender by phone. Both halves are gone (**D8**). Its restatement is over the Auth_User_Id as identity and `profiles.telegram_user_id` as the only resolution route (Requirements 1.4, 1.5, 1.8, 10.2, 21.16).
+> - **Property 23** asserts a GET verify-token challenge and an HMAC over the raw body. Telegram has neither (**D12**). Its restatement is the constant-time secret-token comparison with the body unparsed, plus the `update_id` claim (Requirements 11.2–11.8).
+> - **Property 24** routes by type from "a resolvable phone number" and sends "sign-in instructions" to an unresolvable one. Both need the Telegram vocabulary, and the property now needs a third non-service outcome it does not have: the gated reply of Requirement 22.14.
+> - **Property 25** asserts parity from "the WhatsApp entry point" with no entitlement guard, so as written it is unsatisfiable for a gated farmer rather than merely unexercised — see the amended **D7** and Requirements 10.7 and 10.13.
+> - **Property 20** and **Property 17** are correct in substance and wrong in vocabulary: the interleaving is web and Telegram, and the recorded channel value is `'telegram'`.
+> - **Property 27**'s table list predates the access tables. Tenant isolation now has to hold over `link_tokens`, `payment_orders`, and `bot_entitlements` as well, and over *writes* on those three, which must fail rather than return zero rows (Requirements 21.3, 22.23).
+> - **Property 2** and **Property 28** are not falsified but are incomplete: the protected surface now includes the Link_Token and Payment_Order endpoints (Requirements 21.1, 22.3), and rate limiting now includes the per-caller webhook bound of Requirement 13.9 (**D16**), which no property covers.
+>
+> Four properties the amended requirements need and this set does not contain, listed so the follow-up task has a starting point rather than a blank page: **link-token single use** (one binding from concurrent deliveries, identical replies for unknown, expired, and consumed, and an unconsumed token when the target is taken — Requirements 21.7, 21.8, 21.13); **gate totality** (every inbound update from a linked farmer with no entitlement produces a reply, no service call, no persisted row, and no quota change, while that farmer's web surface is unchanged — Requirements 22.13–22.17); **payment-webhook authenticity and idempotency** (nothing grants without a verified signature over the raw body, an unconfigured secret fails, and any number of redeliveries of one payment id grant exactly once — Requirements 22.5–22.11); and **unlink preserves everything it should** (history retained, entitlement retained, outstanding tokens invalidated — Requirements 21.15, 22.20).
 
 ### Property 1: Identity round-trip across channels
 
