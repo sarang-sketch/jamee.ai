@@ -1994,29 +1994,30 @@ Each property below survived a consolidation pass: overlapping acceptance criter
 
 Providers are stubbed at the adapter seam for every property test, so 100+ iterations cost nothing at a provider.
 
-> **Amendment A1 — which of these statements the amendment falsified.** The properties below keep their numbers and their wording; restating them and adding the ones the new requirements need is a separate task, so this note records the gap rather than closing it. Nothing here should be read as still true:
+> **Amendment A1 — what it falsified, and how this set was repaired.** *Closed.* Every statement A1 falsified has been restated in place, keeping its number, and the four properties the amended requirements needed are now present as Properties 32 through 35. Nothing below is outstanding work. The history is kept because it explains why several of these statements read the way they do, and because a reader who meets the old wording in a test name or a commit should be able to find out what happened to it:
 >
-> - **Property 1** is asserted over "any valid E.164 phone number" and over resolving an inbound sender by phone. Both halves are gone (**D8**). Its restatement is over the Auth_User_Id as identity and `profiles.telegram_user_id` as the only resolution route (Requirements 1.4, 1.5, 1.8, 10.2, 21.16).
-> - **Property 23** asserts a GET verify-token challenge and an HMAC over the raw body. Telegram has neither (**D12**). Its restatement is the constant-time secret-token comparison with the body unparsed, plus the `update_id` claim (Requirements 11.2–11.8).
-> - **Property 24** routes by type from "a resolvable phone number" and sends "sign-in instructions" to an unresolvable one. Both need the Telegram vocabulary, and the property now needs a third non-service outcome it does not have: the gated reply of Requirement 22.14.
-> - **Property 25** asserts parity from "the WhatsApp entry point" with no entitlement guard, so as written it is unsatisfiable for a gated farmer rather than merely unexercised — see the amended **D7** and Requirements 10.7 and 10.13.
-> - **Property 20** and **Property 17** are correct in substance and wrong in vocabulary: the interleaving is web and Telegram, and the recorded channel value is `'telegram'`.
-> - **Property 27**'s table list predates the access tables. Tenant isolation now has to hold over `link_tokens`, `payment_orders`, and `bot_entitlements` as well, and over *writes* on those three, which must fail rather than return zero rows (Requirements 21.3, 22.23).
-> - **Property 2** and **Property 28** are not falsified but are incomplete: the protected surface now includes the Link_Token and Payment_Order endpoints (Requirements 21.1, 22.3), and rate limiting now includes the per-caller webhook bound of Requirement 13.9 (**D16**), which no property covers.
+> - **Property 1** was asserted over "any valid E.164 phone number" and over resolving an inbound sender by phone. Both halves went with phone identity (**D8**). It is now stated over the Auth_User_Id as identity and `profiles.telegram_user_id` as the only resolution route (Requirements 1.4, 1.5, 1.8, 1.9, 10.2, 21.16).
+> - **Property 23** asserted a GET verify-token challenge and an HMAC over the raw body. Telegram has neither (**D12**). It is now the constant-time secret-token comparison with the body unparsed, plus the `update_id` claim (Requirements 11.2–11.8).
+> - **Property 24** routed by type from "a resolvable phone number" and sent "sign-in instructions" to an unresolvable one. It now uses the Telegram vocabulary and carries the third non-service outcome it lacked, the gated reply of Requirement 22.14.
+> - **Property 25** asserted parity from "the WhatsApp entry point" with no entitlement guard, so as written it was unsatisfiable for a gated farmer rather than merely unexercised. It now carries the same guard **D7** took (Requirements 10.7, 10.13).
+> - **Property 20** was correct in substance and wrong in vocabulary: the interleaving is web and Telegram. It is now stated that way, and over a farmer who holds a Bot_Entitlement, because a gated update reserves no quota unit at all and so cannot be one of the interleaved requests.
+> - **Property 27**'s table list predated the access tables. Tenant isolation now holds over `link_tokens`, `payment_orders`, and `bot_entitlements` as well, and over *writes* on those three, which fail rather than return zero rows (Requirements 21.3, 22.23).
+> - **Property 2** and **Property 28** were not falsified, only incomplete, and both are now complete: Property 2's protected surface includes the Link_Token and Payment_Order endpoints (Requirements 21.1, 22.3), and Property 28 carries the per-caller webhook bound of Requirement 13.9 (**D16**).
+> - **Property 17** was listed here as wrong in vocabulary alongside Property 20, and on inspection it was not. Its statement says "either channel" and "the channel value supplied to the service", names no provider and no phone number, and needed no change. It is left exactly as written; this entry is kept so the correction is not silently lost.
 >
-> Four properties the amended requirements need and this set does not contain, listed so the follow-up task has a starting point rather than a blank page: **link-token single use** (one binding from concurrent deliveries, identical replies for unknown, expired, and consumed, and an unconsumed token when the target is taken — Requirements 21.7, 21.8, 21.13); **gate totality** (every inbound update from a linked farmer with no entitlement produces a reply, no service call, no persisted row, and no quota change, while that farmer's web surface is unchanged — Requirements 22.13–22.17); **payment-webhook authenticity and idempotency** (nothing grants without a verified signature over the raw body, an unconfigured secret fails, and any number of redeliveries of one payment id grant exactly once — Requirements 22.5–22.11); and **unlink preserves everything it should** (history retained, entitlement retained, outstanding tokens invalidated — Requirements 21.15, 22.20).
+> The four properties the amended requirements needed and this set did not contain are now present: **Property 32** (link-token single use), **Property 33** (entitlement-gate totality), **Property 34** (payment-webhook authenticity and idempotency), and **Property 35** (unlink preserves everything it should). Two linking criteria remain deliberately outside the property set and are covered by unit tests instead: the already-linked reply of Requirement 21.10 and the replacement path of Requirements 21.11 and 21.12, both of which are single named cases rather than claims over an input space.
 
 ### Property 1: Identity round-trip across channels
 
-For any valid E.164 phone number, after a first authenticated session is established for that number, a Profile exists whose id equals the auth user id and whose phone equals that number exactly; resolving that same number the way an inbound WhatsApp message is resolved returns that same Profile; and for any display name and any supported language written to that Profile, reading it back returns the same values.
+For any `auth.users` row, after a first authenticated session is established for it through Google sign-in, a Profile exists whose id equals that Auth_User_Id and whose email equals that account's Google email; for any Telegram user id bound to that Profile by the linking flow, resolving that Telegram user id the way an inbound Telegram update resolves its sender returns that same Profile, and a Telegram user id stored on no Profile resolves to no Profile at all; at most one Profile carries any given Telegram user id; and for any display name and any supported language written to that Profile, reading it back returns the same values. No phone value takes part in any of these resolutions, and the bootstrap stores none.
 
-**Validates: Requirements 1.4, 1.5, 1.8, 10.2**
+**Validates: Requirements 1.4, 1.5, 1.8, 1.9, 10.2, 21.16**
 
 ### Property 2: The authentication gate covers the whole protected surface
 
-For any protected surface — the diagnosis, chat, voice, and history screens, and the diagnosis, chat, voice, and history endpoints — and any request body, a request carrying no valid session results in the sign-in screen for a screen and HTTP 401 for an endpoint, with no domain service invoked.
+For any protected surface — the diagnosis, chat, voice, and history screens, and the diagnosis, chat, voice, history, Link_Token minting, and Payment_Order endpoints — and any request body, a request carrying no valid session results in the sign-in screen for a screen and HTTP 401 for an endpoint, with no domain service invoked, no Link_Token minted, and no Payment_Order created with the Payment_Provider or recorded. The payment webhook route is not on this surface and is the sole exception: it carries no session by design and is authenticated by signature verification alone (Property 34).
 
-**Validates: Requirements 1.6, 1.7**
+**Validates: Requirements 1.6, 1.7, 21.1, 22.3**
 
 ### Property 3: Client-side media admission is exactly the stated limits
 
@@ -2122,7 +2123,7 @@ For any request originating after a language selection, the selected supported l
 
 ### Property 20: Daily quotas are never exceeded and are shared across channels
 
-For any interleaving of web and WhatsApp requests of one operation type by one farmer within one Asia/Kolkata day, including concurrent requests, the number of requests that reach a provider never exceeds that operation's daily limit; every request beyond the limit is declined with the limit and the reset time stated and invokes no provider; and the accepted count is identical regardless of how the requests were distributed between channels.
+For any interleaving of web and Telegram requests of one operation type by one farmer within one Asia/Kolkata day, including concurrent requests, the number of requests that reach a provider never exceeds that operation's daily limit; every request beyond the limit is declined with the limit and the reset time stated and invokes no provider; and the accepted count is identical regardless of how the requests were distributed between channels. The Telegram side of the interleaving is drawn from a farmer who is linked and holds a Bot_Entitlement, because a gated update reserves no quota unit at all (Property 33) and so is not a request this property can count.
 
 **Validates: Requirements 14.1, 14.2, 14.3**
 
@@ -2140,21 +2141,21 @@ For any completed model operation, exactly one usage log row records the farmer 
 
 ### Property 23: The webhook rejects everything it cannot authenticate, and processes each delivery once
 
-For any verify token presented on the webhook GET route, the challenge is echoed with HTTP 200 if and only if the token equals the configured value, and HTTP 403 otherwise; for any request body and signature presented on the POST route, the payload is read as a message only after the signature verifies against the app secret over the raw body bytes, and a failing signature yields HTTP 401 with no shared service invoked; and for any sequence of deliveries, including concurrent redeliveries of one provider message id, the message is processed at most once, every repeat is acknowledged with HTTP 200 with no service call and no quota change, and the provider message id is recorded.
+For any value presented in the `X-Telegram-Bot-Api-Secret-Token` header of a POST request on the webhook route, and any request body, no part of that body is parsed as an update until the header value has been compared in constant time against the configured Webhook_Secret_Token; a header that is absent, a header whose value differs from the configured token, and a configured token that is absent each yield HTTP 401 with no part of the body parsed as an update and no shared service invoked; and no other means of authenticating a delivery exists on that route. For any sequence of authenticated deliveries, including concurrent redeliveries of one `update_id`, that update is processed at most once: its `update_id` is claimed in `telegram_inbound` as a single write whose failure on an existing row *is* the duplicate signal, that claim precedes every media download, quota reservation, and shared service invocation, and every repeat is acknowledged with HTTP 200 with no service call and no quota change.
 
-**Validates: Requirements 11.1, 11.2, 11.3, 11.4, 11.5, 11.6**
+**Validates: Requirements 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8**
 
-### Property 24: Inbound WhatsApp messages are routed by type and always acknowledged
+### Property 24: Inbound Telegram updates are routed by type and always acknowledged
 
-For any signed, well-formed inbound delivery from a resolvable phone number, an image is stored under that farmer's own prefix in `crop-images` and dispatched to the diagnosis service with that reference, a text message is dispatched to the chat service with that farmer's active WhatsApp conversation identifier, an audio message is stored under that farmer's prefix in `voice-messages` and dispatched to the voice service, any other message type receives a reply naming photos, text, and voice notes with no service call and no quota change, an unresolvable phone number receives sign-in instructions with no service call and no quota change, and every one of these deliveries is acknowledged with HTTP 200.
+For any authenticated, non-duplicate, well-formed inbound update whose sending Telegram user id resolves to a Profile holding a Bot_Entitlement, a photo is stored under that farmer's own prefix in `crop-images` and dispatched to the diagnosis service with that reference, a text message is dispatched to the chat service with the conversation identifier of that farmer's active Telegram conversation, a voice note is stored under that farmer's prefix in `voice-messages` and dispatched to the voice service, and any other message type receives a reply naming photos, text, and voice notes with no service call and no quota change. There are two further non-service outcomes: a sending Telegram user id stored on no Profile receives the linking instructions in English, no Profile having been resolved to take a preferred language from, with no service call and no quota change; and a resolved Profile holding no Bot_Entitlement receives the gated reply naming the unlock, its price, and where to pay, in that Profile's preferred supported language, also with no service call and no quota change. Every one of these deliveries is acknowledged with HTTP 200, and each reply is sent in addition to that acknowledgement rather than in place of it.
 
-**Validates: Requirements 10.3, 10.4, 10.5, 10.6, 10.9, 10.11**
+**Validates: Requirements 10.3, 10.4, 10.5, 10.6, 10.9, 10.11, 21.17, 21.19, 22.14**
 
 ### Property 25: Channel parity of diagnosis content
 
-For any crop image and any fixed classification outcome, a diagnosis produced through the WhatsApp entry point and a diagnosis produced through the web entry point carry identical status, disease name, severity, and `needs_expert` values, and are grounded in the same knowledge base row.
+For any crop image and any fixed classification outcome, where the submitting farmer is linked and holds a Bot_Entitlement, a diagnosis produced through the Telegram entry point and a diagnosis produced through the web entry point carry identical status, disease name, severity, and `needs_expert` values, and are grounded in the same knowledge base row; explanation wording that differs between the two is parity and not a defect. Where the farmer holds no Bot_Entitlement the claim is not weakened, it does not apply: the gate replies and returns before the diagnosis service runs, so the Telegram side produces no Diagnosis_Result to compare, and the gated reply is the correct outcome rather than a parity failure.
 
-**Validates: Requirement 10.7**
+**Validates: Requirements 10.7, 10.13**
 
 ### Property 26: History is complete, ordered, and detailed
 
@@ -2164,15 +2165,15 @@ For any set of diagnoses belonging to a farmer across both channels, the history
 
 ### Property 27: Tenant isolation holds across tables, storage, and the knowledge base
 
-For any two distinct farmers, every attempt by one to read or write the other's rows in `profiles`, `conversations`, `messages`, `diagnoses`, or `usage_logs` returns no rows or fails, and every attempt to read or write an object under the other's storage path prefix in either private bucket is denied; and for any authenticated farmer, reads of `disease_knowledge` succeed while every insert, update, and delete is denied.
+For any two distinct farmers, every attempt by one to read or write the other's rows in `profiles`, `conversations`, `messages`, `diagnoses`, `usage_logs`, `link_tokens`, `payment_orders`, or `bot_entitlements` returns no rows or fails; on the three access tables — `link_tokens`, `payment_orders`, `bot_entitlements` — every write attempt from a farmer session fails rather than returning zero rows, including a write against that farmer's own rows, writes there being reserved to server-side modules using the Service_Role_Key; every attempt to read or write an object under the other farmer's storage path prefix in either private bucket is denied; and for any authenticated farmer, reads of `disease_knowledge` succeed while every insert, update, and delete is denied.
 
-**Validates: Requirements 13.2, 13.4, 13.6**
+**Validates: Requirements 13.2, 13.4, 13.6, 21.3, 22.23**
 
 ### Property 28: Burst rate limiting precedes any quota spend
 
-For any burst of requests to the diagnosis, chat, or voice endpoint by one farmer within one short window, requests beyond the burst allowance are refused with HTTP 429, and no refused request increments that farmer's daily quota counter or invokes a provider.
+For any burst of requests to the diagnosis, chat, voice, or Payment_Order endpoint by one farmer within one short window, requests beyond the burst allowance are refused with HTTP 429, and no refused request increments that farmer's daily quota counter, invokes a provider, or creates a Payment_Order. For any burst of requests to the payment webhook route from one caller within one window, including a burst whose signatures never verify and which therefore identifies no farmer at all, requests beyond the per-caller bound are refused, the bound is keyed on the caller rather than on a farmer, and no refused request records a Bot_Entitlement or changes any farmer's stored state.
 
-**Validates: Requirement 13.8**
+**Validates: Requirements 13.8, 13.9**
 
 ### Property 29: The error envelope is total, localized, and leak-free
 
@@ -2193,3 +2194,27 @@ For any batch of retention candidates drawn from any number of distinct farmers,
 **Validates: Requirement 18.8**
 
 This statement was **reconstructed**, not originally authored here. The number entered the design with the media-lifecycle amendment, which closed its RLS discussion with a forward reference only ("Property 31 states it over deletion") and no entry; task 35.2 supplied the title. The statement above was derived from Requirement 18.8 and the three deletion anchors in "How the sweep finds its work", and claims nothing beyond them. The reconstruction and its reasoning are recorded in the header of `tests/property/deletion-isolation.property.test.ts` and in `docs/TESTING_REPORT.md` §1.1.
+
+### Property 32: A link token binds at most once, and an invalid one binds not at all
+
+For any minted Link_Token and any interleaving of `/start` deliveries carrying it — including two simultaneous deliveries of that one valid token, which Telegram's redelivery on a non-200 and a farmer's second tap both produce — at most one binding of a Telegram user id to that token's Profile occurs and the token ends consumed, the bind and the consume being one conditional write whose returned row *is* the authorization, so a delivery that loses the race writes no `telegram_user_id` and the profile never ends up carrying a different sender's id than the one that won. For any `/start` payload that matches no recorded token, matches an expired token, or matches an already consumed token, no `telegram_user_id` is stored, no Profile changes, and the reply is identical across all three cases, so the bot reveals nothing about which case it was in. For any valid token whose sending Telegram user id is already stored on a Profile other than that token's Profile, neither Profile changes, the token is left unconsumed, and the reply states that the Telegram account is linked elsewhere and has to be unlinked there first — a failed binding, never a transfer. Across every one of these outcomes, handling a `/start` command invokes no shared service, reserves no quota unit, and leaves that farmer's daily limits unchanged.
+
+**Validates: Requirements 21.5, 21.6, 21.7, 21.8, 21.13, 21.14, 21.18**
+
+### Property 33: The entitlement gate is total over update kinds
+
+For every kind of inbound update the Telegram adapter can dispatch on, an authenticated, non-duplicate update whose sending Telegram user id resolves to a Profile whose Auth_User_Id holds no Bot_Entitlement invokes no shared service, reserves no quota unit, persists no Message and no Diagnosis_Result, and leaves that farmer's daily counters, Conversations, and Profile unchanged; the delivery is acknowledged with HTTP 200 and audited by its `telegram_inbound` row alone. The claim is stated over the adapter's own set of dispatchable update kinds rather than over a list of kinds written into the property, so a kind added to the adapter without a gate in front of it becomes a failing case rather than an unexercised one. Exactly three things are exempt from the gate and nothing else is: the `/start` exchange of Requirement 21, the linking instructions sent to a sender stored on no Profile, and the gated reply itself. For that same unentitled farmer, the web application and the diagnosis, chat, voice, and history endpoints behave exactly as they do for a farmer who holds a Bot_Entitlement.
+
+**Validates: Requirements 22.13, 22.14, 22.15, 22.16, 22.17**
+
+### Property 34: No entitlement without a verified signature, and one payment grants exactly once
+
+For any raw body and any signature header presented on the payment webhook route, no part of that body is parsed as payment data and no Bot_Entitlement is recorded unless the signature verifies in constant time over the exact raw request body bytes against the configured payment webhook secret; a missing signature header, a signature that does not verify, and an absent configured secret each yield HTTP 401 with nothing parsed and nothing recorded, the absent configuration falling into the same failure branch as a wrong signature rather than into a skip; and no browser-reported checkout success records a Bot_Entitlement, the paying farmer, the amount, and the outcome being derived only from a verified payload together with the recorded Payment_Order. For any verified webhook reporting a captured payment against a recorded Payment_Order, and for any number of redeliveries of that one payment identifier in any order, including concurrent redeliveries and redeliveries interleaved with other payments' deliveries, exactly one Bot_Entitlement exists afterwards — recorded against that Payment_Order's Auth_User_Id, carrying the provider's payment identifier and the grant instant, and carrying no expiry — and every redelivery beyond the first is acknowledged with HTTP 200 and changes no stored state; the claim on the payment identifier is a single write whose failure is the duplicate signal, never a read followed by a write. For any number of distinct captured payment identifiers arriving for one Auth_User_Id, at most one Bot_Entitlement exists for that farmer. For any verified webhook reporting a failed payment, no Bot_Entitlement is recorded and that farmer's Profile, daily limits, Conversations, Messages, and Diagnosis_Results are unchanged.
+
+**Validates: Requirements 22.5, 22.6, 22.7, 22.8, 22.9, 22.10, 22.11, 22.12, 22.21**
+
+### Property 35: Unlink preserves everything it should
+
+For any farmer whose Profile holds a Telegram user id, any set of that farmer's outstanding Link_Tokens, and any set of Conversations, Messages, and Diagnosis_Results that farmer created through either channel, an unlink performed from that farmer's authenticated session leaves `profiles.telegram_user_id` null, leaves every one of those outstanding Link_Tokens unusable for a later binding, and leaves that farmer's Bot_Entitlement and every one of those Conversations, Messages, and Diagnosis_Results exactly as they were, along with every other column of the Profile. After the unlink the Web_App presents that Bot_Entitlement as active and offers the linking action rather than a further Payment_Order; a subsequent binding under a fresh token — of the same Telegram user id or of a different one — is served under the photo, text, and voice handling of the Telegram channel with no further payment and no new Payment_Order; and the released Telegram user id, being stored on no Profile, is free to bind to any Profile. Unlinking followed by re-linking therefore costs nothing and loses nothing.
+
+**Validates: Requirements 21.14, 21.15, 22.18, 22.19, 22.20**
