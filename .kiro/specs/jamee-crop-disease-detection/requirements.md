@@ -2,22 +2,33 @@
 
 ## Introduction
 
-Jamee is an AI-assisted crop disease guidance product for smallholder farmers. A farmer uploads a photo of a crop leaf, receives a possible disease identification, and can then ask follow-up questions by text or voice in English, Hindi, or Marathi. The same capabilities are reachable from WhatsApp using the official Meta WhatsApp Business Cloud API, with the farmer's phone number acting as a single identity across both channels.
+Jamee is an AI-assisted crop disease guidance product for smallholder farmers. A farmer uploads a photo of a crop leaf, receives a possible disease identification, and can then ask follow-up questions by text or voice in English, Hindi, or Marathi. The same capabilities are reachable from Telegram using the official Telegram Bot API, with the Supabase auth user id acting as a single identity across both channels and a linked Telegram user id acting as the route from an inbound Telegram update to that identity.
 
 Jamee performs no model training. A general-purpose multimodal model proposes a candidate condition from the image; a small, human-verified knowledge base supplies every agricultural fact that reaches the farmer; the model is used only to rephrase verified knowledge base content into plain language in the farmer's chosen language. Any candidate condition outside the verified knowledge base is routed to an inconclusive result that recommends consulting an agricultural expert.
 
-This release covers Phases 1 through 6: foundation, image diagnosis, chat with multilingual output, voice, WhatsApp channel, and production polish. Video frame analysis and expert video calling are deferred and appear in this document as optional requirements only (Requirements 19 and 20). The target deployment is a zero-cost free-tier footprint on Vercel and Supabase, sized for 5 to 6 testers.
+This release covers Phases 1 through 6: foundation, image diagnosis, chat with multilingual output, voice, Telegram channel, and production polish. Video frame analysis and expert video calling are deferred and appear in this document as optional requirements only (Requirements 19 and 20). The target deployment is a zero-cost free-tier footprint on Vercel and Supabase, sized for 5 to 6 testers.
 
 The free-tier footprint is not free of consequences for stored media. A 1 GB storage allowance and a 5 GB monthly egress allowance are the two binding dimensions at this scale, so Requirement 2 re-encodes crop images in the browser before upload, Requirement 12 reads a small derivative for list views, and Requirement 18 defines a retention window after which full-size originals are deleted while the diagnosis record is kept. Requirement 17.7's free-tier claim is stated conditionally on those two mechanisms rather than as an unconditional property of the deployment.
 
+## Amendment A1 — Telegram Channel And Google Sign-In
+
+> Status: APPROVED AND IN FORCE. This amendment replaces Requirements 1, 10, and 11 in full. A reader who implemented against the earlier text should treat those three requirements as superseded rather than extended, and should re-read the Glossary: it renames WhatsApp_Adapter to Telegram_Adapter, replaces Provider_Message_Id with Update_Id, removes the OTP term, redefines Auth_Service and Profile, and adds five terms.
+>
+> 1. **The second channel is Telegram, not WhatsApp.** Requirement 10 and Requirement 11 now describe the Telegram Bot API. The reason is cost: the WhatsApp Business Cloud API and its conversation pricing sit outside the zero-cost footprint this release targets. The parity rule, the shared-service rule, and the single-Conversation-per-channel rule are unchanged in substance.
+> 2. **Web sign-in is Google, not phone OTP.** Requirement 1 now describes Supabase `signInWithOAuth({ provider: 'google' })`. Every OTP and SMS acceptance criterion is deleted. Removing SMS delivery removes the only paid dependency this project had, which is a second reason for the change and not merely a side effect.
+> 3. **The Farmer identity is the Supabase auth user id.** `profiles.phone` is no longer an identity column: it becomes nullable optional contact information and loses its `NOT NULL UNIQUE` role. Telegram senders resolve through a stored `telegram_user_id`, never through a phone number. Profile bootstrap survives unchanged in obligation (the `auth.users` insert trigger plus an idempotent server-side upsert, design decision D8); it simply no longer copies a phone number.
+> 4. **Requirement 10.6 changes from unsatisfiable to satisfiable.** It was the one requirement this project could not satisfy: WhatsApp's inbound audio set includes `audio/aac` and `audio/amr`, which are absent from the Transcription_Provider's accepted container list, so a WhatsApp voice note could arrive in a container that cannot be transcribed. Telegram voice notes are always OGG/Opus, which the Transcription_Provider accepts. The criterion is marked RESOLVED under Requirement 10.
+> 5. **What this amendment does not change.** Supabase remains the authentication, database, and storage platform; no Firebase is introduced. Requirements 2 through 9 and 12 through 18 keep their numbers and their criterion numbers, and only their passing mentions of WhatsApp or phone identity are corrected. Requirements 19 and 20 remain deferred and untouched. Payment and billing requirements are out of scope here and are covered separately.
+
 ## Glossary
 
-- **Jamee**: The complete product, comprising the web application, the shared services, the data layer, and the WhatsApp channel.
+- **Jamee**: The complete product, comprising the web application, the shared services, the data layer, and the Telegram channel.
 - **Web_App**: The Next.js App Router (TypeScript, strict mode) browser application served from the deployment platform.
 - **API_Layer**: The server-side route handlers of the Web_App that run on the deployment platform's serverless runtime.
-- **Auth_Service**: The Supabase-backed authentication component that issues and verifies phone one-time passcodes and maintains sessions.
-- **OTP**: A one-time passcode delivered by SMS to a farmer's phone number for sign-in.
-- **Profile**: A row in the `profiles` table whose `id` references `auth.users(id)` and whose `phone` column holds the farmer's phone number in E.164 format.
+- **Auth_Service**: The Supabase-backed authentication component that completes Google sign-in through `signInWithOAuth({ provider: 'google' })` and maintains sessions.
+- **Auth_User_Id**: The `auth.users(id)` value Supabase assigns to a signed-in user. It is the single Farmer identity across every Jamee channel.
+- **Google_Email**: The email address of the Google account a Farmer signed in with, as reported by the Auth_Service and recorded on that Farmer's Profile.
+- **Profile**: A row in the `profiles` table whose `id` is the Auth_User_Id, whose `email` column holds the Google_Email, whose `telegram_user_id` column holds a linked Telegram_User_Id or nothing, and whose `phone` column is nullable optional contact information rather than an identity.
 - **Farmer**: An authenticated end user of Jamee, identified by a Profile.
 - **Storage_Service**: Supabase Storage, containing the private buckets `crop-images` and `voice-messages`.
 - **Signed_URL**: A time-limited URL issued by the Storage_Service that grants read access to a single private object.
@@ -28,8 +39,8 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 - **Thumbnail_Derivative**: A small re-encoded copy of a crop image, produced in the browser at upload time and stored in the `crop-images` bucket under the same Farmer path prefix as its Full_Size_Image, at the object path obtained by inserting `.thumb` immediately before the file extension of the Full_Size_Image object path.
 - **Retention_Window**: The configured whole number of days, counted from the creation timestamp of the row that references an object, for which the Storage_Service keeps a Full_Size_Image or a voice recording.
 - **Retention_Sweep**: The scheduled server-side operation that deletes Storage_Service objects whose Retention_Window has elapsed.
-- **Diagnosis_Service**: The single shared server-side component that turns a crop image into a Diagnosis_Result, used by both the Web_App and the WhatsApp_Adapter.
-- **Chat_Service**: The single shared server-side component that answers Farmer questions using Conversation_Context and Knowledge_Base content, used by both the Web_App and the WhatsApp_Adapter.
+- **Diagnosis_Service**: The single shared server-side component that turns a crop image into a Diagnosis_Result, used by both the Web_App and the Telegram_Adapter.
+- **Chat_Service**: The single shared server-side component that answers Farmer questions using Conversation_Context and Knowledge_Base content, used by both the Web_App and the Telegram_Adapter.
 - **Voice_Service**: The shared server-side component that transcribes an audio recording into text and forwards the text to the Chat_Service.
 - **Transcription_Provider**: The external speech-to-text provider used by the Voice_Service.
 - **AI_Gateway**: The server-side component that calls the Primary_Model, applies the fallback policy, and returns raw model output to its caller.
@@ -46,8 +57,11 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 - **Message**: A row in the `messages` table recording one Farmer input or one Jamee response within a Conversation.
 - **Supported_Language**: One of English (`en`), Hindi (`hi`), Marathi (`mr`).
 - **Canonical_Disease_Name**: The scientific or English canonical name of a Verified_Condition, which is never translated.
-- **WhatsApp_Adapter**: The server-side component that receives Meta WhatsApp Business Cloud API webhooks, resolves the sender to a Profile, invokes the shared services, and sends replies.
-- **Provider_Message_Id**: The unique message identifier supplied by the Meta WhatsApp Business Cloud API for each inbound message.
+- **Telegram_Channel**: The Telegram surface of Jamee, comprising the Telegram bot, its webhook route, and the Telegram_Adapter. Rows persisted for work that arrived through it record the channel value `telegram`.
+- **Telegram_Adapter**: The server-side component that receives Telegram Bot API webhook updates, resolves the sender to a Profile through the stored Telegram_User_Id, invokes the shared services, and sends replies.
+- **Telegram_User_Id**: The numeric Telegram user identifier of an inbound sender, stored on a Profile as `telegram_user_id`. It is the only value through which an inbound Telegram update resolves to a Farmer.
+- **Update_Id**: The `update_id` value the Telegram Bot API assigns to each webhook update, used as Jamee's deduplication key for inbound Telegram deliveries.
+- **Webhook_Secret_Token**: The secret string Jamee registers with the Telegram Bot API through the `setWebhook` method, which the Bot API then presents in the `X-Telegram-Bot-Api-Secret-Token` header of every delivery to Jamee's webhook route.
 - **Quota_Service**: The component that counts and enforces per-Farmer daily usage limits.
 - **Quota_Window**: One calendar day in the Asia/Kolkata time zone.
 - **Usage_Log**: A row in the `usage_logs` table recording one billable or rate-limited operation, its channel, its model provider, and its outcome.
@@ -59,20 +73,24 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 
 ## Requirements
 
-### Requirement 1: Phone-Based Authentication
+### Requirement 1: Google-Based Authentication
 
-**User Story:** As a farmer, I want to sign in with my phone number and a one-time passcode, so that I use the same identity on the website and on WhatsApp without a separate linking step.
+**User Story:** As a farmer, I want to sign in with my Google account, so that I reach Jamee without waiting for a text message and without Jamee paying an SMS provider.
+
+> Amended by A1. Criteria 1.6, 1.7, and 1.8 are carried over unchanged from the superseded phone-based version and keep their numbers. Criteria 1.1 through 1.5 are replaced, and 1.9 and 1.10 are new.
 
 #### Acceptance Criteria
 
-1. WHEN a visitor submits a phone number in E.164 format on the sign-in screen, THE Auth_Service SHALL request delivery of an OTP by SMS to that phone number.
-2. WHEN a visitor submits an OTP that matches the outstanding passcode for the submitted phone number, THE Auth_Service SHALL establish an authenticated session for that phone number.
-3. IF a visitor submits an OTP that does not match the outstanding passcode, THEN THE Auth_Service SHALL reject the sign-in attempt and display a message stating that the code is incorrect or expired.
-4. WHEN the Auth_Service establishes a first session for a phone number that has no Profile, THE Web_App SHALL create a Profile whose `id` references the `auth.users` row and whose `phone` column stores that phone number in E.164 format.
-5. THE Web_App SHALL treat the `phone` column of a Profile as the single Farmer identity for both the Web_App channel and the WhatsApp channel.
+1. WHEN a visitor activates the Google sign-in control on the sign-in screen, THE Web_App SHALL start authentication through the Auth_Service by calling `signInWithOAuth({ provider: 'google' })`.
+2. WHEN Google returns a successful authorization to the Jamee callback route, THE Auth_Service SHALL establish an authenticated session for the `auth.users` row of that Google account.
+3. IF a Google authorization fails, is cancelled, or returns to the callback route without an exchangeable authorization, THEN THE Auth_Service SHALL establish no session and THE Web_App SHALL display a message stating that sign-in did not complete and offering to sign in again.
+4. WHEN the Auth_Service establishes a first session for an `auth.users` row that has no Profile, THE Web_App SHALL create a Profile whose `id` is that Auth_User_Id and whose `email` column stores the Google_Email, through the `auth.users` insert trigger together with an idempotent server-side upsert, and SHALL store no phone number in the course of that bootstrap.
+5. THE Web_App and the API_Layer SHALL treat the Auth_User_Id as the single Farmer identity for both the Web_App channel and the Telegram_Channel.
 6. WHILE a visitor holds no authenticated session, THE Web_App SHALL restrict access to the diagnosis, chat, voice, and history screens and present the sign-in screen instead.
 7. THE API_Layer SHALL reject every request to a diagnosis, chat, voice, or history endpoint that carries no valid authenticated session, returning HTTP status 401.
 8. WHEN an authenticated Farmer submits a display name and a preferred Supported_Language on the profile screen, THE Web_App SHALL persist both values on that Farmer's Profile.
+9. THE `profiles.phone` column SHALL be nullable optional contact information, SHALL carry neither a `NOT NULL` nor a `UNIQUE` constraint, and SHALL take part in no identity resolution, no session establishment, and no channel resolution.
+10. THE Jamee deployment SHALL require no SMS delivery provider, and THE Deployment_Package SHALL name no paid third-party dependency, SMS delivery having been the only one.
 
 ### Requirement 2: Crop Image Upload
 
@@ -96,7 +114,7 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 14. IF the upload of a Thumbnail_Derivative fails after the upload of its Full_Size_Image succeeded, THEN THE Web_App SHALL send the diagnosis request for that Full_Size_Image.
 
 ### Requirement 3: Image Diagnosis
-
+ 
 **User Story:** As a farmer, I want to receive a possible disease name and a plain-language explanation for my photo, so that I understand what may be affecting my crop.
 
 #### Acceptance Criteria
@@ -108,7 +126,7 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 5. WHEN a crop image contains several leaves, THE Diagnosis_Service SHALL report exactly one primary condition in the Diagnosis_Result.
 6. THE Diagnosis_Service SHALL complete each diagnosis request within the Serverless_Duration_Ceiling.
 7. IF the Diagnosis_Service reaches the Serverless_Duration_Ceiling before a Diagnosis_Result exists, THEN THE API_Layer SHALL return a timeout error identifying the diagnosis operation and SHALL record the outcome in the Usage_Log.
-8. THE Diagnosis_Service SHALL serve both the Web_App channel and the WhatsApp channel from one implementation.
+8. THE Diagnosis_Service SHALL serve both the Web_App channel and the Telegram_Channel from one implementation.
 
 ### Requirement 4: Verified Knowledge Base Grounding
 
@@ -164,7 +182,7 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 4. WHEN the Chat_Service produces an answer, THE API_Layer SHALL persist the Farmer message and the Jamee answer as Messages in the same Conversation.
 5. WHEN a Farmer starts a diagnosis without an existing Conversation identifier, THE API_Layer SHALL create a Conversation and SHALL attach the Diagnosis_Result to that Conversation.
 6. IF the Chat_Service finds no Knowledge_Base content that answers a Farmer question, THEN THE Chat_Service SHALL state that Jamee lacks verified information for that question and SHALL recommend consulting an agricultural expert.
-7. THE Chat_Service SHALL serve both the Web_App channel and the WhatsApp channel from one implementation.
+7. THE Chat_Service SHALL serve both the Web_App channel and the Telegram_Channel from one implementation.
 
 ### Requirement 8: Voice Input
 
@@ -197,36 +215,46 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 5. IF a request carries a language code outside the Supported_Languages, THEN THE API_Layer SHALL reject the request with HTTP status 400 and SHALL name the supported codes.
 6. WHEN a Farmer submits a chat message in a Supported_Language without selecting that language, THE Chat_Service SHALL answer in the language of the submitted message.
 
-### Requirement 10: WhatsApp Channel Parity
+### Requirement 10: Telegram Channel Parity
 
-**User Story:** As a farmer, I want to send a photo to Jamee on WhatsApp and get the same diagnosis as on the website, so that I use the app I already have.
+**User Story:** As a farmer, I want to send a photo to Jamee on Telegram and get the same diagnosis as on the website, so that I use a chat app I already have.
 
-#### Acceptance Criteria
-
-1. THE WhatsApp_Adapter SHALL exchange messages exclusively through the official Meta WhatsApp Business Cloud API.
-2. WHEN the WhatsApp_Adapter receives an inbound message, THE WhatsApp_Adapter SHALL resolve the sender's phone number to an existing Profile through the `profiles.phone` column.
-3. IF an inbound WhatsApp message arrives from a phone number with no matching Profile, THEN THE WhatsApp_Adapter SHALL reply with instructions to sign in on the Web_App with that phone number first.
-4. WHEN the WhatsApp_Adapter receives an inbound image message, THE WhatsApp_Adapter SHALL download the media from the Meta WhatsApp Business Cloud API, SHALL store the media in the `crop-images` bucket, and SHALL invoke the Diagnosis_Service with the resulting Storage_Reference.
-5. WHEN the WhatsApp_Adapter receives an inbound text message, THE WhatsApp_Adapter SHALL invoke the Chat_Service with the message text and the Conversation identifier of that Farmer's active WhatsApp Conversation.
-6. WHEN the WhatsApp_Adapter receives an inbound audio message, THE WhatsApp_Adapter SHALL store the media in the `voice-messages` bucket and SHALL invoke the Voice_Service with the resulting Storage_Reference.
-7. THE WhatsApp_Adapter SHALL return the same Diagnosis_Result content for a given crop image as the Web_App returns for that image.
-8. THE WhatsApp_Adapter SHALL resolve follow-up questions against the most recent Diagnosis_Result in the Conversation identified for that Farmer.
-9. IF an inbound message carries a type outside text, image, and audio, THEN THE WhatsApp_Adapter SHALL reply that Jamee accepts photos, text, and voice notes.
-10. THE WhatsApp_Adapter SHALL complete each webhook invocation within the Serverless_Duration_Ceiling.
-11. WHEN the WhatsApp_Adapter receives a webhook request, THE WhatsApp_Adapter SHALL acknowledge the request with HTTP status 200 for every accepted delivery.
-
-### Requirement 11: WhatsApp Webhook Security And Idempotency
-
-**User Story:** As a product owner, I want the WhatsApp webhook authenticated and duplicate-safe, so that forged or repeated deliveries cause no unwanted work.
+> Amended by A1. Criterion positions 1 through 11 are preserved so that existing citations of 10.4, 10.5, 10.6, 10.8, 10.9, and 10.10 keep pointing at the same subject. Criterion 10.12 is new and exists because a Google identity, unlike a phone number, cannot be matched to a chat account implicitly. Criterion 10.13 is new and states the parity rule the superseded version left to the design.
+>
+> RESOLVED — 10.6. Under WhatsApp this criterion could not be satisfied: the inbound audio set includes `audio/aac` and `audio/amr`, neither of which appears in the Transcription_Provider's accepted container list, so a voice note could arrive in a container Jamee could not transcribe, and this release introduces no server-side transcoding step. Telegram voice notes are always OGG/Opus, which the Transcription_Provider accepts, so 10.6 is satisfiable as written on this channel.
 
 #### Acceptance Criteria
 
-1. WHEN the WhatsApp_Adapter receives a GET request on the webhook route carrying the configured verify token, THE WhatsApp_Adapter SHALL echo the challenge value with HTTP status 200.
-2. IF a GET request on the webhook route carries a verify token that differs from the configured value, THEN THE WhatsApp_Adapter SHALL respond with HTTP status 403.
-3. WHEN the WhatsApp_Adapter receives a POST request on the webhook route, THE WhatsApp_Adapter SHALL verify the request signature against the `WHATSAPP_APP_SECRET` value before reading the payload as a message.
-4. IF a POST request signature fails verification, THEN THE WhatsApp_Adapter SHALL respond with HTTP status 401 and SHALL invoke no shared service.
-5. WHEN the WhatsApp_Adapter receives an inbound message whose Provider_Message_Id matches an already processed message, THE WhatsApp_Adapter SHALL acknowledge the delivery, SHALL invoke no shared service, and SHALL leave the Farmer's quota unchanged.
-6. WHEN the WhatsApp_Adapter processes an inbound message, THE WhatsApp_Adapter SHALL record the Provider_Message_Id for duplicate detection.
+1. THE Telegram_Adapter SHALL exchange messages exclusively through the official Telegram Bot API.
+2. WHEN the Telegram_Adapter receives an inbound update, THE Telegram_Adapter SHALL resolve the sender to an existing Profile through the Telegram_User_Id stored in the `profiles.telegram_user_id` column, and SHALL use no phone number for that resolution.
+3. IF an inbound update arrives from a Telegram_User_Id that matches no Profile, THEN THE Telegram_Adapter SHALL reply with instructions for linking that Telegram account to a Jamee account signed in with Google on the Web_App, and SHALL invoke no shared service for that update.
+4. WHEN the Telegram_Adapter receives an inbound photo message, THE Telegram_Adapter SHALL download the media from the Telegram Bot API, SHALL store the media in the `crop-images` bucket, and SHALL invoke the Diagnosis_Service with the resulting Storage_Reference.
+5. WHEN the Telegram_Adapter receives an inbound text message, THE Telegram_Adapter SHALL invoke the Chat_Service with the message text and the Conversation identifier of that Farmer's active Telegram_Channel Conversation.
+6. WHEN the Telegram_Adapter receives an inbound voice note, THE Telegram_Adapter SHALL store the media in the `voice-messages` bucket and SHALL invoke the Voice_Service with the resulting Storage_Reference.
+7. THE Telegram_Adapter SHALL obtain every Diagnosis_Result from the Diagnosis_Service, and for a given crop image SHALL return the same status, the same Canonical_Disease_Name, the same Severity_Value, and the same `needs_expert` value as the Web_App returns for that image.
+8. THE Telegram_Adapter SHALL resolve follow-up questions against the most recent Diagnosis_Result in the Conversation identified for that Farmer.
+9. IF an inbound message carries a type outside text, photo, and voice note, THEN THE Telegram_Adapter SHALL reply that Jamee accepts photos, text, and voice notes.
+10. THE Telegram_Adapter SHALL complete each webhook invocation within the Serverless_Duration_Ceiling.
+11. WHEN the Telegram_Adapter receives a webhook request, THE Telegram_Adapter SHALL acknowledge the request with HTTP status 200 for every accepted delivery.
+12. THE Web_App SHALL offer an authenticated Farmer an action that links a Telegram account to that Farmer's Profile by storing its Telegram_User_Id, and SHALL associate one Telegram_User_Id with at most one Profile.
+13. WHEN a Diagnosis_Result returned on the Telegram_Channel and a Diagnosis_Result returned on the Web_App channel for the same crop image agree on every field named in 10.7, THE Jamee release SHALL treat differing explanation wording between those two results as parity and SHALL treat it as no defect.
+
+### Requirement 11: Telegram Webhook Security And Idempotency
+
+**User Story:** As a product owner, I want the Telegram webhook authenticated and duplicate-safe, so that forged or repeated deliveries cause no unwanted work.
+
+> Amended by A1. Authenticity is now a shared secret token rather than a request signature, so the GET verification handshake of the superseded version has no Telegram analogue and is gone. Criterion 11.5 keeps its number and its subject — duplicate suppression — with the Update_Id in place of the WhatsApp message id. Criterion 11.7 states, as a requirement, the ordering that the superseded design reasoned about: the claim precedes anything billable.
+
+#### Acceptance Criteria
+
+1. THE Jamee deployment SHALL register its webhook route with the Telegram Bot API through the `setWebhook` method, supplying the Webhook_Secret_Token in that registration.
+2. WHEN the Telegram_Adapter receives a POST request on the webhook route, THE Telegram_Adapter SHALL compare the `X-Telegram-Bot-Api-Secret-Token` request header against the configured Webhook_Secret_Token in constant time, and SHALL perform that comparison before parsing the request body.
+3. IF a POST request on the webhook route carries no `X-Telegram-Bot-Api-Secret-Token` header, or carries a value that differs from the configured Webhook_Secret_Token, THEN THE Telegram_Adapter SHALL respond with HTTP status 401, SHALL parse no part of the request body as an update, and SHALL invoke no shared service.
+4. THE Telegram_Adapter SHALL expose no other means of authenticating a delivery, and SHALL treat the absence of a configured Webhook_Secret_Token as a failed verification rather than as a skipped one.
+5. WHEN the Telegram_Adapter receives an update whose Update_Id matches an already claimed Update_Id, THE Telegram_Adapter SHALL acknowledge the delivery, SHALL invoke no shared service, and SHALL leave the Farmer's quota unchanged.
+6. WHEN the Telegram_Adapter accepts an update for processing, THE Telegram_Adapter SHALL record that update's Update_Id for duplicate detection.
+7. WHEN the Telegram_Adapter accepts an update for processing, THE Telegram_Adapter SHALL claim that update's Update_Id before it downloads media, reserves a quota unit, or invokes a shared service, so that a redelivery of an already claimed update reaches no billable operation.
+8. THE Telegram_Adapter SHALL treat a failed claim caused by an existing record of the same Update_Id as the duplicate signal of 11.5, rather than reading the stored Update_Ids and then writing.
 
 ### Requirement 12: Diagnosis History
 
@@ -235,7 +263,7 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 #### Acceptance Criteria
 
 1. WHEN an authenticated Farmer opens the history screen, THE Web_App SHALL list that Farmer's Diagnosis_Results in reverse chronological order with the crop image thumbnail, the reported condition or inconclusive label, the Severity_Value, the channel, and the creation timestamp.
-2. THE Web_App SHALL include Diagnosis_Results created through the WhatsApp channel in the history list.
+2. THE Web_App SHALL include Diagnosis_Results created through the Telegram_Channel in the history list.
 3. WHEN a Farmer selects an entry in the history list, THE Web_App SHALL display a detail view containing the crop image, the reported condition or inconclusive label, the confidence value, the Severity_Value, the full explanation, and the related Conversation messages.
 4. WHILE a Farmer has no stored Diagnosis_Results, THE Web_App SHALL display an empty-state message inviting the Farmer to upload a first crop image.
 5. WHEN the Web_App displays a stored crop image or a Thumbnail_Derivative, THE Web_App SHALL load that object through a Signed_URL.
@@ -268,7 +296,7 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 #### Acceptance Criteria
 
 1. THE Quota_Service SHALL limit each Farmer to 20 image analyses, 50 chat messages, and 20 voice messages per Quota_Window.
-2. THE Quota_Service SHALL count usage from the Web_App channel and the WhatsApp channel against one shared per-Farmer limit for each operation type.
+2. THE Quota_Service SHALL count usage from the Web_App channel and the Telegram_Channel against one shared per-Farmer limit for each operation type.
 3. IF a Farmer reaches a limit for an operation type within a Quota_Window, THEN THE API_Layer SHALL decline further requests of that type, SHALL state the limit and the reset time, and SHALL invoke no model provider.
 4. WHEN the Primary_Model returns a rate-limit or unavailability error, THE AI_Gateway SHALL retry the operation against the Fallback_Model.
 5. IF the Primary_Model and the Fallback_Model both return errors for one operation, THEN THE API_Layer SHALL return the message "Jamee is temporarily busy. Please try again shortly."
@@ -292,12 +320,12 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 
 ### Requirement 16: Shared Service Reuse
 
-**User Story:** As a maintainer, I want one implementation of disease analysis and chat, so that the website and WhatsApp never drift apart.
+**User Story:** As a maintainer, I want one implementation of disease analysis and chat, so that the website and Telegram never drift apart.
 
 #### Acceptance Criteria
 
-1. THE Web_App and the WhatsApp_Adapter SHALL obtain every Diagnosis_Result from the Diagnosis_Service.
-2. THE Web_App and the WhatsApp_Adapter SHALL obtain every chat answer from the Chat_Service.
+1. THE Web_App and the Telegram_Adapter SHALL obtain every Diagnosis_Result from the Diagnosis_Service.
+2. THE Web_App and the Telegram_Adapter SHALL obtain every chat answer from the Chat_Service.
 3. THE Jamee codebase SHALL contain exactly one implementation of the crop image analysis flow.
 4. THE Jamee codebase SHALL contain exactly one implementation of the Knowledge_Base grounding and rephrasing flow.
 5. THE Diagnosis_Service and the Chat_Service SHALL accept the channel as an input parameter and SHALL record that channel on persisted rows.
@@ -310,9 +338,9 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 
 1. THE Deployment_Package SHALL target Vercel for the Web_App and the API_Layer, and Supabase for authentication, database, and storage.
 2. THE Deployment_Package SHALL include an `.env.example` file listing every required environment variable name with a placeholder value and no real secret.
-3. THE Deployment_Package SHALL include deployment instructions covering Supabase project setup, SMS provider configuration for phone authentication, migration execution, storage bucket creation, WhatsApp Business Cloud API configuration, and Vercel environment variable configuration.
+3. THE Deployment_Package SHALL include deployment instructions covering Supabase project setup, Google OAuth client and redirect URL configuration for the Auth_Service, migration execution, storage bucket creation, Telegram bot creation and `setWebhook` registration including the Webhook_Secret_Token, and Vercel environment variable configuration.
 4. THE Deployment_Package SHALL include API documentation describing each API_Layer endpoint with the HTTP method, the request body schema, the response body schema, and the error codes.
-5. THE Deployment_Package SHALL include a testing report recording the outcome of the image, chat, voice, and WhatsApp test scenarios.
+5. THE Deployment_Package SHALL include a testing report recording the outcome of the image, chat, voice, and Telegram test scenarios.
 6. THE Deployment_Package SHALL include database migrations that create every table, RLS policy, storage bucket, and Knowledge_Base seed row.
 7. WHERE every uploaded crop image is re-encoded to the Downscale_Target under 2.10 and the Retention_Window is configured within the bound recorded under 18.2, THE Deployment_Package SHALL operate within the free tiers of the deployment platform and Supabase for a load of 6 Farmers.
 8. THE Jamee codebase SHALL compile under TypeScript strict mode with no type errors.
@@ -364,13 +392,13 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 
 The release is accepted when a tester completes the following sequence without developer assistance:
 
-1. Sign in to Jamee with a phone number and an SMS one-time passcode.
+1. Sign in to Jamee with a Google account.
 2. Upload a crop image and receive a possible disease result grounded in the Knowledge_Base.
 3. Ask a follow-up question in the same Conversation and receive an answer that resolves against that diagnosis.
 4. Receive an explanation in Hindi and in Marathi with the Canonical_Disease_Name unchanged.
 5. Send a voice message in Hindi, Marathi, or English and receive a text answer.
-6. Send a crop photo to Jamee on WhatsApp from the same phone number and receive the same Diagnosis_Result content as the Web_App produces.
-7. Open the history screen on the website and view both the Web_App and WhatsApp diagnoses, including a detail view for one entry.
+6. Link a Telegram account to that signed-in Jamee account, send a crop photo to Jamee on Telegram, and receive a Diagnosis_Result agreeing with the Web_App on every field named in 10.7.
+7. Open the history screen on the website and view both the Web_App and Telegram diagnoses, including a detail view for one entry.
 8. Confirm that Jamee performs no model training and that every agricultural statement traces to a Knowledge_Base row.
 
 ## Test Scenario Coverage
@@ -380,5 +408,5 @@ The release is accepted when a tester completes the following sequence without d
 | Image | healthy crop, clear diseased crop, blurry image, non-plant image, tomato and potato crops, multiple leaves in one image | 3.2, 3.4, 3.5, 6.1, 6.2, 6.3 |
 | Chat | English, Hindi, Marathi, follow-up question, unknown question | 7.1, 7.3, 7.6, 9.3, 9.6 |
 | Voice | Hindi, Marathi, English, noisy audio, short recording, long recording | 8.2, 8.3, 8.5, 8.7 |
-| WhatsApp | text, image, audio, invalid message type, duplicate message, API timeout, provider rate limit | 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 14.4, 14.5 |
+| Telegram | text, photo, voice note, invalid message type, unlinked sender, duplicate update, API timeout, provider rate limit | 10.3, 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 14.4, 14.5 |
 | Media lifecycle | image inside the retention window, image past the window, entry with no thumbnail, voice deleted after a persisted transcript, voice retained after a failed transcription, repeated sweep run | 2.10, 2.13, 8.9, 8.10, 12.6, 12.9, 12.10, 18.3, 18.4, 18.10 |
