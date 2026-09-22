@@ -2,11 +2,11 @@
 
 ## Introduction
 
-Jamee is an AI-assisted crop disease guidance product for smallholder farmers. A farmer uploads a photo of a crop leaf, receives a possible disease identification, and can then ask follow-up questions by text or voice in English, Hindi, or Marathi. The same capabilities are reachable from Telegram using the official Telegram Bot API, with the Supabase auth user id acting as a single identity across both channels and a linked Telegram user id acting as the route from an inbound Telegram update to that identity.
+Jamee is an AI-assisted crop disease guidance product for smallholder farmers. A farmer uploads a photo of a crop leaf, receives a possible disease identification, and can then ask follow-up questions by text or voice in English, Hindi, or Marathi. The same capabilities are reachable from Telegram using the official Telegram Bot API, with the Supabase auth user id acting as a single identity across both channels and a linked Telegram user id acting as the route from an inbound Telegram update to that identity. The Telegram channel is not open to every farmer by default: it answers a farmer who has linked a Telegram account to their Jamee account and has completed the one-time unlock payment, while the web application stays free for every signed-in farmer.
 
 Jamee performs no model training. A general-purpose multimodal model proposes a candidate condition from the image; a small, human-verified knowledge base supplies every agricultural fact that reaches the farmer; the model is used only to rephrase verified knowledge base content into plain language in the farmer's chosen language. Any candidate condition outside the verified knowledge base is routed to an inconclusive result that recommends consulting an agricultural expert.
 
-This release covers Phases 1 through 6: foundation, image diagnosis, chat with multilingual output, voice, Telegram channel, and production polish. Video frame analysis and expert video calling are deferred and appear in this document as optional requirements only (Requirements 19 and 20). The target deployment is a zero-cost free-tier footprint on Vercel and Supabase, sized for 5 to 6 testers.
+This release covers Phases 1 through 6: foundation, image diagnosis, chat with multilingual output, voice, Telegram channel, and production polish. It also covers the two capabilities the Telegram channel turned out to require, both in scope for this release: Telegram account linking (Requirement 21), which binds one Telegram account to one Google-signed-in Jamee account through a single-use expiring link token, and payment (Requirement 22), which gates the Telegram channel behind a one-time Razorpay payment and records the resulting permanent entitlement against the Supabase auth user id rather than against a Telegram user id. Video frame analysis and expert video calling remain the only deferred capabilities and appear in this document as optional requirements only (Requirements 19 and 20). The target deployment is a zero-cost free-tier footprint on Vercel and Supabase, sized for 5 to 6 testers; the payment capability does not change that, because the payment provider bills Jamee no fixed or recurring amount, as 1.10 and 22.26 record.
 
 The free-tier footprint is not free of consequences for stored media. A 1 GB storage allowance and a 5 GB monthly egress allowance are the two binding dimensions at this scale, so Requirement 2 re-encodes crop images in the browser before upload, Requirement 12 reads a small derivative for list views, and Requirement 18 defines a retention window after which full-size originals are deleted while the diagnosis record is kept. Requirement 17.7's free-tier claim is stated conditionally on those two mechanisms rather than as an unconditional property of the deployment.
 
@@ -20,7 +20,9 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 > 4. **Requirement 10.6 changes from unsatisfiable to satisfiable.** It was the one requirement this project could not satisfy: WhatsApp's inbound audio set includes `audio/aac` and `audio/amr`, which are absent from the Transcription_Provider's accepted container list, so a WhatsApp voice note could arrive in a container that cannot be transcribed. Telegram voice notes are always OGG/Opus, which the Transcription_Provider accepts. The criterion is marked RESOLVED under Requirement 10.
 > 5. **What this amendment does not change.** Supabase remains the authentication, database, and storage platform; no Firebase is introduced. Requirements 2 through 9 and 12 through 18 keep their numbers and their criterion numbers, and only their passing mentions of WhatsApp or phone identity are corrected. Requirements 19 and 20 remain deferred and untouched. Payment and billing are not specified by this amendment; they are specified by Requirement 22, and the account linking this amendment made necessary is specified by Requirement 21.
 >
-> **Recorded after A1.** Two capabilities this amendment deliberately left out have since been added as new requirements, placed after Requirement 18 and before the deferred Requirements 19 and 20: **Requirement 21 (Telegram Account Linking)**, which supplies the token flow that Criterion 10.12's linking action and Criterion 10.3's linking instructions both point at, and **Requirement 22 (Payment And Bot Entitlement)**, which gates the Telegram_Channel behind a one-time Razorpay payment. Both additions are numbered above the existing range and add no criterion to Requirements 1 through 20, whose text and criterion numbers stand as this amendment left them. The Glossary gains seven terms for those two requirements and loses none.
+> **Recorded after A1.** Two capabilities this amendment deliberately left out have since been added as new requirements, placed after Requirement 18 and before the deferred Requirements 19 and 20: **Requirement 21 (Telegram Account Linking)**, which supplies the token flow that Criterion 10.12's linking action and Criterion 10.3's linking instructions both point at, and **Requirement 22 (Payment And Bot Entitlement)**, which gates the Telegram_Channel behind a one-time Razorpay payment. Both additions are numbered above the existing range, and neither adds a criterion to Requirements 1 through 20; the wording of 1.10, 10.7, 10.12, 10.13, 13.1, and 13.8 was corrected where the payment gate or the linking mechanism made it false, with every criterion number preserved. The Glossary gains seven terms for those two requirements and loses none.
+>
+> Point 2 above should be read against 1.10 as it now stands. The Payment_Provider that Requirement 22 introduces is not a paid dependency in the sense point 2 used the phrase: it bills Jamee no fixed and no recurring amount, and takes a per-transaction fee out of money a Farmer pays. Removing SMS delivery did remove the only standing bill this project had, and that remains true.
 
 ## Glossary
 
@@ -99,7 +101,7 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 7. THE API_Layer SHALL reject every request to a diagnosis, chat, voice, or history endpoint that carries no valid authenticated session, returning HTTP status 401.
 8. WHEN an authenticated Farmer submits a display name and a preferred Supported_Language on the profile screen, THE Web_App SHALL persist both values on that Farmer's Profile.
 9. THE `profiles.phone` column SHALL be nullable optional contact information, SHALL carry neither a `NOT NULL` nor a `UNIQUE` constraint, and SHALL take part in no identity resolution, no session establishment, and no channel resolution.
-10. THE Jamee deployment SHALL require no SMS delivery provider, and THE Deployment_Package SHALL name no paid third-party dependency, SMS delivery having been the only one.
+10. THE Jamee deployment SHALL require no SMS delivery provider, and THE Deployment_Package SHALL name no third-party dependency that bills Jamee a fixed or a recurring amount, SMS delivery having been the only such dependency and the Payment_Provider of Requirement 22 being no such dependency, its charge being a per-transaction fee deducted from money a Farmer pays rather than a standing bill Jamee owes, as 22.26 records.
 
 ### Requirement 2: Crop Image Upload
 
@@ -231,6 +233,8 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 > Amended by A1. Criterion positions 1 through 11 are preserved so that existing citations of 10.4, 10.5, 10.6, 10.8, 10.9, and 10.10 keep pointing at the same subject. Criterion 10.12 is new and exists because a Google identity, unlike a phone number, cannot be matched to a chat account implicitly. Criterion 10.13 is new and states the parity rule the superseded version left to the design.
 >
 > RESOLVED — 10.6. Under WhatsApp this criterion could not be satisfied: the inbound audio set includes `audio/aac` and `audio/amr`, neither of which appears in the Transcription_Provider's accepted container list, so a voice note could arrive in a container Jamee could not transcribe, and this release introduces no server-side transcoding step. Telegram voice notes are always OGG/Opus, which the Transcription_Provider accepts, so 10.6 is satisfiable as written on this channel.
+>
+> Guarded by Requirement 22. The parity obligations of 10.7 and 10.13 were written while every Farmer could reach the Telegram_Channel. Under 22.13 an update from a Farmer who holds no Bot_Entitlement produces no Diagnosis_Result at all, so an unguarded parity obligation would be unsatisfiable for that Farmer rather than merely unexercised. Both criteria now carry a Bot_Entitlement guard and assert parity only where a Telegram_Channel Diagnosis_Result exists to compare. Where the guard holds, parity means exactly what it meant before: one Diagnosis_Service, one Knowledge_Base row, and identical `status`, `disease_name`, `severity`, and `needs_expert`.
 
 #### Acceptance Criteria
 
@@ -240,13 +244,13 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 4. WHEN the Telegram_Adapter receives an inbound photo message, THE Telegram_Adapter SHALL download the media from the Telegram Bot API, SHALL store the media in the `crop-images` bucket, and SHALL invoke the Diagnosis_Service with the resulting Storage_Reference.
 5. WHEN the Telegram_Adapter receives an inbound text message, THE Telegram_Adapter SHALL invoke the Chat_Service with the message text and the Conversation identifier of that Farmer's active Telegram_Channel Conversation.
 6. WHEN the Telegram_Adapter receives an inbound voice note, THE Telegram_Adapter SHALL store the media in the `voice-messages` bucket and SHALL invoke the Voice_Service with the resulting Storage_Reference.
-7. THE Telegram_Adapter SHALL obtain every Diagnosis_Result from the Diagnosis_Service, and for a given crop image SHALL return the same status, the same Canonical_Disease_Name, the same Severity_Value, and the same `needs_expert` value as the Web_App returns for that image.
+7. THE Telegram_Adapter SHALL obtain every Diagnosis_Result from the Diagnosis_Service, and WHERE the Farmer resolved under 10.2 holds a Bot_Entitlement, for a given crop image SHALL return the same status, the same Canonical_Disease_Name, the same Severity_Value, and the same `needs_expert` value as the Web_App returns for that image.
 8. THE Telegram_Adapter SHALL resolve follow-up questions against the most recent Diagnosis_Result in the Conversation identified for that Farmer.
 9. IF an inbound message carries a type outside text, photo, and voice note, THEN THE Telegram_Adapter SHALL reply that Jamee accepts photos, text, and voice notes.
 10. THE Telegram_Adapter SHALL complete each webhook invocation within the Serverless_Duration_Ceiling.
 11. WHEN the Telegram_Adapter receives a webhook request, THE Telegram_Adapter SHALL acknowledge the request with HTTP status 200 for every accepted delivery.
-12. THE Web_App SHALL offer an authenticated Farmer an action that links a Telegram account to that Farmer's Profile by storing its Telegram_User_Id, and SHALL associate one Telegram_User_Id with at most one Profile.
-13. WHEN a Diagnosis_Result returned on the Telegram_Channel and a Diagnosis_Result returned on the Web_App channel for the same crop image agree on every field named in 10.7, THE Jamee release SHALL treat differing explanation wording between those two results as parity and SHALL treat it as no defect.
+12. THE Web_App SHALL offer an authenticated Farmer an action that begins linking a Telegram account to that Farmer's Profile, by minting a Link_Token and presenting the Link_Deep_Link that carries it as 21.1 requires, the sending Telegram_User_Id itself being stored by the Telegram_Adapter when the `/start` command carrying that Link_Token arrives under 21.6, and THE Jamee release SHALL associate one Telegram_User_Id with at most one Profile.
+13. WHERE the Farmer who submitted the crop image holds a Bot_Entitlement, WHEN a Diagnosis_Result returned on the Telegram_Channel and a Diagnosis_Result returned on the Web_App channel for the same crop image agree on every field named in 10.7, THE Jamee release SHALL treat differing explanation wording between those two results as parity and SHALL treat it as no defect.
 
 ### Requirement 11: Telegram Webhook Security And Idempotency
 
@@ -289,14 +293,15 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 
 #### Acceptance Criteria
 
-1. THE Jamee database SHALL enable RLS on the `profiles`, `conversations`, `messages`, `diagnoses`, and `usage_logs` tables.
+1. THE Jamee database SHALL enable RLS on the `profiles`, `conversations`, `messages`, `diagnoses`, and `usage_logs` tables, and on the Link_Token table, the Payment_Order table, and the Bot_Entitlement table, which 21.3 and 22.23 also oblige locally, so that this criterion's list remains the whole list.
 2. THE RLS policies SHALL restrict each authenticated Farmer to rows of `profiles`, `conversations`, `messages`, `diagnoses`, and `usage_logs` that belong to that Farmer.
 3. THE RLS policies SHALL grant read access to the `disease_knowledge` table to every authenticated Farmer.
 4. THE RLS policies SHALL restrict write access to the `disease_knowledge` table to migrations executed with the Service_Role_Key.
 5. THE Storage_Service SHALL keep the `crop-images` and `voice-messages` buckets private.
 6. THE Storage_Service policies SHALL restrict each Farmer's read and write access to objects under that Farmer's own path prefix.
 7. THE Jamee codebase SHALL reference the Service_Role_Key only in server-side modules and SHALL exclude the Service_Role_Key from every value sent to the browser.
-8. THE API_Layer SHALL apply per-Farmer request rate limiting to the diagnosis, chat, and voice endpoints.
+8. THE API_Layer SHALL apply per-Farmer request rate limiting to the diagnosis, chat, voice, and Payment_Order endpoints.
+9. THE API_Layer SHALL apply rate limiting to the payment webhook route that bounds the work one caller can drive there, this route being the only Jamee write path reachable with no Farmer session at all, since 22.24 authenticates it by the signature verification of 22.5 alone, so that a caller whose signatures never verify cannot consume the deployment's serverless invocations, its database connections, or its free-tier allowances by repetition; THE API_Layer SHALL apply that limit per caller rather than per Farmer, no Farmer being identifiable on that route before a signature verifies.
 
 ### Requirement 14: Quotas, Provider Fallback, And Usage Logging
 
@@ -414,9 +419,11 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 >
 > OPEN QUESTION — O22-1. The amount of the Bot_Unlock_Price is not decided. No figure appears in this document and none is to be invented in code. Criterion 22.4 requires the amount to live in exactly one reviewable constant, so naming it is a one-line change once the product owner decides.
 >
-> ASSUMPTION — A22-1. Only the Telegram_Channel is gated and the Web_App stays free, as stated in 22.17. The user described gating the bot and said nothing about the Web_App, so this is an assumption to confirm with the product owner rather than a settled requirement. If it is rejected, 22.17 is the single criterion that changes.
+> DECIDED — D22-1, formerly ASSUMPTION A22-1. Only the Telegram_Channel is gated and the Web_App stays free, as stated in 22.17. This was recorded as an assumption awaiting confirmation because the user described gating the bot and said nothing about the Web_App; the product owner has since confirmed it, so it is a settled requirement and no longer an open item. 22.17 remains the single criterion that would change if the decision were ever revisited, and the Introduction states the same scope.
 >
-> OPEN QUESTION — O22-2. Criterion 1.10 states that the Deployment_Package names no paid third-party dependency, SMS delivery having been the only one. The Payment_Provider adds no fixed or recurring cost to the deployment: its charge is a per-transaction fee deducted from money a Farmer pays, so it is not a standing bill the way an SMS provider was. Whether 1.10 nonetheless needs amending is for the product owner to decide; this requirement neither amends nor contradicts 1.10.
+> RESOLVED — O22-2. Criterion 1.10 formerly stated that the Deployment_Package names no paid third-party dependency, SMS delivery having been the only one, which the Payment_Provider appeared to falsify. It does not: Razorpay's charge is a per-transaction fee deducted from money a Farmer pays, and it adds no fixed and no recurring bill, unlike the SMS provider, which was a standing cost whether or not anyone signed in. 1.10 is reworded to oblige that no dependency bills Jamee a fixed or recurring amount and to record that the Payment_Provider is not such a dependency; 22.26 states the same fact from the Deployment_Package's side, and Amendment A1's point 2 carries a note reading it the same way. Nothing in this requirement contradicts 1.10 as reworded.
+>
+> OPEN QUESTION — O22-3. The 5 to 6 pilot testers cannot reach the Telegram_Channel without a captured payment, so acceptance step 6 needs one of two things and this document decides neither: real money through the Payment_Provider's live mode at whatever figure O22-1 settles on, or the Payment_Provider's test mode with test credentials and test cards, which exercises 22.5 through 22.12 without money moving. The trade is that live mode is the only way to witness the real checkout a Farmer will see, while test mode is the only way to run the sequence repeatedly at no cost to a tester. The product owner decides; the Deployment_Package records which mode a given environment is configured for either way.
 
 #### Acceptance Criteria
 
@@ -478,9 +485,15 @@ The release is accepted when a tester completes the following sequence without d
 3. Ask a follow-up question in the same Conversation and receive an answer that resolves against that diagnosis.
 4. Receive an explanation in Hindi and in Marathi with the Canonical_Disease_Name unchanged.
 5. Send a voice message in Hindi, Marathi, or English and receive a text answer.
-6. Link a Telegram account to that signed-in Jamee account, send a crop photo to Jamee on Telegram, and receive a Diagnosis_Result agreeing with the Web_App on every field named in 10.7.
+6. Unlock and use the Telegram_Channel on that signed-in Jamee account, in this order:
+   1. Complete the one-time bot unlock payment through the Payment_Provider's checkout, and see the Web_App present that Farmer's Bot_Entitlement as active and offer no further Payment_Order, as 22.18 requires.
+   2. Link a Telegram account to that signed-in Jamee account, send a crop photo to Jamee on Telegram, and receive a Diagnosis_Result agreeing with the Web_App on every field named in 10.7.
 7. Open the history screen on the website and view both the Web_App and Telegram diagnoses, including a detail view for one entry.
 8. Confirm that Jamee performs no model training and that every agricultural statement traces to a Knowledge_Base row.
+
+Step 6 gained the payment action as 6.1 without renumbering any step: what was step 6 is now step 6.2, and steps 7 and 8 keep the numbers they had. The order inside step 6 is not a preference. 22.13 gates the photo handling of 10.4 behind the Bot_Entitlement that 6.1 obtains, so a tester who sends the photo first observes the gated reply of 22.14 instead of a Diagnosis_Result, and step 6.2 fails for a reason that is not a defect.
+
+> OPEN QUESTION — O22-3, recorded under Requirement 22. Step 6.1 needs the 5 to 6 pilot testers to move either real money through the Payment_Provider's live mode, at whatever figure O22-1 settles on, or test-mode money through the Payment_Provider's test credentials and test cards. Which of the two this release's acceptance run uses is not decided here.
 
 ## Test Scenario Coverage
 
@@ -489,5 +502,7 @@ The release is accepted when a tester completes the following sequence without d
 | Image | healthy crop, clear diseased crop, blurry image, non-plant image, tomato and potato crops, multiple leaves in one image | 3.2, 3.4, 3.5, 6.1, 6.2, 6.3 |
 | Chat | English, Hindi, Marathi, follow-up question, unknown question | 7.1, 7.3, 7.6, 9.3, 9.6 |
 | Voice | Hindi, Marathi, English, noisy audio, short recording, long recording | 8.2, 8.3, 8.5, 8.7 |
-| Telegram | text, photo, voice note, invalid message type, unlinked sender, duplicate update, API timeout, provider rate limit | 10.3, 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 14.4, 14.5 |
+| Telegram | text, photo, voice note, invalid message type, unlinked sender, linked sender holding no Bot_Entitlement, duplicate update, API timeout, provider rate limit | 10.3, 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 14.4, 14.5, 22.13, 22.14, 22.15 |
+| Account linking | valid first-time link, expired Link_Token, already consumed Link_Token, Telegram account already linked to another Jamee account, `/start` with no token payload | 10.12, 21.6, 21.8, 21.9, 21.13, 21.14 |
+| Payment | abandoned checkout, replayed payment webhook, forged webhook signature, captured payment opening a previously gated sender, webhook route flooded by an unauthenticated caller | 13.9, 22.6, 22.10, 22.11, 22.19, 22.21, 22.22 |
 | Media lifecycle | image inside the retention window, image past the window, entry with no thumbnail, voice deleted after a persisted transcript, voice retained after a failed transcription, repeated sweep run | 2.10, 2.13, 8.9, 8.10, 12.6, 12.9, 12.10, 18.3, 18.4, 18.10 |
