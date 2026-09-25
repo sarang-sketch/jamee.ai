@@ -24,6 +24,28 @@ The free-tier footprint is not free of consequences for stored media. A 1 GB sto
 >
 > Point 2 above should be read against 1.10 as it now stands. The Payment_Provider that Requirement 22 introduces is not a paid dependency in the sense point 2 used the phrase: it bills Jamee no fixed and no recurring amount, and takes a per-transaction fee out of money a Farmer pays. Removing SMS delivery did remove the only standing bill this project had, and that remains true.
 
+## Amendment A2 — Weekly Recharge Replaces The One-Time Unlock
+
+> Status: APPROVED AND IN FORCE. This amendment changes **what a captured payment grants**. It leaves the payment *authenticity* design of Requirement 22 untouched: signature verification over the raw body, the absent-secret-is-a-failure rule, and idempotency by UNIQUE claim all stand exactly as written.
+>
+> **A2 INVERTS three statements that currently assert the opposite.** They are listed here rather than only corrected in place, because a reader who implemented against them needs to know they were reversed deliberately:
+>
+> 1. **Criterion 22.9** states the entitlement "SHALL carry no expiry, SHALL require no renewal". That is now false. The entitlement is a validity window that lapses and is renewed.
+> 2. **Phase 7 task 38.5** reasons that the entitlement table has "no expires_at column, and that absence is deliberate", on the grounds that a nullable expiry would invite a future edit converting a one-time purchase into a subscription. A2 makes it a windowed product by decision, so the column is now required. The original reasoning was sound for a one-time unlock and is superseded, not refuted.
+> 3. **Property 34** asserts the recorded entitlement carries "no expiry". It now carries one, and the property needs the window plus a no-double-extension claim.
+>
+> **The decisions, all approved by the product owner:**
+>
+> 1. **The price is ₹20 and the period is 7 days.** This RESOLVES open question O22-1. Both remain compile-time constants readable from exactly one place, as criterion 22.4 already requires, and neither is an environment variable. The amount is also expressed in paise (2000), because the Payment_Provider takes minor units.
+> 2. **There is no auto-debit.** No subscription, no e-mandate, no stored payment instrument. The Farmer performs a recharge each period, which is what "the farmer has to update ₹20 per week" describes. E-mandate was considered and deliberately not chosen: mandate authorization, pre-debit notification, and NPCI recurring-payment rules are disproportionate obligations for a ₹20 product, and would make the compliance surface larger than the product.
+> 3. **A recharge extends the window from the later of now and the current expiry**, so recharging early loses no paid days and recharging after a lapse starts at the moment of payment. As arithmetic: new_expiry = max(now, current_expiry) + 7 days.
+> 4. **The gate becomes an unexpired check.** Every place that reads "holds a Bot_Entitlement" — the gate of 22.13, the gated reply of 22.14, the exemption list of 22.15, the ordering of 22.16, and the parity guards on 10.7 and 10.13 — now means "holds an entitlement whose expiry is in the future". This is the substantive change; the rest of A2 follows from it.
+> 5. **The bot carries its own recharge affordance, exempt from the gate.** A Farmer whose window has lapsed is in Telegram, not in a browser, so the bot offers a recharge command and a payment link. It is exempt for the same reason the /start exchange of Requirement 21 is: gating the recovery path makes the product unrecoverable from inside itself. The Web_App keeps its own recharge action, and 22.18's "offer no further Payment_Order" is superseded — a further Payment_Order is now the normal case.
+> 6. **The Web_App stays free.** Decision D22-1 is unchanged. Only the Telegram_Channel is gated.
+>
+> **On cost.** A weekly cycle means roughly 52 Payment_Provider transactions per Farmer per year rather than one, which is a materially larger share of a ₹20 payment than of a single larger one. It does not affect criterion 1.10, because the fee is still deducted from money a Farmer pays rather than billed to Jamee as a fixed or recurring amount. A longer period at a proportionally higher price would reduce that overhead and is a product decision, not a requirement.
+>
+> **Still open.** O22-3 — whether pilot testers transact in the Payment_Provider's test mode or with real money — remains undecided and is unaffected by A2.
 ## Glossary
 
 - **Jamee**: The complete product, comprising the web application, the shared services, the data layer, and the Telegram channel.
