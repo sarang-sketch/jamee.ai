@@ -12,15 +12,13 @@ import {
   AUDIO_COUNTDOWN_FROM_SECONDS,
   MAX_AUDIO_BYTES,
   MAX_AUDIO_SECONDS,
-  STORAGE_BUCKETS,
   TRANSCRIBE_ACCEPTED_CONTAINERS,
   TRANSCRIBE_MIN_SECONDS,
 } from '@/lib/config/verified';
 import { AppError, toEnvelope } from '@/lib/errors';
 import { interpolate, messages } from '@/lib/messages';
-import type { ErrorCode, Language, StorageRef } from '@/lib/schemas';
-import { buildStorageRef } from '@/lib/storage';
-import { createClient } from '@/lib/supabase/client';
+import type { ErrorCode, Language, MediaRef } from '@/lib/schemas';
+import { uploadMedia } from '@/lib/media/upload';
 
 import styles from './VoiceRecorder.module.css';
 
@@ -469,38 +467,18 @@ export function recordingUnsupportedNotice(language: Language): RecorderNotice {
 /* ========================================================================== */
 
 /**
- * One object into the bucket, or throw.
+ * Upload one recording to the Media_Endpoint and return its Media_Reference, or throw.
  *
- * Structurally the same seam `ImageUploader` uses, and declared here rather than imported from it
- * for one reason: importing the *value* `browserObjectUploader` would pull that module's CSS and
- * its canvas re-encoder into the voice bundle, for eight lines of Supabase call. The shape is the
- * contract; `StorageRef` and the client are the shared parts, and both come from shared modules.
+ * Structurally the same seam `ImageUploader` uses, declared here rather than imported from it so
+ * the voice bundle does not pull in that module's CSS and canvas re-encoder for one `fetch`.
+ * **Amendment A3:** the recording goes to `POST /api/media` with `kind: 'voice'` (authenticated,
+ * owner-stamped from the session) rather than browser-direct to a bucket — there is no bucket, and
+ * no path a client could forge.
  */
-export type ObjectUploader = (input: {
-  ref: StorageRef;
-  body: Blob;
-  contentType: string;
-}) => Promise<void>;
+export type MediaUploader = (input: { body: Blob; kind: 'voice' }) => Promise<MediaRef>;
 
-/**
- * The production uploader, on the browser client and the public key.
- *
- * `upsert: false` because every path carries a fresh uuid: an upsert would turn a uuid collision
- * — or a replayed request — into a silent overwrite of an object a request already points at.
- *
- * **The prefix is not enforced here.** `voice_messages_insert_own` in migration 0009 compares the
- * path's first segment to `auth.uid()` in the database, so a tampered client cannot write into
- * another farmer's folder however it builds the path (Requirement 8.11's server-side delete makes
- * the same comparison on the way out).
- */
-export function browserObjectUploader(client: ReturnType<typeof createClient>): ObjectUploader {
-  return async ({ ref, body, contentType }) => {
-    const { error } = await client.storage
-      .from(ref.bucket)
-      .upload(ref.path, body, { contentType, upsert: false });
-    if (error !== null) throw error;
-  };
-}
+/** The production uploader: `POST /api/media` with the recording and `kind: 'voice'`. */
+export const mediaEndpointUploader: MediaUploader = ({ body, kind }) => uploadMedia({ body, kind });
 
 /* ========================================================================== */
 /* The submission (Requirements 8.1, 8.3, 15.5)                                 */
@@ -520,13 +498,13 @@ export type VoiceSubmission =
   | { status: 'rejected'; code: VoiceRejectionCode }
   /**
    * `upload` means no object exists, so no voice request is sent (Requirement 15.5). `voice`
-   * means the object is in the bucket but the POST never produced a response — the retention
-   * sweep's orphan scan is what eventually reclaims those bytes.
+   * means the object is in GridFS but the POST never produced a response — the retention sweep's
+   * orphan scan is what eventually reclaims those bytes.
    */
   | { status: 'failed'; stage: 'upload' | 'voice'; cause: unknown }
   | {
       status: 'sent';
-      audio: StorageRef;
+      audio: MediaRef;
       /** What was posted, after the overshoot clamp. */
       durationSeconds: number;
       /** Unparsed on purpose: the transcript, the answer and the envelope belong to the screen. */
@@ -535,16 +513,13 @@ export type VoiceSubmission =
 
 export interface SubmitVoiceRecordingInput {
   recording: RecordedAudio;
-  /** The signed-in farmer. Becomes the first path segment, and nothing else may. */
+  /** The signed-in farmer. Recorded by the server from the session; not used to build any path. */
   userId: string;
   /** Required by `voiceRequestSchema`: a voice turn is a chat turn and needs its conversation. */
   conversationId: string;
-  upload: ObjectUploader;
+  upload: MediaUploader;
   /** `useJameeRequests().voice` — the only way to reach `/api/voice`. */
   voice: (body: VoiceBody) => Promise<Response>;
-  /** Injected by tests so the path is predictable. Default to now / a fresh uuid. */
-  now?: Date;
-  objectId?: string;
 }
 
 /**
@@ -553,14 +528,12 @@ export interface SubmitVoiceRecordingInput {
  * Extracted from the component because every rule worth testing here is a rule about
  * *sequencing*: that a declined recording uploads nothing, that a failed upload posts nothing
  * (Requirement 15.5), and that what is posted is a reference plus a measured duration rather than
- * audio bytes (Requirements 8.1, 2.7). None of that is about the DOM, and asserting it through a
- * rendered tree would prove less — the more so here, where jsdom has neither `MediaRecorder` nor
- * `getUserMedia`, so the capture half cannot be rendered at all.
+ * audio bytes (Requirements 8.1, 2.7). None of that is about the DOM.
  */
 export async function submitVoiceRecording(
   input: SubmitVoiceRecordingInput,
 ): Promise<VoiceSubmission> {
-  const { recording, userId, conversationId, upload, voice } = input;
+  const { recording, conversationId, upload, voice } = input;
 
   const container = recordingContainerOf(recording.mimeType);
   if (container === undefined) return { status: 'rejected', code: 'AUDIO_FORMAT_UNSUPPORTED' };
@@ -572,17 +545,10 @@ export async function submitVoiceRecording(
   });
   if (rejected !== null) return { status: 'rejected', code: rejected };
 
-  /** Requirement 8.1: the `voice-messages` bucket, under the farmer's own prefix. */
-  const audio = buildStorageRef({
-    bucket: STORAGE_BUCKETS.voiceMessages,
-    userId,
-    extension: container,
-    ...(input.now === undefined ? {} : { now: input.now }),
-    ...(input.objectId === undefined ? {} : { objectId: input.objectId }),
-  });
-
+  /** Requirement 8.1: uploaded to the Media_Endpoint as a `voice` file, owner stamped server-side. */
+  let audio: MediaRef;
   try {
-    await upload({ ref: audio, body: recording.blob, contentType: recording.mimeType });
+    audio = await upload({ body: recording.blob, kind: 'voice' });
   } catch (cause) {
     /** Requirement 15.5: report the upload failure, send NO voice request. */
     return { status: 'failed', stage: 'upload', cause };
@@ -591,15 +557,14 @@ export async function submitVoiceRecording(
   const durationSeconds = reportedDurationSeconds(recording.elapsedMs);
 
   /**
-   * Requirement 8.1: the reference, the measured duration, and the container — ~250 bytes on the
+   * Requirement 8.1: the reference, the measured duration, and the container — ~80 bytes on the
    * wire. `voiceRequestSchema` carries no byte count, deliberately: Requirement 8.3's 10 MB rule
-   * is enforced here against the blob the farmer recorded, and a client-supplied size would be a
-   * number the server could not verify anyway (`src/lib/groq.ts` documents the same reasoning for
-   * its optional `bytes` field).
+   * is enforced here against the blob the farmer recorded and again by `storeMedia` at the
+   * Media_Endpoint, so a client-supplied size would be a number the server does not need.
    *
    * `mimeType` is sent rather than assumed because U-V20 leaves the recorded container unresolved
-   * on the target Android browsers; `audioContainerOf()` in `voice.service.ts` prefers it over
-   * the path's extension for exactly that reason.
+   * on the target Android browsers; `audioContainerOf()` in `voice.service.ts` prefers it over the
+   * stored MIME type for exactly that reason.
    */
   const body: VoiceBody = { audio, conversationId, durationSeconds, mimeType: recording.mimeType };
 
@@ -628,8 +593,8 @@ export interface VoiceRecorderProps {
    * the error envelope plus a retry for a non-ok status (Requirement 15.4).
    */
   onVoiceResponse?: (response: Response) => void;
-  /** Test seam. The production default is the browser Supabase client. */
-  upload?: ObjectUploader;
+  /** Test seam. The production default is the Media_Endpoint uploader. */
+  upload?: MediaUploader;
 }
 
 /**
@@ -688,15 +653,12 @@ export function VoiceRecorder({
   const mountedRef = useRef(true);
 
   /**
-   * Built on first use, not during render: `publicEnv()` throws when
-   * `NEXT_PUBLIC_SUPABASE_URL` is absent and this component is server-rendered before it
-   * hydrates. Same reasoning as `ImageUploader` and `SignInForm`.
+   * The Media_Endpoint uploader (`POST /api/media`), or a test's seam. Under Amendment A3 this
+   * needs no client and reads no env var — it is a `fetch` to an authenticated route — so there is
+   * nothing to build lazily and no `NEXT_PUBLIC_*` read to defer past hydration.
    */
-  const uploaderRef = useRef<ObjectUploader | null>(null);
-  function objectUploader(): ObjectUploader {
-    if (upload !== undefined) return upload;
-    uploaderRef.current ??= browserObjectUploader(createClient());
-    return uploaderRef.current;
+  function objectUploader(): MediaUploader {
+    return upload ?? mediaEndpointUploader;
   }
 
   function clearTimers(): void {

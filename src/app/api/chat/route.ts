@@ -3,7 +3,6 @@ import { parseJsonBody } from '@/lib/api/request-body';
 import { withErrorHandling } from '@/lib/errors';
 import { burstLimiter } from '@/lib/rate-limit';
 import { chatRequestSchema, type ChatResponse, type Language } from '@/lib/schemas';
-import { createServerSupabase } from '@/lib/supabase/server';
 import { chatTurn } from '@/services/chat.service';
 
 /**
@@ -143,26 +142,26 @@ export const POST = authenticatedRoute(async (request, session) => {
    */
   return withErrorHandling(
     async () => {
-      const supabase = await createServerSupabase();
-
       /**
        * The one service call.
        *
        * `channel: 'web'` is a literal because `ChatInput.channel` is required (Requirement 16.5) and
-       * this route is only ever the web channel; the WhatsApp adapter passes its own. `inputKind:
+       * this route is only ever the web channel; the Telegram adapter passes its own. `inputKind:
        * 'text'` is likewise a literal — a typed question is text, and the voice path sets `'voice'`
        * on its own call so the transcript is distinguishable afterwards (Requirement 8.4).
        *
-       * `skipQuotaReserve` is deliberately absent, and no `QuotaContext` is passed: this request is
-       * the entry point for its own chat unit. There is no code path from this file that could opt
-       * out of the counter.
+       * *Amendment A3:* no Supabase client is built or passed. `chatTurn` writes and reads through
+       * the owner-scoped Data_Access_Layer, scoped by `userId`, so `deps` carries only Requirement
+       * 13.8's burst limiter (bound here because this is one of the three endpoints that requirement
+       * names). `skipQuotaReserve` is deliberately absent and no `QuotaContext` is passed: this
+       * request is the entry point for its own chat unit.
        *
        * Everything a farmer sees comes back from here — including the out-of-scope and
        * no-verified-content referrals (Requirements 4.7, 7.6), which the service answers from the
        * repository's own pre-translated copy without calling a model. A provider failure is not an
        * error on this path either: the service degrades to the grounded knowledge-base template
-       * rather than surfacing `DIAGNOSIS_TIMEOUT`, whose copy would tell a farmer who typed a
-       * question to resend a photo. That decision, and its audit trail, live in `chat.service.ts`.
+       * rather than surfacing `DIAGNOSIS_TIMEOUT`. That decision, and its audit trail, live in
+       * `chat.service.ts`.
        */
       const outcome = await chatTurn(
         {
@@ -173,7 +172,7 @@ export const POST = authenticatedRoute(async (request, session) => {
           channel: 'web',
           inputKind: 'text',
         },
-        { supabase, burst: burstLimiter() },
+        { burst: burstLimiter() },
       );
 
       /**

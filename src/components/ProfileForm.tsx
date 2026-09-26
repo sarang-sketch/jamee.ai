@@ -1,18 +1,13 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 
 import { ErrorBanner, type ErrorBannerError } from '@/components/ErrorBanner';
 import { AppError, isAppError, toEnvelope } from '@/lib/errors';
 import { messages } from '@/lib/messages';
-import {
-  LANGUAGE_OPTIONS,
-  PROFILE_SETTINGS_SELECT,
-  saveProfileSettings,
-  type ProfileSettings,
-} from '@/lib/profile';
-import { createClient } from '@/lib/supabase/client';
+import { LANGUAGE_OPTIONS, type ProfileSettings } from '@/lib/profile';
+import { ERROR_CODES, type ErrorCode } from '@/lib/schemas';
 
 import styles from './ProfileForm.module.css';
 
@@ -26,37 +21,33 @@ import styles from './ProfileForm.module.css';
  *          accessibility" — visible labels with real `<label>` association, `role="alert"` errors,
  *          tap targets ≥ 44×44 px in relative units
  *
- * ### The write goes straight to Postgres, and RLS is what authorizes it
+ * =============================================================================
+ * AMENDMENT A3 — THE WRITE GOES THROUGH A ROUTE, NOT A BROWSER DATABASE CLIENT
+ * =============================================================================
  *
- * No route handler sits in front of this. `profiles_update_own` in `0002_profiles.sql` is
- * `using (auth.uid() = id) with check (auth.uid() = id)`, so the database independently re-checks
- * the one thing that must be true, exactly as the storage policies do for the direct upload. The
- * `userId` prop is a convenience for the `eq` filter — not the thing that makes the write safe. A
- * tampered client that swapped it in gets zero updated rows, which
- * `saveProfileSettings` reports rather than swallows.
+ * Under Supabase this form wrote to Postgres directly and RLS authorized it. A3 removes the browser
+ * database client entirely (there is no RLS to lean on). So the form POSTs to `POST /api/profile`,
+ * which resolves the farmer from the server-confirmed session and writes through the
+ * Data_Access_Layer's owner-scoped `setProfileFields` (D18). The `userId` is never sent from the
+ * browser — the route reads it from the session — so a tampered client cannot write another
+ * farmer's row: there is no client-supplied identifier for it to swap.
  *
  * ### What this component does not touch
  *
- * `phone`. The auth callback's upsert (task 6.2) writes only `id` and `phone`, so a sign-in cannot
- * reset what this screen saves; the other half of that arrangement is that this screen never writes
- * `phone`, so it cannot overwrite a farmer's cross-channel identity (Requirement 1.5).
- *
- * This is also **not** task 12.3's `LanguageSwitcher`. The switcher is a per-request control that
- * rides along on diagnosis, chat and voice requests (Requirement 9.2); this is where the saved
- * default it starts from is set (Requirement 1.8).
+ * `phone`. The bootstrap upsert (the auth path) writes only identity fields, so a sign-in cannot
+ * reset what this screen saves; the other half is that this screen never writes `phone`, so it
+ * cannot overwrite a farmer's cross-channel identity (Requirement 1.5).
  */
 
 export interface ProfileFormProps {
-  /** The signed-in farmer, from `getUser()` in the server shell. */
-  userId: string;
-  /** What the profile row holds right now, read server-side under RLS. */
+  /** What the profile row holds right now, read server-side through the Data_Access_Layer. */
   initial: ProfileSettings;
 }
 
-export function ProfileForm({ userId, initial }: ProfileFormProps) {
+export function ProfileForm({ initial }: ProfileFormProps) {
   /**
-   * The last state the database confirmed. Two jobs: it is the read-back the screen shows, and it
-   * is the language every label on this screen is rendered in — so the interface follows the saved
+   * The last state the server confirmed. Two jobs: it is the read-back the screen shows, and it is
+   * the language every label on this screen is rendered in — so the interface follows the saved
    * preference rather than an unsaved selection. A farmer who picks Marathi sees Marathi once the
    * save succeeds, and sees no change at all if it fails, which is the truth of what happened.
    */
@@ -65,12 +56,12 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
   const [displayName, setDisplayName] = useState(initial.displayName ?? '');
   /**
    * Typed `string`, not `Language`, and deliberately so: this holds whatever the `<select>` is
-   * showing, and the only honest place to narrow it is `parseProfileSettings` at the write seam. A
-   * cast here would assert something about the DOM that this component cannot know.
+   * showing, and the only honest place to narrow it is the route's `parseProfileSettings` at the
+   * write seam. A cast here would assert something about the DOM this component cannot know.
    */
   const [language, setLanguage] = useState<string>(initial.language);
 
-  /** `true` for exactly as long as the update is open. The whole loading model. */
+  /** `true` for exactly as long as the save request is open. The whole loading model. */
   const [pending, setPending] = useState(false);
   /** What `ErrorBanner` renders and nothing more — the cause never reaches this state (15.6). */
   const [error, setError] = useState<ErrorBannerError | null>(null);
@@ -82,17 +73,6 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
   const router = useRouter();
   const nameFieldId = useId();
   const languageFieldId = useId();
-
-  /**
-   * Built on first use rather than during render: `publicEnv()` throws when
-   * `NEXT_PUBLIC_SUPABASE_URL` is absent, and this component is server-rendered before it hydrates.
-   * Same reasoning as `SignInForm`.
-   */
-  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
-  function supabase(): ReturnType<typeof createClient> {
-    supabaseRef.current ??= createClient();
-    return supabaseRef.current;
-  }
 
   function edited(change: () => void): void {
     setConfirmed(false);
@@ -108,24 +88,15 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
     setConfirmed(false);
 
     try {
-      /**
-       * The statement, built here and handed to `saveProfileSettings` as a function — see that
-       * module's note on why the seam is a function rather than a slice of the client. The payload
-       * comes from the module, so this call site cannot widen what gets written; the `eq` is the
-       * defence-in-depth filter over a row `profiles_update_own` already confines to one.
-       */
-      const settings = await saveProfileSettings(
-        (values) =>
-          supabase()
-            .from('profiles')
-            .update(values)
-            .eq('id', userId)
-            .select(PROFILE_SETTINGS_SELECT),
-        userId,
-        { displayName, language },
-      );
+      const response = await fetch('/api/profile', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ displayName, language }),
+      });
+      if (!response.ok) throw await errorFromResponse(response);
 
-      /** The row as the database now holds it, including the trim this write applied. */
+      /** The row as the server now holds it, including the trim the write applied. */
+      const settings = (await response.json()) as ProfileSettings;
       const languageChanged = settings.language !== saved.language;
       setSaved(settings);
       setDisplayName(settings.displayName ?? '');
@@ -135,24 +106,18 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
       /**
        * A saved language changes what the **server shell** renders too — the heading and the `lang`
        * on the landmark — so the shell is asked to re-render against the row that was just written.
-       * React state survives a refresh, so the confirmation above stays on screen.
-       *
-       * Only on a change: a refresh after every save would re-run the read for nothing.
+       * React state survives a refresh, so the confirmation above stays on screen. Only on a
+       * change: a refresh after every save would re-run the read for nothing.
        */
       if (languageChanged) router.refresh();
     } catch (cause) {
       /**
        * The localized message for the coded failure, rendered through the same envelope the API
-       * layer uses so this screen cannot develop its own vocabulary of errors. An unexpected
-       * throw — a network failure with no PostgREST code, say — becomes `INTERNAL_ERROR`, which is
-       * honest and retryable rather than silent.
-       *
-       * The language is `saved.language`: the profile is unchanged after a failure, so the message
-       * has to arrive in the language the farmer already had.
+       * layer uses so this screen cannot develop its own vocabulary of errors. The language is
+       * `saved.language`: the profile is unchanged after a failure, so the message arrives in the
+       * language the farmer already had.
        */
-      const appError = isAppError(cause)
-        ? cause
-        : new AppError('INTERNAL_ERROR', { cause });
+      const appError = isAppError(cause) ? cause : new AppError('INTERNAL_ERROR', { cause });
       setError(toEnvelope(appError, saved.language).error);
     } finally {
       setPending(false);
@@ -161,7 +126,7 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
 
   /**
    * The one status string, derived from the two pieces of state that can be true. `saving` is bound
-   * to the open update; `saved` is bound to a write the database confirmed, and is dropped as soon
+   * to the open request; `saved` is bound to a write the server confirmed, and is dropped as soon
    * as the fields change so it never labels an unsaved edit.
    */
   let statusText = '';
@@ -191,14 +156,12 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
           {ui.preferredLanguageLabel}
         </label>
         {/*
-         * A real `<select>`: it is keyboard operable, it is the control a mobile OS renders as a
-         * native picker, and it cannot submit a value outside its options without tampering — which
-         * `parseProfileSettings` checks for anyway.
-         *
-         * Requirement 9.1's three options come from `LANGUAGE_OPTIONS`, which is `languageSchema`'s
-         * own option list, so the form and the validation cannot disagree about what is supported.
-         * Each option is labelled with that language's endonym from the catalog, so it is readable
-         * to the farmer who is looking for it.
+         * A real `<select>`: keyboard operable, rendered as a native picker on mobile, and it cannot
+         * submit a value outside its options without tampering — which the route's
+         * `parseProfileSettings` checks for anyway. Requirement 9.1's three options come from
+         * `LANGUAGE_OPTIONS`, which is `languageSchema`'s own option list, so the form and the
+         * validation cannot disagree about what is supported. Each option carries its own `lang` so a
+         * screen reader announces each endonym with the right phonetics.
          */}
         <select
           className={styles.select}
@@ -209,12 +172,6 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
           disabled={pending}
         >
           {LANGUAGE_OPTIONS.map((option) => (
-            /**
-             * `lang` per option, matching `LanguageSwitcher`: each label is that language's own
-             * endonym, so `हिन्दी` under the form's `lang` would be read with the wrong phonetics by a
-             * screen reader and rendered from the wrong font by the browser. The two language
-             * controls in the app now announce their options identically.
-             */
             <option key={option} value={option} lang={option}>
               {languageNames[option]}
             </option>
@@ -223,8 +180,8 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
       </div>
 
       {/*
-       * Requirement 15.4: the message, with the Save control below as the retry for it — the fields
-       * still hold what the farmer typed, so pressing it re-sends the write that failed.
+       * Requirement 15.4: the message, with the Save control below as the retry — the fields still
+       * hold what the farmer typed, so pressing it re-sends the write that failed.
        */}
       {error !== null ? <ErrorBanner error={error} retry={{ kind: 'control' }} /> : null}
 
@@ -234,13 +191,31 @@ export function ProfileForm({ userId, initial }: ProfileFormProps) {
 
       {/*
        * One region, two honest states: the open request, or the confirmed save. Rendered while idle
-       * as well, because a polite live region that appears together with its text is not reliably
-       * announced, and because reserving the line keeps the button from moving under a thumb.
-       * Nothing here is driven by a timer (Requirement 15.2).
+       * too, because a polite live region that appears together with its text is not reliably
+       * announced, and reserving the line keeps the button from moving under a thumb. Nothing here is
+       * driven by a timer (Requirement 15.2).
        */}
       <p className={styles.status} role="status">
         {statusText}
       </p>
     </form>
   );
+}
+
+/* ========================================================================== */
+/* Error handling — the same envelope the API layer produces                   */
+/* ========================================================================== */
+
+/** Turn a non-2xx response into an `AppError`, reading the coded envelope when the body carries one. */
+async function errorFromResponse(response: Response): Promise<AppError> {
+  try {
+    const body = (await response.json()) as { error?: { code?: string } };
+    const code = body?.error?.code;
+    if (typeof code === 'string' && (ERROR_CODES as readonly string[]).includes(code)) {
+      return new AppError(code as ErrorCode);
+    }
+  } catch {
+    /* no coded body — fall through to a generic internal error */
+  }
+  return new AppError('INTERNAL_ERROR');
 }

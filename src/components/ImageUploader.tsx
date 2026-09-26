@@ -14,14 +14,12 @@ import {
 import {
   ACCEPTED_IMAGE_TYPES,
   MAX_IMAGE_BYTES,
-  STORAGE_BUCKETS,
   type AcceptedImageType,
 } from '@/lib/config/verified';
 import { AppError, toEnvelope } from '@/lib/errors';
 import { interpolate, messages } from '@/lib/messages';
-import type { ErrorCode, Language, StorageRef } from '@/lib/schemas';
-import { buildStorageRef, thumbRefFor } from '@/lib/storage';
-import { createClient } from '@/lib/supabase/client';
+import type { ErrorCode, Language, MediaKind, MediaRef } from '@/lib/schemas';
+import { uploadMedia } from '@/lib/media/upload';
 
 import styles from './ImageUploader.module.css';
 
@@ -373,43 +371,24 @@ export async function encodeCropImage(file: Blob): Promise<EncodedCropImage> {
 /* ========================================================================== */
 
 /**
- * One object into the bucket, or throw.
+ * Upload one re-encoded blob to the Media_Endpoint and return its Media_Reference, or throw.
  *
- * A function rather than a slice of the Supabase client, for the same reason
- * `saveProfileSettings` takes one: the caller keeps the client, this module keeps the decision
- * about what a failed upload means, and a test needs neither a stand-in client nor a network.
+ * A function rather than a client, for the same reason `saveProfileSettings` takes one: the caller
+ * keeps the decision about what a failed upload means, and a test needs neither a network nor a
+ * `fetch` stub wired through the component. **Amendment A3:** the object goes to
+ * `POST /api/media` (authenticated, owner-stamped from the session) instead of browser-direct to a
+ * Supabase bucket — there is no bucket, and no path a client could forge. The route admits the
+ * bytes (kind + MIME type + size) and returns the reference the diagnosis request then carries.
  */
-export type ObjectUploader = (input: {
-  ref: StorageRef;
-  body: Blob;
-  contentType: string;
-}) => Promise<void>;
+export type MediaUploader = (input: { body: Blob; kind: MediaKind }) => Promise<MediaRef>;
 
 /**
- * The production uploader, on the browser client and the public key.
- *
- * `upsert: false` because every path carries a fresh uuid: an upsert would turn a uuid
- * collision — or a replayed request — into a silent overwrite of an object a `diagnoses` row
- * already points at.
- *
- * `cacheControl` is left at the client default. These objects are read through short-lived
- * signed URLs (V3 measures expiry in seconds), so a long cache lifetime on the object would
- * not survive the URL that fetches it.
- *
- * **The prefix is not enforced here.** `crop_images_insert_own` in migration 0009 compares the
- * path's first segment to `auth.uid()` in the database, so a tampered client cannot write into
- * another farmer's folder however it builds the path.
+ * The production uploader: `POST /api/media` with the blob and its kind. The MIME type the route
+ * admits is the blob's own `type` (JPEG, from the re-encoder). No owner is named here — the route
+ * stamps `metadata.ownerId` from the server-confirmed session, so a client cannot upload a file
+ * owned by another farmer (Requirement 2.5 holds by construction).
  */
-export function browserObjectUploader(
-  client: ReturnType<typeof createClient>,
-): ObjectUploader {
-  return async ({ ref, body, contentType }) => {
-    const { error } = await client.storage
-      .from(ref.bucket)
-      .upload(ref.path, body, { contentType, upsert: false });
-    if (error !== null) throw error;
-  };
-}
+export const mediaEndpointUploader: MediaUploader = ({ body, kind }) => uploadMedia({ body, kind });
 
 /* ========================================================================== */
 /* The submission (Requirements 2.1, 2.13, 2.14, 15.5)                         */
@@ -423,14 +402,14 @@ export type CropImageSubmission =
   | { status: 'rejected'; code: AdmissionCode }
   /**
    * Nothing to diagnose. `encode` and `upload` both mean no usable object exists, so no
-   * diagnosis request is sent (Requirement 15.5). `diagnose` means the objects are in the
-   * bucket but the POST never produced a response — the retention sweep's orphan scan is what
-   * eventually reclaims those bytes (design: *How the sweep finds its work*).
+   * diagnosis request is sent (Requirement 15.5). `diagnose` means the objects are in GridFS but
+   * the POST never produced a response — the retention sweep's orphan scan is what eventually
+   * reclaims those bytes (design: *How the sweep finds its work*).
    */
   | { status: 'failed'; stage: 'encode' | 'upload' | 'diagnose'; cause: unknown }
   | {
       status: 'sent';
-      image: StorageRef;
+      image: MediaRef;
       thumbnail: ThumbnailOutcome;
       /** Unparsed on purpose: the envelope and the result card belong to the screen. */
       response: Response;
@@ -440,31 +419,27 @@ export type CropImageSubmission =
 export interface SubmitCropImageInput {
   /** The file the farmer selected. Re-admitted here, so this function is safe to call directly. */
   file: File;
-  /** The signed-in farmer. Becomes the first path segment, and nothing else may. */
+  /** The signed-in farmer. Recorded by the server from the session; not used to build any path. */
   userId: string;
-  upload: ObjectUploader;
+  upload: MediaUploader;
   encode: CropImageEncoder;
   /** `useJameeRequests().diagnose` — the only way to reach `/api/diagnose`. */
   diagnose: (body: DiagnoseBody) => Promise<Response>;
   conversationId?: string;
-  /** Injected by tests so the path is predictable. Default to now / a fresh uuid. */
-  now?: Date;
-  objectId?: string;
 }
 
 /**
  * Admit, re-encode, upload, then post the reference — the whole flow, with no React in it.
  *
  * Extracted from the component because every rule worth testing here is a rule about
- * *sequencing*: that a declined file uploads nothing, that a failed upload posts nothing
+ * *sequencing*: that a declined file uploads nothing, that a failed full-image upload posts nothing
  * (Requirement 15.5), that a failed thumbnail still posts (Requirement 2.14), and that what is
- * posted is a reference rather than bytes (Requirements 2.1, 2.2). None of that is about the
- * DOM, and asserting it through a rendered tree would prove less.
+ * posted is a reference rather than bytes (Requirements 2.1, 2.2). None of that is about the DOM.
  */
 export async function submitCropImage(
   input: SubmitCropImageInput,
 ): Promise<CropImageSubmission> {
-  const { file, userId, upload, encode, diagnose } = input;
+  const { file, upload, encode, diagnose } = input;
 
   /** Requirement 2.9: on the selected file, before the re-encode. */
   const rejected = admissionCode(file);
@@ -477,50 +452,46 @@ export async function submitCropImage(
     /**
      * Requirement 2.10 says the re-encoded image is uploaded **in place of** the selected file,
      * so there is no fallback to the original here. Uploading a 10 MB original would break the
-     * storage projection the retention window is built on, and doing it silently would make
-     * that breakage invisible.
+     * storage projection the retention window is built on, and doing it silently would make that
+     * breakage invisible.
      */
     return { status: 'failed', stage: 'encode', cause };
   }
 
-  const image = buildStorageRef({
-    bucket: STORAGE_BUCKETS.cropImages,
-    userId,
-    extension: encoded.extension,
-    ...(input.now === undefined ? {} : { now: input.now }),
-    ...(input.objectId === undefined ? {} : { objectId: input.objectId }),
-  });
-
+  /**
+   * The full image first (Requirement 2.1). A failure here is Requirement 15.5: report it and send
+   * NO diagnosis request, because the object the diagnosis reads does not exist.
+   */
+  let image: MediaRef;
   try {
-    await upload({ ref: image, body: encoded.full, contentType: encoded.contentType });
+    image = await upload({ body: encoded.full, kind: 'crop-image' });
   } catch (cause) {
-    /** Requirement 15.5: report the upload failure, send NO diagnosis request. */
     return { status: 'failed', stage: 'upload', cause };
   }
 
   /**
-   * Requirement 2.13, at the DERIVED path — and Requirement 2.14 for the failure: a thumbnail
-   * that does not land degrades the history list, which has an explicit fallback for exactly
-   * this case (Requirement 12.7 renders the full-size image instead). Abandoning the diagnosis
-   * over it would throw away the request the farmer actually made.
+   * Requirement 2.13 — the thumbnail, as a separate `thumbnail`-kind upload; and Requirement 2.14
+   * for the failure: a thumbnail that does not land degrades the history list (which falls back to
+   * the full image, Requirement 12.7). Abandoning the diagnosis over it would throw away the
+   * request the farmer actually made. A `null` thumbnail (the browser could not produce one) is the
+   * same case, handled the same way.
    */
   let thumbnail: ThumbnailOutcome = 'failed';
+  let thumbnailRef: MediaRef | null = null;
   if (encoded.thumbnail !== null) {
     try {
-      await upload({
-        ref: thumbRefFor(image),
-        body: encoded.thumbnail,
-        contentType: encoded.contentType,
-      });
+      thumbnailRef = await upload({ body: encoded.thumbnail, kind: 'thumbnail' });
       thumbnail = 'uploaded';
     } catch {
       thumbnail = 'failed';
+      thumbnailRef = null;
     }
   }
 
-  /** Requirements 2.1, 2.2, 2.7: the reference, and nothing else. ~200 bytes on the wire. */
+  /** Requirements 2.1, 2.2, 2.7: the reference(s), and nothing else. ~60 bytes on the wire. */
   const body: DiagnoseBody = {
     image,
+    ...(thumbnailRef === null ? {} : { thumbnail: thumbnailRef }),
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
   };
 
@@ -549,8 +520,8 @@ export interface ImageUploaderProps {
    * plus a retry for a non-ok status (Requirement 15.4).
    */
   onDiagnosisResponse?: (response: Response) => void;
-  /** Test seams. Production defaults are the browser client and the canvas re-encoder. */
-  upload?: ObjectUploader;
+  /** Test seams. Production defaults are the Media_Endpoint uploader and the canvas re-encoder. */
+  upload?: MediaUploader;
   encode?: CropImageEncoder;
 }
 
@@ -586,15 +557,12 @@ export function ImageUploader({
   const captureInput = useRef<HTMLInputElement | null>(null);
 
   /**
-   * Built on first use, not during render: `publicEnv()` throws when
-   * `NEXT_PUBLIC_SUPABASE_URL` is absent and this component is server-rendered before it
-   * hydrates. Same reasoning as `SignInForm` and `ProfileForm`.
+   * The Media_Endpoint uploader (`POST /api/media`), or a test's seam. Under Amendment A3 this
+   * needs no client and reads no env var — it is a `fetch` to an authenticated route — so there is
+   * nothing to build lazily and no `NEXT_PUBLIC_*` read to defer past hydration.
    */
-  const uploaderRef = useRef<ObjectUploader | null>(null);
-  function objectUploader(): ObjectUploader {
-    if (upload !== undefined) return upload;
-    uploaderRef.current ??= browserObjectUploader(createClient());
-    return uploaderRef.current;
+  function objectUploader(): MediaUploader {
+    return upload ?? mediaEndpointUploader;
   }
 
   const busy = phase !== 'idle';

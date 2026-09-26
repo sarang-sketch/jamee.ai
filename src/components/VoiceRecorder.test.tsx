@@ -6,7 +6,6 @@ import {
   AUDIO_COUNTDOWN_FROM_SECONDS,
   MAX_AUDIO_BYTES,
   MAX_AUDIO_SECONDS,
-  STORAGE_BUCKETS,
   TRANSCRIBE_ACCEPTED_CONTAINERS,
   TRANSCRIBE_MIN_SECONDS,
 } from '@/lib/config/verified';
@@ -14,10 +13,9 @@ import { AppError, toEnvelope } from '@/lib/errors';
 import { messages } from '@/lib/messages';
 import {
   SUPPORTED_LANGUAGES,
-  storageRefSchema,
   voiceRequestSchema,
   type Language,
-  type StorageRef,
+  type MediaRef,
 } from '@/lib/schemas';
 
 import {
@@ -38,7 +36,7 @@ import {
   voiceRejectionMessage,
   voiceRejectionNotice,
   VoiceRecorder,
-  type ObjectUploader,
+  type MediaUploader,
   type RecordedAudio,
 } from './VoiceRecorder';
 
@@ -65,9 +63,10 @@ import {
 /* ========================================================================== */
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
-const OBJECT_ID = '22222222-2222-4222-8222-222222222222';
 const CONVERSATION_ID = '33333333-3333-4333-8333-333333333333';
-const NOW = new Date('2026-09-14T18:30:00.000Z');
+
+/** The reference the media endpoint returns for a `voice` upload. */
+const AUDIO_REF: MediaRef = { fileId: 'c'.repeat(24), kind: 'voice' };
 
 /** A recording that is admitted: an accepted container, well inside both limits. */
 function recording(overrides: Partial<RecordedAudio> = {}): RecordedAudio {
@@ -79,28 +78,29 @@ function recording(overrides: Partial<RecordedAudio> = {}): RecordedAudio {
 }
 
 interface RecordedUpload {
-  ref: StorageRef;
+  kind: 'voice';
   size: number;
-  contentType: string;
+  type: string;
 }
 
 interface Recorder {
   uploads: RecordedUpload[];
   bodies: unknown[];
-  upload: ObjectUploader;
+  upload: MediaUploader;
   voice: (body: unknown) => Promise<Response>;
 }
 
-/** Records what would have gone to storage and to `/api/voice`. */
+/** Records what would have gone to the Media_Endpoint and to `/api/voice`. */
 function recorder(options: { failUpload?: boolean; failVoice?: boolean } = {}): Recorder {
   const uploads: RecordedUpload[] = [];
   const bodies: unknown[] = [];
   return {
     uploads,
     bodies,
-    upload: async ({ ref, body, contentType }) => {
-      if (options.failUpload === true) throw new Error(`upload refused: ${ref.path}`);
-      uploads.push({ ref, size: body.size, contentType });
+    upload: async ({ body, kind }) => {
+      if (options.failUpload === true) throw new Error('media upload refused');
+      uploads.push({ kind, size: body.size, type: body.type });
+      return AUDIO_REF;
     },
     voice: async (body) => {
       bodies.push(body);
@@ -116,7 +116,7 @@ function recorder(options: { failUpload?: boolean; failVoice?: boolean } = {}): 
 function submit(
   overrides: {
     recording?: RecordedAudio;
-    upload?: ObjectUploader;
+    upload?: MediaUploader;
     voice?: (body: unknown) => Promise<Response>;
   } = {},
 ) {
@@ -127,8 +127,6 @@ function submit(
     conversationId: CONVERSATION_ID,
     upload: overrides.upload ?? io.upload,
     voice: overrides.voice ?? io.voice,
-    now: NOW,
-    objectId: OBJECT_ID,
   });
 }
 
@@ -308,7 +306,7 @@ describe('measuredSeconds and reportedDurationSeconds', () => {
 
     for (const elapsedMs of [1, 8_000, MAX_AUDIO_SECONDS * 1000, MAX_AUDIO_SECONDS * 1000 + 900]) {
       const parsed = voiceRequestSchema.safeParse({
-        audio: { bucket: STORAGE_BUCKETS.voiceMessages, path: `${USER_ID}/2026/09/${OBJECT_ID}.webm` },
+        audio: AUDIO_REF,
         language: 'en',
         conversationId: CONVERSATION_ID,
         durationSeconds: reportedDurationSeconds(elapsedMs),
@@ -430,38 +428,36 @@ describe('submitVoiceRecording', () => {
     expect(outcome.status).toBe('sent');
     if (outcome.status !== 'sent') return;
 
-    // Requirement 8.1 — the `voice-messages` bucket, under the farmer's own prefix.
-    expect(outcome.audio.bucket).toBe(STORAGE_BUCKETS.voiceMessages);
-    expect(outcome.audio.path).toBe(`${USER_ID}/2026/09/${OBJECT_ID}.webm`);
-    expect(storageRefSchema.safeParse(outcome.audio).success).toBe(true);
-
+    // Requirement 8.1 (A3) — the recording is uploaded as a `voice` file and its reference returned.
+    expect(outcome.audio).toEqual(AUDIO_REF);
     expect(io.uploads).toHaveLength(1);
-    expect(io.uploads[0]?.ref).toEqual(outcome.audio);
-    expect(io.uploads[0]?.contentType).toBe('audio/webm;codecs=opus');
+    expect(io.uploads[0]?.kind).toBe('voice');
+    expect(io.uploads[0]?.type).toBe('audio/webm');
     expect(io.bodies).toHaveLength(1);
     expect(outcome.durationSeconds).toBe(8);
   });
 
-  it('takes the object extension from the container the browser actually used', async () => {
+  it('uploads whatever container the browser used, as a voice-kind file', async () => {
     const io = recorder();
     const outcome = await submit({
       upload: io.upload,
       voice: io.voice,
-      recording: recording({ mimeType: 'audio/ogg;codecs=opus' }),
+      recording: recording({ mimeType: 'audio/ogg;codecs=opus', blob: new Blob(['x'], { type: 'audio/ogg' }) }),
     });
     if (outcome.status !== 'sent') throw new Error(`expected sent, got ${outcome.status}`);
-    expect(outcome.audio.path.endsWith('.ogg')).toBe(true);
-    expect(storageRefSchema.safeParse(outcome.audio).success).toBe(true);
+    // The kind is always `voice`; the container is carried on the request's `mimeType`, not a path.
+    expect(io.uploads[0]?.kind).toBe('voice');
+    expect((io.bodies[0] as { mimeType?: string }).mimeType).toBe('audio/ogg;codecs=opus');
   });
 
-  it('posts a storage reference and no audio bytes (Requirements 8.1, 2.7)', async () => {
+  it('posts a media reference and no audio bytes (Requirements 8.1, 2.7)', async () => {
     const io = recorder();
     const outcome = await submit({ upload: io.upload, voice: io.voice });
     if (outcome.status !== 'sent') throw new Error(`expected sent, got ${outcome.status}`);
 
     const [body] = io.bodies;
     expect(body).toEqual({
-      audio: outcome.audio,
+      audio: AUDIO_REF,
       conversationId: CONVERSATION_ID,
       durationSeconds: 8,
       mimeType: 'audio/webm;codecs=opus',

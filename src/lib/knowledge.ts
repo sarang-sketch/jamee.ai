@@ -1,10 +1,10 @@
 import 'server-only';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
-
+import type { DiseaseKnowledgeDoc } from '@/lib/db/collections';
+import { knowledgeReads } from '@/lib/db/reads';
 import { AppError } from '@/lib/errors';
 import { VERIFIED_CONDITIONS, type VerifiedCondition, type KnowledgePayload } from '@/lib/schemas';
-import type { Database, DiseaseKnowledgeRow } from '@/types/database';
+import type { DiseaseKnowledgeRow } from '@/types/database';
 
 /**
  * The knowledge base, read side. Canonical-name lookup and scope resolution over the five
@@ -14,9 +14,9 @@ import type { Database, DiseaseKnowledgeRow } from '@/types/database';
  *               symptom, cause, treatment and prevention sentence a farmer reads is composed from
  *               a row here), 4.7 (a question outside the Verified_Conditions gets the honest
  *               referral), 7.6 (a question with no verified content behind it gets the same),
- *               13.3 (authenticated read on this table)
- * Design: "0004: disease_knowledge"; "Prompting and grounding" → scope resolution and the static
- *         referral; "Data model and contracts"
+ *               13.3 (authenticated read on this collection), 13.4 (read-only to the application)
+ * Design: "0004: disease_knowledge" (read under the Amendment A3 mapping); "Prompting and
+ *         grounding" → scope resolution and the static referral; D17, D18
  *
  * ### WHAT THIS MODULE IS NOT ALLOWED TO DO
  *
@@ -28,98 +28,125 @@ import type { Database, DiseaseKnowledgeRow } from '@/types/database';
  *
  * ### THE FIVE NAMES ARE IMPORTED, NEVER RETYPED
  *
- * `VERIFIED_CONDITIONS` comes from `schemas.ts`. The list already exists in exactly three places
- * by design — the Zod enum, the `disease_knowledge.disease_name` check constraint (0004), and the
- * `diagnoses.disease_name` check constraint (0005) — and 0004's own comment warns that a
- * divergence surfaces as an insert failure or a lookup miss, i.e. as a farmer being told Jamee
- * cannot help with a condition it actually knows. A fourth copy in this file would be exactly
- * that bug waiting to happen, so the scope vocabulary below is **derived** from the imported list
- * rather than written out.
+ * `VERIFIED_CONDITIONS` comes from `schemas.ts`. The list already exists in a small number of
+ * pinned places by design (the Zod enum, the collection `$jsonSchema` validators in `setup.ts`,
+ * the `names.ts` copy the node-run setup script shares), and a unit test asserts those copies are
+ * byte-identical. A fresh copy in this file would be that guard's failure waiting to happen, so the
+ * scope vocabulary below is **derived** from the imported list rather than written out.
  *
- * ### WHICH SUPABASE CLIENT, AND WHY
+ * =============================================================================
+ * AMENDMENT A3 — THE READER NOW GOES THROUGH THE DATA_ACCESS_LAYER, NOT SUPABASE
+ * =============================================================================
  *
- * The default reader is the **RLS-scoped** server client (`createServerSupabase()`), for three
- * reasons:
+ * Under Supabase this module read `disease_knowledge` through an RLS-scoped or service-role
+ * PostgREST client. Under A3 there is no Supabase and no RLS: the knowledge base is reached only
+ * through the Data_Access_Layer's read-only `knowledgeReads()` accessor (`src/lib/db/reads.ts`),
+ * which is the ONE holder of the driver for this collection (D18) and exposes a read and no write
+ * at all (Requirement 13.4).
  *
- *  1. Requirement 13.3 and the `dk_select_authenticated` policy in 0004 already grant every
- *     authenticated farmer an unconditional read of this table. The session client is sufficient,
- *     so reaching for the service-role key would buy nothing and give up the boundary that comes
- *     free with a session.
- *  2. `admin.ts` states the rule for service-role queries: every one carries an explicit
- *     `user_id` predicate, and one without it is a defect. `disease_knowledge` has no `user_id`
- *     column — there is nothing farmer-specific in it — so that rule cannot be honoured here and
- *     cannot be checked by a reviewer either. Defaulting to the client the rule does apply to
- *     keeps the rule meaningful.
- *  3. The one caller with no session is the WhatsApp adapter (a webhook carries no cookies). It
- *     passes `knowledgeReaderFrom(createAdminClient())`, and that read is safe for the same
- *     reason the predicate rule does not apply: the table holds no farmer data, so a
- *     service-role read of it cannot cross a tenant boundary.
+ * The base belongs to no farmer, so the accessor is deliberately NOT owner-scoped — and that is
+ * safe for exactly the reason the owner-scoping discipline exists: `disease_knowledge` holds no
+ * tenant data, so a read of it cannot cross a tenant boundary. The old "which Supabase client, and
+ * why" reasoning collapses to a single fact: there is one accessor, it reads the five shared rows,
+ * and every caller — the web screen, the chat turn, the Telegram adapter — uses it.
  *
- * The client is a parameter rather than a construction, so those two channels share one
- * implementation (Requirement 16.5's reasoning applied to a read) and a unit test can stand in a
- * plain function.
+ * ### THE SEAM IS UNCHANGED, SO ITS CALLERS AND TESTS ARE UNCHANGED
+ *
+ * `KnowledgeReader` is still a plain `(names) => Promise<KnowledgeEntry[]>`, and `KnowledgeEntry`
+ * is still the same row shape. The port lives entirely in the DEFAULT reader (`rlsScopedReader`,
+ * name kept so no consumer moves) and in `knowledgeReaderFrom`, which now maps the layer's document
+ * to the seam's row shape. `resolveScope`, `lookupCondition`, `knowledgePayloadOf`,
+ * `matchConditions` and `hasTreatmentContent` are byte-for-byte the same decisions over the same
+ * shape, which is why the unit tests that stub `KnowledgeReader` need no change.
  */
 
 /* ========================================================================== */
 /* The read seam                                                               */
 /* ========================================================================== */
 
-/** A knowledge-base row, exactly as the database defines it. */
+/**
+ * A knowledge-base row, in the shape every consumer already reads.
+ *
+ * Kept as `DiseaseKnowledgeRow` (the field names `resolveScope`, `knowledgePayloadOf` and the
+ * detail screen already read: `disease_name`, `symptoms`, `causes`, `treatment`, `prevention`,
+ * `source`, …) so the seam, its consumers and its tests are untouched by the A3 storage change.
+ * The Data_Access_Layer stores a `DiseaseKnowledgeDoc` (camelCase, `_id`); `docToEntry()` below is
+ * the one place that maps the layer's document to this row shape, so the mapping lives once.
+ */
 export type KnowledgeEntry = DiseaseKnowledgeRow;
 
 /**
  * The only read this module makes: given canonical names, return their rows.
  *
- * A **function** rather than a mirrored PostgREST builder, deliberately. `storage.ts` mirrors a
- * narrow slice of the storage client because it calls two unrelated methods on it; here there is
- * one query, and mirroring `from().select().in()` structurally would mean a test had to reproduce
- * a three-deep builder chain to assert something about scope resolution. The real query lives once
- * in `knowledgeReaderFrom()` below, typed against the real client so the compiler still checks it.
+ * A **function** rather than a mirrored driver builder, deliberately: there is one read, and
+ * mirroring the accessor structurally would mean a test had to reproduce it to assert something
+ * about scope resolution. The real read lives once in `rlsScopedReader` below.
  */
 export type KnowledgeReader = (
   names: readonly VerifiedCondition[],
 ) => Promise<readonly KnowledgeEntry[]>;
 
 /**
- * Adapt a Supabase client — RLS-scoped or service-role — into a reader.
- *
- * A PostgREST `error` is **not** an empty result and is not treated as one. An empty result means
- * the row is not there; an error means Jamee could not find out, and reporting "no verified
- * content" for a network failure or a policy misconfiguration would turn an outage into a
- * confident, wrong referral. Same reasoning as the existence probe in `storage.ts`: the cause is
- * logged server-side and the farmer sees `INTERNAL_ERROR`.
+ * Map a Data_Access_Layer `DiseaseKnowledgeDoc` to the `KnowledgeEntry` row shape the consumers
+ * read. THE one place the camelCase document becomes the snake_case row — `_id` becomes the string
+ * `id`, and the arrays and provenance are copied verbatim (Requirement 4.3 forbids composing or
+ * altering them). `scientificName` is written as `scientific_name`, coalescing an absent value to
+ * `null` to match the nullable column shape.
  */
-export function knowledgeReaderFrom(client: SupabaseClient<Database>): KnowledgeReader {
-  return async (names) => {
-    if (names.length === 0) return [];
-
-    const { data, error } = await client
-      .from('disease_knowledge')
-      .select('*')
-      .in('disease_name', [...names]);
-
-    if (error !== null) {
-      throw new AppError('INTERNAL_ERROR', {
-        cause: error,
-        context: { reason: 'knowledge_read_failed', requested: [...names] },
-      });
-    }
-    return data ?? [];
+function docToEntry(doc: DiseaseKnowledgeDoc): KnowledgeEntry {
+  return {
+    id: doc._id.toHexString(),
+    disease_name: doc.diseaseName,
+    crop: doc.crop,
+    scientific_name: doc.scientificName ?? null,
+    symptoms: [...doc.symptoms],
+    causes: [...doc.causes],
+    treatment: [...doc.treatment],
+    prevention: [...doc.prevention],
+    default_severity: doc.defaultSeverity,
+    source: doc.source,
+    created_at: doc.createdAt.toISOString(),
+    updated_at: doc.updatedAt.toISOString(),
   };
 }
 
 /**
- * The default reader: the farmer's own session, through RLS.
+ * Adapt the Data_Access_Layer's read-only knowledge accessor into a `KnowledgeReader`.
  *
- * `createServerSupabase()` is imported **lazily** because it reads the App Router cookie store,
- * which only exists inside a request. A static import would make this module unloadable outside a
- * request scope — including in a unit test — for a dependency that a caller supplying its own
- * client never uses.
+ * `legacyClient` is an IGNORED optional legacy parameter, kept so callers written against the
+ * Supabase signature (`knowledgeReaderFrom(deps.supabase)`) still compile through the A3 port
+ * without every call site changing at once — the same shape the quota port kept for its counter
+ * RPC. The Data_Access_Layer is the only source of rows; nothing here reads the argument.
+ *
+ * A failure THROWS rather than reading as "no rows": an empty result means the row is not there, an
+ * error means Jamee could not find out, and reporting "no verified content" for a database failure
+ * would turn an outage into a confident, wrong referral. The layer throws on any real failure; this
+ * wrapper turns that into the taxonomy `INTERNAL_ERROR` with the cause logged server-side.
  */
-export const rlsScopedReader: KnowledgeReader = async (names) => {
-  const { createServerSupabase } = await import('@/lib/supabase/server');
-  return knowledgeReaderFrom(await createServerSupabase())(names);
-};
+export function knowledgeReaderFrom(legacyClient?: unknown): KnowledgeReader {
+  void legacyClient;
+  return async (names) => {
+    if (names.length === 0) return [];
+    try {
+      const docs = await knowledgeReads().byNames(names);
+      return docs.map(docToEntry);
+    } catch (cause) {
+      throw new AppError('INTERNAL_ERROR', {
+        cause,
+        context: { reason: 'knowledge_read_failed', requested: [...names] },
+      });
+    }
+  };
+}
+
+/**
+ * The default reader: the read-only knowledge accessor.
+ *
+ * Name kept from the Supabase era (`rlsScopedReader`) so no consumer's import moves during the
+ * port. Under A3 there is no RLS and no separate service-role read — there is one accessor for the
+ * one shared, farmer-less collection — so this is simply `knowledgeReaderFrom()` with no argument.
+ */
+export const rlsScopedReader: KnowledgeReader = knowledgeReaderFrom();
 
 /* ========================================================================== */
 /* Lookup by canonical name (Requirement 4.3)                                  */
@@ -129,11 +156,10 @@ export const rlsScopedReader: KnowledgeReader = async (names) => {
  * A lookup outcome. **A miss and a row with no treatment are different things**, and this union is
  * what keeps them different.
  *
- * `Tomato Healthy` carries `treatment: []` by seed AND by the `healthy_has_no_treatment` check
- * constraint (Requirement 3.4), so "there is deliberately no treatment to show" is a *successful*
- * lookup whose `treatment` array is empty. Collapsing that into the same value as "no such row"
- * would let a healthy result render as a failure, or — worse — let a genuine miss render as
- * "healthy, nothing to do".
+ * `Tomato Healthy` carries `treatment: []` by seed AND by the setup validator (Requirement 3.4),
+ * so "there is deliberately no treatment to show" is a *successful* lookup whose `treatment` array
+ * is empty. Collapsing that into the same value as "no such row" would let a healthy result render
+ * as a failure, or — worse — let a genuine miss render as "healthy, nothing to do".
  */
 export type KnowledgeLookup =
   | { readonly found: true; readonly entry: KnowledgeEntry }
@@ -148,8 +174,7 @@ export type KnowledgeLookup =
  * does not re-litigate it (Requirement 5.6). `{ found: false }` therefore means the row is absent
  * from a database that Requirement 4.1 says should hold all five: an unseeded or partially seeded
  * deployment. It is reported rather than thrown because the caller's answer is the same either way
- * — an inconclusive result or a referral, not a crash — and `scripts/check-deployment.ts` is what
- * asserts `count(*) = 5`.
+ * — an inconclusive result or a referral, not a crash.
  */
 export async function lookupCondition(
   name: VerifiedCondition,
@@ -183,7 +208,7 @@ export function knowledgePayloadOf(entry: KnowledgeEntry): KnowledgePayload {
  *
  * Reads as a question about the row rather than as `length > 0` at four call sites, and gives the
  * rephrase prompt's "if treatment is empty, do not mention treatment at all" rule (Requirement
- * 3.4) one place to ask. False for `Tomato Healthy`, always, by check constraint.
+ * 3.4) one place to ask. False for `Tomato Healthy`, always, by seed and validator.
  */
 export function hasTreatmentContent(entry: KnowledgeEntry): boolean {
   return entry.treatment.length > 0;
@@ -212,10 +237,6 @@ export type ReferralReason =
  * forgotten `if (rows.length === 0)` spends a provider call to ask a model about a crop Jamee
  * does not cover. With `kind: 'referral'` the caller cannot reach `entries[0]` without handling
  * it, and with `entries: NonEmpty<…>` the grounded branch needs no defensive index check.
- *
- * `entries` and `conditions` are present on both branches so a caller can populate
- * `chatAnswerSchema.groundedIn` unconditionally — typed as the empty tuple on the referral branch,
- * which is exactly what that field documents ("Empty for an out-of-scope referral").
  */
 export type KnowledgeScope =
   | {
@@ -237,7 +258,7 @@ export interface ScopeQuery {
    * (Requirement 7.3): the question contributes no vocabulary, and the diagnosis supplies it.
    *
    * `null` and `undefined` are both accepted and mean the same thing, because the value usually
-   * arrives as `diagnoses.disease_name`, which is nullable on the inconclusive branch.
+   * arrives as a diagnosis's `diseaseName`, which is nullable on the inconclusive branch.
    */
   readonly condition?: VerifiedCondition | null | undefined;
   /** The farmer's question, matched against the vocabulary derived from the five names. */
@@ -265,7 +286,7 @@ export async function resolveScope(
   const names = orderCanonically([...wanted]);
   const rows = await read(names);
 
-  // Ordered by the shared list rather than by whatever order PostgREST returned, so the same
+  // Ordered by the shared list rather than by whatever order the read returned, so the same
   // question produces byte-identical prompt content on two runs (D7's parity reasoning) and the
   // `groundedIn` array a farmer's client receives is stable.
   const entries = [...rows].sort(
@@ -299,9 +320,9 @@ function referral(reason: ReferralReason): KnowledgeScope {
  * Each canonical name split into the crop word and the qualifier that follows it:
  * `Tomato Early Blight` → crop `tomato`, qualifier `['early','blight']`.
  *
- * Derived, so `crop` here is the same word as the `crop` check constraint in 0004 without either
- * being written down twice, and adding a sixth condition to `VERIFIED_CONDITIONS` extends the
- * matcher with no edit to this file.
+ * Derived, so `crop` here is the same word as the `crop` validator enum without either being
+ * written down twice, and adding a sixth condition to `VERIFIED_CONDITIONS` extends the matcher
+ * with no edit to this file.
  */
 const VOCABULARY: readonly {
   readonly condition: VerifiedCondition;
@@ -340,8 +361,8 @@ function orderCanonically(names: readonly VerifiedCondition[]): readonly Verifie
  * in any language already has its subject — and it is honest for the uncommon one: a Devanagari
  * question with no established diagnosis gets the referral (Requirements 4.7, 7.6) rather than a
  * guess. Fixing that properly needs localized condition vocabulary, which belongs with the message
- * catalogs; faking it with a hand-written translation table here would be the fourth copy of the
- * condition list this module exists to avoid.
+ * catalogs; faking it with a hand-written translation table here would be the very copy this module
+ * exists to avoid.
  */
 function tokenize(question: string): ReadonlySet<string> {
   const tokens = new Set<string>();

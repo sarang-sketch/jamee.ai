@@ -1,6 +1,8 @@
 import 'server-only';
 
-import Groq from 'groq-sdk';
+import { Buffer } from 'node:buffer';
+
+import Groq, { toFile } from 'groq-sdk';
 
 import {
   classifySignal,
@@ -542,33 +544,32 @@ export const GROQ_TRANSCRIBE_TEMPERATURE = 0;
 /**
  * What the `transcribe` adapter takes.
  *
- * **The audio goes by URL, never as bytes.** V10 makes `file` and `url` mutually exclusive with
- * one required, and this adapter always sends `url`. Two reasons, and the second is the load-
- * bearing one:
- *  - It matches how the vision path already avoids buffering media — the provider fetches the
- *    object from a Storage signed URL (V3, `SIGNED_URL_EXPIRY_SECONDS`), so the request Jamee puts
- *    on the wire stays a few hundred bytes regardless of the recording.
- *  - V10 records the maximum *attachment* at 25 MB and says larger files must be passed by `url`
- *    instead of `file`. Sending `url` unconditionally means Jamee never has a size at which the
- *    transport has to change shape, and V16's 4.5 MB platform body ceiling is never in play.
+ * **Amendment A3: the audio goes as bytes in the `file` parameter, never by URL.** Under A3 there
+ * is no Supabase Storage and therefore no signed URL to hand the provider (V34) — the analysis
+ * reads the recording's bytes from GridFS through the Data_Access_Layer and Jamee sends them as
+ * `file`. V10 makes `file` and `url` mutually exclusive with one required; this adapter now always
+ * sends `file`, built with the SDK's own `toFile()` helper. The 25 MB free-tier attachment cap
+ * (V10, `TRANSCRIBE_PROVIDER_MAX_BYTES`) is the relevant bound, checked before the call — Jamee's
+ * own 3 MB voice cap (A3) sits far below it.
  */
 export interface TranscribeRequest {
   /**
-   * A Storage signed URL for the `voice-messages` object (V3). Sent as `url`.
+   * The recording's bytes — the `file` upload the provider transcribes (V34).
    *
-   * It must outlive the provider's own fetch, which is why `SIGNED_URL_EXPIRY_SECONDS` is ten
-   * minutes against a 20 s attempt ceiling rather than something tight.
+   * The successor to the retired `audioUrl` field: A3 removed Supabase Storage, so there is no URL
+   * to fetch and the bytes travel in the request. `mimeType` names the container to the SDK's
+   * `toFile()` so the multipart part carries the right `Content-Type`.
    */
-  readonly audioUrl: string;
+  readonly audioBytes: Buffer;
   /**
    * The container, as either a file extension (`webm`, `.ogg`, `M4A`) or a MIME type
    * (`audio/webm;codecs=opus`). Checked against V10's accepted list **before** the call.
    *
    * Required rather than optional so the check cannot be skipped by omission. Every caller has
-   * one for free: the web path reads `MediaRecorder.mimeType` back into `voiceRequestSchema`'s
-   * `mimeType` field — sent rather than assumed because U-V20 leaves the recorded container
-   * unresolved on the target Android browsers — and the storage path's own extension is the
-   * fallback. The WhatsApp path gets `mime_type` from V14's media-metadata step.
+   * one for free: the web path reads `MediaRecorder.mimeType` back into the media reference's
+   * stored MIME type — sent rather than assumed because U-V20 leaves the recorded container
+   * unresolved on the target Android browsers — and the Telegram path gets `mime_type` from V26's
+   * media-metadata step.
    */
   readonly container: string;
   /**
@@ -583,14 +584,10 @@ export interface TranscribeRequest {
   /**
    * Object size in bytes, checked against V10's tier cap when the caller knows it.
    *
-   * **Optional because the server genuinely may not know it.** `voiceRequestSchema` carries no
-   * byte count — Requirement 8.3's 10 MB rule is enforced in the browser against the file the
-   * farmer recorded — and `assertOwnership()`'s `exists()` probe returns a boolean, not metadata.
-   * Requiring it would force `VoiceService` into an extra Storage round trip to re-learn a number
-   * the request never carried. The caller that *does* have one is the WhatsApp path, where V14's
-   * step 1 returns `file_size` before any byte is fetched, and that is the caller this guard is
-   * for: V14 caps inbound WhatsApp audio at 16 MB, which is under V10's 25 MB but over Jamee's
-   * own 10 MB.
+   * **Optional because the caller may pass the byte length separately from the buffer.** With the
+   * bytes in hand the length is `audioBytes.byteLength`, so a caller need not supply this; it stays
+   * for the Telegram path, where V26's media-metadata step returns `file_size` before the bytes are
+   * fetched, and for callers that want the size checked against the provider cap explicitly.
    */
   readonly bytes?: number;
   /**
@@ -656,12 +653,13 @@ export interface TranscriptionResult {
 /**
  * The request body, narrowed to the V10 fields Jamee sends.
  *
- * `url` rather than `file`, and no `timestamp_granularities`: V10 records that word-level
+ * `file` rather than `url` (A3, V34): there are no public URLs, so the bytes travel as a `File`
+ * built with the SDK's `toFile()`. No `timestamp_granularities`: V10 records that word-level
  * timestamps add latency, and nothing in Requirement 8 reads a timestamp.
  */
 export interface GroqTranscriptionRequest {
   model: string;
-  url: string;
+  file: File;
   language: string;
   response_format: typeof TRANSCRIBE_RESPONSE_FORMAT;
   temperature: number;
@@ -687,9 +685,10 @@ function sdkTranscriptionCreate(
   options: GroqRequestOptions,
 ): Promise<unknown> {
   // V10's endpoint is POST https://api.groq.com/openai/v1/audio/transcriptions, which is exactly
-  // what this SDK method resolves to against the client's default base URL. The co-located test
-  // asserts that composition against `GROQ_TRANSCRIBE_ENDPOINT` with an injected `fetch`, so the
-  // V-item and the URL actually requested cannot drift apart unnoticed.
+  // what this SDK method resolves to against the client's default base URL. Under A3 the audio
+  // travels as the `file` multipart part (V34) rather than a `url`. The co-located test asserts
+  // that composition against `GROQ_TRANSCRIBE_ENDPOINT` with an injected `fetch`, so the V-item
+  // and the URL actually requested cannot drift apart unnoticed.
   return groqClient().audio.transcriptions.create(body, options);
 }
 
@@ -794,8 +793,8 @@ export function assertTranscribableAudio(input: TranscribeRequest): void {
     );
   }
 
-  const { bytes } = input;
-  if (bytes !== undefined && bytes > TRANSCRIBE_PROVIDER_MAX_BYTES) {
+  const bytes = input.bytes ?? input.audioBytes.byteLength;
+  if (bytes > TRANSCRIBE_PROVIDER_MAX_BYTES) {
     throw transcribeRefusal(
       `audio object is ${bytes} bytes, over the documented ${TRANSCRIBE_PROVIDER_MAX_BYTES}-byte ` +
         'transcription cap (V10)',
@@ -825,20 +824,41 @@ export function assertTranscribableAudio(input: TranscribeRequest): void {
 /* Request shaping and response reading                                        */
 /* -------------------------------------------------------------------------- */
 
-export function transcriptionRequestBody(
+export async function transcriptionRequestBody(
   model: string,
   input: TranscribeRequest,
-): GroqTranscriptionRequest {
+): Promise<GroqTranscriptionRequest> {
   assertTranscribableAudio(input);
+  // A3, V34: the bytes travel as the `file` multipart part. `toFile()` is the SDK's own helper for
+  // turning a Buffer into the `File` the multipart upload wants; the container is passed as the
+  // MIME type and as a plausible filename so the provider reads the right `Content-Type`. The
+  // filename is non-identifying — nothing looks a recording up by name.
+  const container = normalizeAudioContainer(input.container) ?? 'audio';
+  const file = await toFile(input.audioBytes, `voice.${container}`, {
+    type: mimeForContainer(input.container),
+  });
   return {
     model,
-    // V10: `file` | `url`, mutually exclusive, one required. Always `url` — see `TranscribeRequest`.
-    url: input.audioUrl,
+    // V10: `file` | `url`, mutually exclusive, one required. Always `file` — see `TranscribeRequest`.
+    file,
     language: input.language,
     response_format: TRANSCRIBE_RESPONSE_FORMAT,
     temperature: GROQ_TRANSCRIBE_TEMPERATURE,
     ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
   };
+}
+
+/**
+ * The `Content-Type` for the multipart `file` part. When the caller handed a MIME type
+ * (`audio/webm;codecs=opus`) its bare form is used; when it handed a bare container (`webm`) it is
+ * prefixed to `audio/<container>`. Best-effort — the provider reads the bytes, not the label — so a
+ * value that cannot be normalized falls back to `application/octet-stream`.
+ */
+function mimeForContainer(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.includes('/')) return trimmed.split(';')[0]?.trim() ?? 'application/octet-stream';
+  const bare = normalizeAudioContainer(value);
+  return bare === undefined ? 'application/octet-stream' : `audio/${bare}`;
 }
 
 function numberAt(source: Record<string, unknown>, key: string): number | undefined {
@@ -933,7 +953,7 @@ export function groqTranscribeAdapter(
     // `async` so a pre-flight refusal in `transcriptionRequestBody()` arrives as a rejection like
     // every other failure, rather than as a synchronous throw a typed caller would not expect.
     invoke: async (input, call) =>
-      invokeTranscription(create, transcriptionRequestBody(GROQ_TRANSCRIBE_MODEL, input), call),
+      invokeTranscription(create, await transcriptionRequestBody(GROQ_TRANSCRIBE_MODEL, input), call),
   };
 }
 

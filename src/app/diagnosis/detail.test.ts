@@ -1,3 +1,4 @@
+import { ObjectId, type WithId } from 'mongodb';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -5,11 +6,10 @@ import {
   formatTimestamp,
   resolveDetailImage,
   toDiagnosisDetail,
-  type DiagnosisDetailRow,
 } from '@/app/diagnosis/detail';
-import { THUMBNAIL_PATH_INFIX } from '@/lib/config/media';
+import type { DiagnosisDoc } from '@/lib/db/collections';
+import type { FarmerReads } from '@/lib/db/reads';
 import type { KnowledgePayload } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 
 /**
  * Unit coverage for the detail screen's four decisions.
@@ -18,44 +18,47 @@ import type { StorageClientLike } from '@/lib/storage';
  *               what the absence of one means), 12.11 (the rest of the screen survives a missing
  *               image), 6.5 (an inconclusive result carries no name, confidence or treatment)
  *
- * No mocks of Jamee's own code. The only stand-in is the storage client, which is an external
- * service — and it is the structural `StorageClientLike` seam `storage.ts` exposes for exactly
- * this, not a rewrite of the module under test.
+ * *Amendment A3:* no mocks of Jamee's own code, and no storage client. The image decision now reads
+ * through the owner-scoped Data_Access_Layer, so the only stand-in is a `FarmerReads`-shaped stub
+ * whose `thumbnailFileIdFor` states whether a Thumbnail_Derivative exists — and the assertions are
+ * about which file id the Media_Endpoint URL addresses (the full-image `mediaRef.fileId` vs the
+ * resolved thumbnail id).
  */
 
-const OWNER = '11111111-1111-4111-8111-111111111111';
-const OBJECT = '22222222-2222-4222-8222-222222222222';
-const IMAGE_PATH = `${OWNER}/2026/03/${OBJECT}.jpg`;
-const THUMB_PATH = `${OWNER}/2026/03/${OBJECT}${THUMBNAIL_PATH_INFIX}.jpg`;
+const OWNER = 'auth-user-1111';
+const FULL_IMAGE = new ObjectId();
+const THUMB_IMAGE = new ObjectId();
+const CONVERSATION = new ObjectId();
 
-function identifiedRow(overrides: Partial<DiagnosisDetailRow> = {}): DiagnosisDetailRow {
+function identifiedRow(overrides: Partial<WithId<DiagnosisDoc>> = {}): WithId<DiagnosisDoc> {
   return {
-    id: '33333333-3333-4333-8333-333333333333',
-    user_id: OWNER,
-    conversation_id: '44444444-4444-4444-8444-444444444444',
+    _id: new ObjectId(),
+    ownerId: OWNER,
+    conversationId: CONVERSATION,
     status: 'identified',
-    disease_name: 'Tomato Late Blight',
+    diseaseName: 'Tomato Late Blight',
+    knowledgeId: null,
     confidence: 0.874,
     severity: 'high',
     explanation: 'Dark patches are spreading on the leaves.',
     language: 'en',
-    needs_expert: false,
+    needsExpert: false,
     channel: 'web',
-    image_bucket: 'crop-images',
-    image_path: IMAGE_PATH,
-    full_image_deleted_at: null,
-    created_at: '2026-03-04T09:30:00.000Z',
+    mediaRef: { fileId: FULL_IMAGE, kind: 'crop-image' },
+    fullImageDeletedAt: null,
+    modelProvider: 'gemini',
+    createdAt: new Date('2026-03-04T09:30:00.000Z'),
     ...overrides,
-  };
+  } as WithId<DiagnosisDoc>;
 }
 
-function unknownRow(overrides: Partial<DiagnosisDetailRow> = {}): DiagnosisDetailRow {
+function unknownRow(overrides: Partial<WithId<DiagnosisDoc>> = {}): WithId<DiagnosisDoc> {
   return identifiedRow({
     status: 'unknown',
-    disease_name: null,
+    diseaseName: null,
     confidence: null,
     severity: 'none',
-    needs_expert: true,
+    needsExpert: true,
     explanation: 'Jamee could not judge this photo.',
     ...overrides,
   });
@@ -70,20 +73,17 @@ const KNOWLEDGE: KnowledgePayload = {
 };
 
 /**
- * A storage client that answers `exists()` from a set of present paths and always signs
- * successfully, so a test states presence and reads back the decision.
+ * A read bundle whose `thumbnailFileIdFor` returns the given thumbnail id for the full-image id it
+ * is asked about, or `null`. Only `thumbnailFileIdFor` is exercised by `resolveDetailImage`.
  */
-function storageWith(present: readonly string[], signable = true): StorageClientLike {
+function readsWithThumbnail(thumbnailId: ObjectId | null): Pick<FarmerReads, 'thumbnailFileIdFor'> {
   return {
-    storage: {
-      from: () => ({
-        exists: async (path: string) => ({ data: present.includes(path), error: null }),
-        createSignedUrl: async (path: string) =>
-          signable
-            ? { data: { signedUrl: `https://storage.test/${path}?token=abc` }, error: null }
-            : { data: null, error: new Error('cannot sign') },
-      }),
-    },
+    thumbnailFileIdFor: (fullImageFileId) =>
+      Promise.resolve(
+        thumbnailId !== null && fullImageFileId === FULL_IMAGE.toHexString()
+          ? thumbnailId.toHexString()
+          : null,
+      ),
   };
 }
 
@@ -98,7 +98,7 @@ describe('toDiagnosisDetail', () => {
     expect(detail.confidence).toBe(0.874);
     expect(detail.severity).toBe('high');
     expect(detail.explanation).toBe('Dark patches are spreading on the leaves.');
-    expect(detail.conversationId).toBe('44444444-4444-4444-8444-444444444444');
+    expect(detail.conversationId).toBe(CONVERSATION.toHexString());
     expect(detail.knowledge).toEqual(KNOWLEDGE);
   });
 
@@ -124,63 +124,46 @@ describe('toDiagnosisDetail', () => {
   });
 
   it('rejects a row that contradicts its own status', () => {
-    expect(toDiagnosisDetail(identifiedRow({ disease_name: null }), KNOWLEDGE)).toBeNull();
+    expect(toDiagnosisDetail(identifiedRow({ diseaseName: null }), KNOWLEDGE)).toBeNull();
     expect(toDiagnosisDetail(identifiedRow({ confidence: null }), KNOWLEDGE)).toBeNull();
-    expect(
-      toDiagnosisDetail(unknownRow({ disease_name: 'Tomato Healthy' }), KNOWLEDGE),
-    ).toBeNull();
+    expect(toDiagnosisDetail(unknownRow({ diseaseName: 'Tomato Healthy' }), KNOWLEDGE)).toBeNull();
     expect(toDiagnosisDetail(unknownRow({ confidence: 0.4 }), KNOWLEDGE)).toBeNull();
   });
 });
 
 describe('resolveDetailImage', () => {
   it('shows the full-size original while it is present (Requirement 12.8)', async () => {
-    const image = await resolveDetailImage(
-      identifiedRow(),
-      storageWith([IMAGE_PATH, THUMB_PATH]),
-    );
+    // A thumbnail also exists, but the detail view prefers the original and must not address it.
+    const image = await resolveDetailImage(identifiedRow(), readsWithThumbnail(THUMB_IMAGE));
 
     expect(image.kind).toBe('full');
     if (image.kind === 'none') throw new Error('expected a url');
-    expect(image.url).toContain(IMAGE_PATH);
+    expect(image.url).toBe(`/api/media/${FULL_IMAGE.toHexString()}`);
+    expect(image.url).not.toContain(THUMB_IMAGE.toHexString());
   });
 
   it('falls back to the thumbnail once the sweep has stamped the row (Requirement 12.9)', async () => {
     const image = await resolveDetailImage(
-      identifiedRow({ full_image_deleted_at: '2026-03-12T00:00:00.000Z' }),
-      // The original is still listed as present; the stamp must win, so no probe or read of it
-      // happens and the thumbnail is what renders.
-      storageWith([IMAGE_PATH, THUMB_PATH]),
+      identifiedRow({ fullImageDeletedAt: new Date('2026-03-12T00:00:00.000Z') }),
+      readsWithThumbnail(THUMB_IMAGE),
     );
 
     expect(image.kind).toBe('thumbnail');
     if (image.kind === 'none') throw new Error('expected a url');
-    expect(image.url).toContain(THUMBNAIL_PATH_INFIX);
+    expect(image.url).toBe(`/api/media/${THUMB_IMAGE.toHexString()}`);
   });
 
   it('renders no image when neither derivative is present (Requirement 12.10)', async () => {
-    // A WhatsApp-originated diagnosis past the retention window: no thumbnail was ever produced.
+    // A Telegram-originated diagnosis past the retention window: no thumbnail was ever produced.
     const image = await resolveDetailImage(
-      identifiedRow({ channel: 'whatsapp', full_image_deleted_at: '2026-03-12T00:00:00.000Z' }),
-      storageWith([]),
+      identifiedRow({
+        channel: 'whatsapp',
+        fullImageDeletedAt: new Date('2026-03-12T00:00:00.000Z'),
+      }),
+      readsWithThumbnail(null),
     );
 
     expect(image.kind).toBe('none');
-  });
-
-  it('treats an unsignable object as absent rather than failing the render', async () => {
-    const image = await resolveDetailImage(
-      identifiedRow(),
-      storageWith([IMAGE_PATH, THUMB_PATH], false),
-    );
-
-    expect(image.kind).toBe('none');
-  });
-
-  it('treats a missing original as absent even when the row is unstamped', async () => {
-    const image = await resolveDetailImage(identifiedRow(), storageWith([THUMB_PATH]));
-
-    expect(image.kind).toBe('thumbnail');
   });
 });
 

@@ -14,28 +14,27 @@ import {
   errorEnvelopeSchema,
   type DiagnoseInput,
   type InconclusiveResult,
+  type MediaRef,
   type QuotaStatus,
-  type StorageRef,
 } from '@/lib/schemas';
 import type { DiagnosisDeps, DiagnosisOutcome } from '@/services/diagnosis.service';
 
 import { POST, maxDuration } from './route';
 
 /**
- * Wiring tests for `src/app/api/diagnose/route.ts`.
+ * Wiring tests for `src/app/api/diagnose/route.ts` (Amendment A3).
  *
- * Requirements: 1.7 (no session → 401 and no domain service invoked), 2.2 (the JSON body contract),
- *               3.7 (a budget expiry surfaces as the timeout the taxonomy defines), 9.5 (a language
- *               outside en/hi/mr is 400 naming the supported codes), 15.3 (one localized envelope)
- * Design: D1
+ * Requirements: 1.7 (no session → 401 and no domain service invoked), 2.2 (the JSON body carries a
+ *               Media_Reference, not a storage path), 3.7 (a budget expiry surfaces as the timeout
+ *               the taxonomy defines), 9.5 (a language outside en/hi/mr is 400 naming the supported
+ *               codes), 15.3 (one localized envelope)
+ * Design: D1 (amended — the request carries a Media_Reference and no bytes)
  *
- * `diagnosis.service.test.ts` already decides what a diagnosis *is* — pipeline order, the spend
- * rule, the single inconclusive shape. What only this file can decide is what the **route** does
- * with it, so the service is a spy here and the assertions are about the boundary: was it reached,
- * how many times, with whose identity, with which client, and what came back on the wire.
- *
- * The two strongest tests are negative. A 401 that also proves `diagnose` was never entered is
- * Requirement 1.7's actual claim; a 400 that proves the same is Requirement 9.5's.
+ * `diagnosis.service.test.ts` decides what a diagnosis *is*. What only this file decides is what the
+ * **route** does with it, so the service is a spy here and the assertions are about the boundary:
+ * was it reached, how many times, with whose identity, and what came back on the wire. Under A3 the
+ * route holds no Supabase client — the service reads the image from GridFS through the
+ * Data_Access_Layer — so `deps` is `{ burst }` alone.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -44,26 +43,14 @@ import { POST, maxDuration } from './route';
 
 const spies = vi.hoisted(() => ({
   currentUserId: vi.fn(),
-  createServerSupabase: vi.fn(),
   diagnose: vi.fn(),
 }));
 
 /**
- * The identity resolver the route's wrapper was built over. Mocking the module rather than the
- * wrapper keeps the real guard under test — the route imports the real `authenticatedRoute`, and
- * only the answer to "who is signed in" is stubbed.
- */
-vi.mock('@/lib/supabase/server', () => ({
-  currentUserId: spies.currentUserId,
-  createServerSupabase: spies.createServerSupabase,
-}));
-
-/**
- * Amendment A3 rewire: `authenticatedRoute` now resolves identity through
- * `@/lib/auth/session`'s `currentUserId` (Better Auth), not the Supabase one. The same spy backs
- * both module paths so the guard's answer to "who is signed in" stays stubbed while the real
- * `authenticatedRoute` remains under test. `createServerSupabase` above is still what the route
- * itself uses for the RLS-scoped client until that route is ported (task 56).
+ * Amendment A3: `authenticatedRoute` resolves identity through `@/lib/auth/session`'s
+ * `currentUserId` (Better Auth). Mocking the module rather than the wrapper keeps the real guard
+ * under test — the route imports the real `authenticatedRoute`, and only "who is signed in" is
+ * stubbed.
  */
 vi.mock('@/lib/auth/session', () => ({
   currentUserId: spies.currentUserId,
@@ -71,8 +58,7 @@ vi.mock('@/lib/auth/session', () => ({
 
 /**
  * The service, as a tripwire by default. Every test that expects a refusal leaves this rejecting,
- * so a route that reached the service would fail twice: once on the recorded call and once on the
- * status, because the throw would have become a 500.
+ * so a route that reached the service would fail twice: on the recorded call and on the status.
  */
 vi.mock('@/services/diagnosis.service', () => ({ diagnose: spies.diagnose }));
 
@@ -81,14 +67,12 @@ vi.mock('@/services/diagnosis.service', () => ({ diagnose: spies.diagnose }));
 /* -------------------------------------------------------------------------- */
 
 const USER = '11111111-1111-4111-8111-111111111111';
-const OBJECT_ID = '33333333-3333-4333-8333-333333333333';
 const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
 const DIAGNOSIS_ID = '55555555-5555-4555-8555-555555555555';
 
-const IMAGE_REF: StorageRef = { bucket: 'crop-images', path: `${USER}/2026/09/${OBJECT_ID}.jpg` };
-
-/** A sentinel, so "the RLS-scoped server client was passed through" is an identity assertion. */
-const SUPABASE = { tag: 'rls-scoped-server-client' };
+/** A3: the body carries a `{ fileId, kind }` Media_Reference — a 24-hex ObjectId and a kind. */
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
+const THUMB_REF: MediaRef = { fileId: 'b'.repeat(24), kind: 'thumbnail' };
 
 const QUOTA: QuotaStatus = {
   operation: 'image',
@@ -139,7 +123,6 @@ async function envelopeOf(response: Response) {
 beforeEach(() => {
   vi.clearAllMocks();
   spies.currentUserId.mockResolvedValue(USER);
-  spies.createServerSupabase.mockResolvedValue(SUPABASE);
   spies.diagnose.mockRejectedValue(
     new Error('tripwire: DiagnosisService.diagnose was reached for a request that must not reach it'),
   );
@@ -150,7 +133,7 @@ beforeEach(() => {
 /* ========================================================================== */
 
 describe('POST /api/diagnose with no session', () => {
-  it('returns 401 and invokes no service, not even the Supabase client factory', async () => {
+  it('returns 401 and invokes no service', async () => {
     spies.currentUserId.mockResolvedValue(null);
 
     const response = await post(validBody());
@@ -158,10 +141,7 @@ describe('POST /api/diagnose with no session', () => {
 
     expect(response.status).toBe(401);
     expect(envelope.error.code).toBe('AUTH_REQUIRED');
-
-    /** The clause that matters: no domain service, and no request-scoped client either. */
     expect(spies.diagnose).not.toHaveBeenCalled();
-    expect(spies.createServerSupabase).not.toHaveBeenCalled();
   });
 });
 
@@ -170,7 +150,7 @@ describe('POST /api/diagnose with no session', () => {
 /* ========================================================================== */
 
 describe('POST /api/diagnose with a valid body', () => {
-  it('calls the service exactly once with the session user id and the RLS-scoped client', async () => {
+  it('calls the service exactly once with the session user id and burst-only deps', async () => {
     spies.diagnose.mockResolvedValue(OUTCOME);
 
     const response = await post(validBody());
@@ -179,30 +159,40 @@ describe('POST /api/diagnose with a valid body', () => {
     expect(spies.diagnose).toHaveBeenCalledTimes(1);
 
     /**
-     * Deep equality on both arguments, which is what makes this a contract test rather than a
-     * smoke test:
-     *  - `userId` is the resolved session id. A route that read an id out of the body would fail
-     *    here, and Requirement 13.2 is exactly that distinction.
-     *  - `channel: 'web'` is on the input, so Requirement 16.5's column is populated.
-     *  - `deps` is `{ supabase, burst }` and nothing else — no store, no admin client. The
-     *    `usage_logs` audit client is the service's own business (migration 0006 grants
-     *    `authenticated` no insert policy), and an extra key here would fail this assertion.
-     *    `burst` is Requirement 13.8's limiter: the API_Layer binds it because that requirement is
-     *    written about the API_Layer's endpoints, while the *position* of the check — before the
-     *    reserve, so a refusal costs nothing — stays the service's.
+     * Deep equality on the input, which makes this a contract test:
+     *  - `userId` is the resolved session id, never read from the body (Requirement 13.2).
+     *  - `image` is the Media_Reference the body carried (A3).
+     *  - `channel: 'web'` populates Requirement 16.5's column.
+     * `deps` is `{ burst }` and nothing else — under A3 the service holds no client, so there is no
+     * `supabase` to pass; `burst` is Requirement 13.8's limiter the API_Layer binds.
      */
     const expectedInput: DiagnoseInput = {
       userId: USER,
-      storageRef: IMAGE_REF,
+      image: IMAGE_REF,
       language: 'hi',
       channel: 'web',
       conversationId: CONVERSATION_ID,
     };
     const [input, deps] = spies.diagnose.mock.calls[0] ?? [];
     expect(input).toEqual(expectedInput);
-    expect(Object.keys(deps as DiagnosisDeps).sort()).toEqual(['burst', 'supabase']);
-    expect((deps as DiagnosisDeps).supabase).toBe(SUPABASE);
+    expect(Object.keys(deps as DiagnosisDeps)).toEqual(['burst']);
     expect(typeof (deps as DiagnosisDeps).burst).toBe('function');
+  });
+
+  it('passes the optional thumbnail reference through when the body carries one', async () => {
+    spies.diagnose.mockResolvedValue(OUTCOME);
+
+    await post(validBody({ thumbnail: THUMB_REF }));
+
+    const expectedInput: DiagnoseInput = {
+      userId: USER,
+      image: IMAGE_REF,
+      thumbnail: THUMB_REF,
+      language: 'hi',
+      channel: 'web',
+      conversationId: CONVERSATION_ID,
+    };
+    expect(spies.diagnose).toHaveBeenCalledWith(expectedInput, expect.anything());
   });
 
   it('serializes exactly the four response fields, with no audit facts on the wire', async () => {
@@ -218,7 +208,6 @@ describe('POST /api/diagnose with a valid body', () => {
       result: INCONCLUSIVE,
       quota: QUOTA,
     });
-    /** `provider`, `usedFallback` and `rejectionReason` are audit facts, not farmer-facing. */
     expect(Object.keys(payload as Record<string, unknown>).sort()).toEqual([
       'conversationId',
       'diagnosisId',
@@ -227,14 +216,14 @@ describe('POST /api/diagnose with a valid body', () => {
     ]);
   });
 
-  it('omits conversationId from the service input when the body carries none', async () => {
+  it('omits conversationId and thumbnail from the service input when the body carries neither', async () => {
     spies.diagnose.mockResolvedValue(OUTCOME);
 
     await post({ image: IMAGE_REF, language: 'hi' });
 
     const expectedInput: DiagnoseInput = {
       userId: USER,
-      storageRef: IMAGE_REF,
+      image: IMAGE_REF,
       language: 'hi',
       channel: 'web',
     };
@@ -265,21 +254,20 @@ describe('POST /api/diagnose with an unsupported language', () => {
 /* ========================================================================== */
 
 describe('POST /api/diagnose with a malformed body', () => {
-  it('returns 400 for a missing reference, a bad path, the wrong bucket, and non-JSON', async () => {
+  it('returns 400 for a missing reference, a bad fileId, the wrong kind, and non-JSON', async () => {
     const cases: { label: string; send: () => Promise<Response> }[] = [
       { label: 'no image', send: () => post({ language: 'hi' }) },
       {
-        label: 'path outside the convention',
-        send: () => post(validBody({ image: { bucket: 'crop-images', path: 'photo.jpg' } })),
+        label: 'fileId not a 24-hex ObjectId',
+        send: () => post(validBody({ image: { fileId: 'not-hex', kind: 'crop-image' } })),
       },
       {
-        label: 'wrong bucket',
-        send: () =>
-          post(
-            validBody({
-              image: { bucket: 'voice-messages', path: `${USER}/2026/09/${OBJECT_ID}.jpg` },
-            }),
-          ),
+        label: 'wrong kind (voice submitted as the image)',
+        send: () => post(validBody({ image: { fileId: 'a'.repeat(24), kind: 'voice' } })),
+      },
+      {
+        label: 'thumbnail kind on the image slot',
+        send: () => post(validBody({ image: { fileId: 'a'.repeat(24), kind: 'thumbnail' } })),
       },
       { label: 'not JSON at all', send: () => post(null, { raw: 'not json' }) },
     ];
@@ -307,15 +295,9 @@ describe('POST /api/diagnose when the diagnosis budget expires', () => {
     const response = await post(validBody({ language: 'mr' }));
     const envelope = await envelopeOf(response);
 
-    /** The status comes from the taxonomy, so the route holds no HTTP code of its own. */
     expect(response.status).toBe(504);
     expect(envelope.error.code).toBe('DIAGNOSIS_TIMEOUT');
     expect(envelope.error.retryable).toBe(true);
-    /**
-     * Requirement 15.3, and the reason the handler nests a second envelope: the language a farmer
-     * reads the failure in is the one their body asked for, not the `Accept-Language` this request
-     * never sent.
-     */
     expect(envelope.error.language).toBe('mr');
     expect(envelope.error.message).toBe(messages('mr').errors.DIAGNOSIS_TIMEOUT);
   });

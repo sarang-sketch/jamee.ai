@@ -369,22 +369,31 @@ export type QuotaStatus = z.infer<typeof quotaStatusSchema>;
 /* ========================================================================== */
 
 /**
- * `POST /api/diagnose` — JSON, not multipart (D1).
+ * `POST /api/diagnose` — JSON carrying a Media_Reference, not a storage path (Amendment A3, D1
+ * amended).
  *
- * Requirement 2.2 mandates a JSON body carrying a storage reference; Requirement 2.3 allows
- * images up to 10 MB; Requirement 2.7 requires bodies under the 4.5 MB platform ceiling (V16).
- * A multipart upload of a 10 MB image cannot satisfy all three. So the browser uploads
- * directly to Storage and posts a reference, and the request body stays ~200 bytes regardless
- * of image size — which is what makes the 10 MB allowance real rather than nominal.
+ * Under A3 the browser uploads the Full_Size_Image (and its Thumbnail_Derivative) to the
+ * Media_Endpoint, which returns a Media_Reference (`{ fileId, kind }`); the diagnosis request then
+ * carries that reference rather than a Supabase storage path. The request body stays ~60 bytes and
+ * carries **no bytes** (D1) — the analysis reads the image from GridFS by this reference and sends
+ * it to the model inline (V34).
+ *
+ * `image` refines `kind === 'crop-image'`, so a client cannot submit a `thumbnail` or a `voice`
+ * file as the object to diagnose, and there is no path to fabricate (the reference is a 24-hex
+ * ObjectId and a kind — task 54.1). `thumbnail` is the optional Thumbnail_Derivative reference,
+ * refined `kind === 'thumbnail'`, persisted alongside the diagnosis but never analysed.
  *
  * `conversationId` is optional here and required on chat and voice: Requirement 2.2 permits a
  * diagnosis with no conversation, and Requirement 7.5 then requires the API to create one and
  * attach the diagnosis to it.
  */
 export const diagnoseRequestSchema = z.object({
-  image: storageRefSchema.refine((r) => r.bucket === STORAGE_BUCKETS.cropImages, {
-    error: `image reference must name the ${STORAGE_BUCKETS.cropImages} bucket`,
+  image: mediaRefSchema.refine((r) => r.kind === 'crop-image', {
+    error: "image reference must name a 'crop-image' file",
   }),
+  thumbnail: mediaRefSchema
+    .refine((r) => r.kind === 'thumbnail', { error: "thumbnail reference must name a 'thumbnail' file" })
+    .optional(),
   language: languageSchema,
   conversationId: z.uuid().optional(),
 });
@@ -433,15 +442,20 @@ export const chatResponseSchema = z.object({
 export type ChatResponse = z.infer<typeof chatResponseSchema>;
 
 /**
- * `POST /api/voice`.
+ * `POST /api/voice` — a Media_Reference, not a storage path (Amendment A3).
+ *
+ * The browser uploads the recording to the Media_Endpoint (as a `voice` file, ≤3 MB under A3) and
+ * posts the returned Media_Reference here — the body carries no audio bytes. `audio` refines
+ * `kind === 'voice'`, so a client cannot submit a `crop-image` or `thumbnail` as the recording, and
+ * there is no path to fabricate.
  *
  * `durationSeconds` is measured by the browser and **re-checked server-side** against
  * Requirement 8.2's 120 s. Client-side enforcement alone would be a client-side check on a
  * server-side spend rule: the recorder stops at 120 s, but a hand-built request need not.
  */
 export const voiceRequestSchema = z.object({
-  audio: storageRefSchema.refine((r) => r.bucket === STORAGE_BUCKETS.voiceMessages, {
-    error: `audio reference must name the ${STORAGE_BUCKETS.voiceMessages} bucket`,
+  audio: mediaRefSchema.refine((r) => r.kind === 'voice', {
+    error: "audio reference must name a 'voice' file",
   }),
   language: languageSchema,
   conversationId: z.uuid(),
@@ -643,7 +657,14 @@ export const audioCandidateSchema = z.object({
  */
 export interface DiagnoseInput {
   userId: string;
-  storageRef: StorageRef;
+  /**
+   * The Full_Size_Image to analyse, as a Media_Reference (Amendment A3, D1 amended). The service
+   * reads its bytes from GridFS through the Data_Access_Layer by this reference and sends them to
+   * the model inline (V34) — no storage path, no signed URL, no bytes on this input.
+   */
+  image: MediaRef;
+  /** The optional Thumbnail_Derivative reference, persisted alongside the diagnosis but never analysed. */
+  thumbnail?: MediaRef;
   language: Language;
   channel: Channel;
   conversationId?: string;
@@ -662,13 +683,18 @@ export interface ChatInput {
    * message never spends both a voice unit and a chat unit (design: *When a unit is reserved*).
    */
   skipQuotaReserve?: boolean;
-  /** Storage path of the recording, recorded on the farmer message when `inputKind` is voice. */
-  transcriptOf?: string;
+  /** Media_Reference of the recording, recorded on the farmer message when `inputKind` is voice (A3). */
+  transcriptOf?: MediaRef;
 }
 
 export interface VoiceInput {
   userId: string;
-  storageRef: StorageRef;
+  /**
+   * The recording to transcribe, as a Media_Reference (Amendment A3). The service reads its bytes
+   * from GridFS through the Data_Access_Layer by this reference and sends them to the transcription
+   * provider as the `file` parameter (V34) — no storage path, no signed URL, no bytes on this input.
+   */
+  audio: MediaRef;
   language: Language;
   channel: Channel;
   conversationId: string;
@@ -677,15 +703,15 @@ export interface VoiceInput {
   /**
    * The recording's size in bytes, when the caller knows it — Requirement 8.2's other half.
    *
-   * **Not on `voiceRequestSchema`, deliberately.** A byte count in the request body is the
-   * client's claim about the object, and the object is the authority on its own size, so
-   * `/api/voice` reads it from Storage (`objectSizeOf()`) and passes it here as a measured fact —
-   * the same shape `durationSeconds` has, one step more trustworthy. The WhatsApp path has the
-   * number for free: V14's media-metadata step returns `file_size` before a byte is fetched.
+   * **Not on `voiceRequestSchema`, deliberately.** Under Amendment A3 the recording's bytes are
+   * already admitted by `storeMedia` at the Media_Endpoint (size checked against `MAX_AUDIO_BYTES`,
+   * V16), so this is informational rather than the primary gate — the service still re-checks it
+   * against `MAX_AUDIO_SECONDS`/`MAX_AUDIO_BYTES` when a number is present. The web path can pass
+   * the byte length it read from the media file; the Telegram path gets `file_size` from V26's
+   * media-metadata step.
    *
-   * Optional because a probe can legitimately come back empty (see `objectSizeOf()`), and a
-   * recording that reached the bucket must not be refused over a metadata read. `VoiceService`
-   * skips the size check when it has no number, so absence costs the guard rather than the farmer.
+   * Optional because a caller may not have measured a size, and a recording already stored must not
+   * be refused for the lack of one — `VoiceService` skips the size check when it has no number.
    */
   bytes?: number;
 }

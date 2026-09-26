@@ -7,6 +7,9 @@
  */
 
 .page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
   max-width: 26rem;
   margin: 0 auto;
   /* Bottom padding keeps the save control clear of a phone's browser chrome. */

@@ -1,13 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { Buffer } from 'node:buffer';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { describe, expect, it } from 'vitest';
 
 import type { GatewayResult } from '@/lib/ai/gateway';
 import { DAILY_QUOTAS, MAX_AUDIO_BYTES, MAX_AUDIO_SECONDS } from '@/lib/config/verified';
 import { AppError, isAppError } from '@/lib/errors';
 import type { TranscribeRequest, TranscriptionResult } from '@/lib/groq';
-import { voiceResponseSchema, type ChatInput, type StorageRef, type VoiceInput } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
+import { voiceResponseSchema, type ChatInput, type MediaRef, type VoiceInput } from '@/lib/schemas';
 import {
   quotaStatusOf,
   reserveForRequest,
@@ -19,37 +18,30 @@ import {
   deleteVoiceOriginal,
   transcribeAndAnswer,
   type ChatAnswerer,
+  type MediaRemover,
   type NestedChatOutcome,
-  type ObjectRemoveClient,
   type Transcriber,
   type VoiceDeps,
   type VoiceStore,
 } from '@/services/voice.service';
-import type { Database, TablesInsert } from '@/types/database';
+import type { TablesInsert } from '@/types/database';
 
 /**
- * Unit tests for `src/services/voice.service.ts`, with the transcription and chat seams stubbed.
+ * Unit tests for `src/services/voice.service.ts` (Amendment A3), with the media read, transcription,
+ * chat and delete seams stubbed.
  *
- * Requirements: 8.3 (the duration limit, re-checked server-side), 8.4 (the transcript is passed to
- *               the Chat_Service as a Farmer message), 8.6 (the transcript AND the answer are both
- *               returned), 8.7 (an empty transcript asks the farmer to record again and produces no
- *               answer), 8.9 (the original is deleted once the transcript is persisted as a
- *               Message), 8.10 (a failed or empty transcript retains the object), 8.11 (a path
- *               outside the requesting farmer's prefix is never deleted), 14.1 (one voice message
- *               spends one voice unit, never also a chat unit), 14.3 (the decline states the limit
- *               and the reset time), 2.6 (an ownership rejection leaves the quota untouched)
+ * Requirements: 2.6 (an ownership rejection leaves the quota untouched), 8.3 (the duration limit,
+ *               re-checked server-side), 8.4 (the transcript is passed to the Chat_Service as a
+ *               Farmer message), 8.6 (the transcript AND the answer are both returned), 8.7 (an
+ *               empty transcript asks the farmer to record again and produces no answer), 8.9 (the
+ *               original is deleted once the transcript is persisted), 8.10 (a failed or empty
+ *               transcript retains the object), 8.11 (deletion is owner-scoped through the
+ *               Data_Access_Layer), 14.1 (one voice message spends one voice unit), 14.3 (the
+ *               decline states the limit and reset)
  *
- * ### What these tests can and cannot decide
- *
- * They decide **order and attribution**: which seam was called, with what, in which sequence, and
- * what the service made of the answer. The strongest assertions are the negative ones — the chat
- * seam never reached after an empty transcript, `remove()` never called on a foreign prefix, the
- * counter touched exactly once across two nested services — because the pipeline order *is* the
- * contract and a negative is how an order is observed from outside.
- *
- * They do not decide provider behaviour (task 8.5 owns the fallback matrix), counter atomicity
- * (task 10.2, against a real Postgres), or whether Supabase Storage errors on removing an absent
- * object (V22). A stub asserting its own return value would be a test of the stub.
+ * The strongest assertions are the negative ones — the chat seam never reached after an empty
+ * transcript, `remove()` never called on a non-owned reference, the counter touched exactly once
+ * across two nested services — because the pipeline order IS the contract.
  */
 
 /* ========================================================================== */
@@ -57,43 +49,32 @@ import type { Database, TablesInsert } from '@/types/database';
 /* ========================================================================== */
 
 const USER = '11111111-1111-4111-8111-111111111111';
-const OTHER_USER = '22222222-2222-4222-8222-222222222222';
-const OBJECT_ID = '33333333-3333-4333-8333-333333333333';
 const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
 const FARMER_MESSAGE_ID = '55555555-5555-4555-8555-555555555555';
 const ANSWER_MESSAGE_ID = '66666666-6666-4666-8666-666666666666';
 
-const AUDIO_REF: StorageRef = {
-  bucket: 'voice-messages',
-  path: `${USER}/2026/09/${OBJECT_ID}.webm`,
-};
+/** A3: the input carries a `{ fileId, kind: 'voice' }` Media_Reference, not a storage path. */
+const AUDIO_REF: MediaRef = { fileId: 'c'.repeat(24), kind: 'voice' };
 
-/** Another farmer's prefix, same bucket. The only thing wrong with it is who owns it. */
-const FOREIGN_REF: StorageRef = {
-  bucket: 'voice-messages',
-  path: `${OTHER_USER}/2026/09/${OBJECT_ID}.webm`,
-};
+/** The bytes the owner-checked read yields, and the stored MIME type. */
+const AUDIO_BYTES = Buffer.from('fake-opus-bytes');
+const AUDIO_MIME = 'audio/webm;codecs=opus';
 
-/**
- * A transcript with the leading space Whisper reliably produces, kept deliberately: "verbatim"
- * means the provider's string, and the assertions below compare against this exact value.
- */
 const TRANSCRIPT = ' मेरे टमाटर के पत्तों पर भूरे धब्बे हैं';
 
 function voiceInput(
   overrides: {
-    readonly storageRef?: StorageRef;
+    readonly audio?: MediaRef;
     readonly durationSeconds?: number;
     readonly mimeType?: string;
     readonly language?: VoiceInput['language'];
     readonly channel?: VoiceInput['channel'];
-    /** Absent by default, which is the shape of a caller that could not learn the size. */
     readonly bytes?: number;
   } = {},
 ): VoiceInput {
   return {
     userId: USER,
-    storageRef: overrides.storageRef ?? AUDIO_REF,
+    audio: overrides.audio ?? AUDIO_REF,
     language: overrides.language ?? 'hi',
     channel: overrides.channel ?? 'web',
     conversationId: CONVERSATION_ID,
@@ -107,64 +88,38 @@ function voiceInput(
 /* Seams                                                                       */
 /* -------------------------------------------------------------------------- */
 
-/**
- * A tripwire, not a stand-in. Every seam is injected in a unit test, so touching the request client
- * is a defect and any property read throws.
- */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
+interface MediaReadStub {
+  readonly read: (userId: string, ref: MediaRef) => Promise<{ bytes: Buffer; mimeType: string } | null>;
+  readonly readsFor: string[];
+}
+
+function mediaReadStub(options: { owned?: boolean; mimeType?: string } = {}): MediaReadStub {
+  const readsFor: string[] = [];
+  const owned = options.owned ?? true;
+  return {
+    readsFor,
+    read: (_userId, ref) => {
+      readsFor.push(ref.fileId);
+      return Promise.resolve(
+        owned ? { bytes: AUDIO_BYTES, mimeType: options.mimeType ?? AUDIO_MIME } : null,
       );
     },
-  },
-) as unknown as SupabaseClient<Database>;
+  };
+}
 
-interface StorageStub {
-  readonly client: ObjectRemoveClient & StorageClientLike;
-  readonly probed: string[];
-  readonly signed: string[];
+interface RemoveStub {
+  readonly remove: MediaRemover;
   readonly removed: string[];
 }
 
-function storageStub(
-  options: { exists?: boolean; signable?: boolean; removeError?: unknown } = {},
-): StorageStub {
-  const probed: string[] = [];
-  const signed: string[] = [];
+function removeStub(options: { removed?: boolean; error?: unknown } = {}): RemoveStub {
   const removed: string[] = [];
-  const exists = options.exists ?? true;
-  const signable = options.signable ?? true;
-
-  return {
-    probed,
-    signed,
-    removed,
-    client: {
-      storage: {
-        from: () => ({
-          exists: (path: string) => {
-            probed.push(path);
-            return Promise.resolve({ data: exists, error: null });
-          },
-          createSignedUrl: (path: string) => {
-            signed.push(path);
-            return Promise.resolve(
-              signable
-                ? { data: { signedUrl: `https://storage.test/${path}?token=abc` }, error: null }
-                : { data: null, error: { message: 'object not found' } },
-            );
-          },
-          remove: (paths: string[]) => {
-            removed.push(...paths);
-            return Promise.resolve({ data: paths, error: options.removeError ?? null });
-          },
-        }),
-      },
-    },
+  const remove: MediaRemover = (_userId, fileId) => {
+    removed.push(fileId);
+    if (options.error !== undefined) return Promise.reject(options.error);
+    return Promise.resolve(options.removed ?? true);
   };
+  return { remove, removed };
 }
 
 interface TranscribeStub {
@@ -205,11 +160,8 @@ function transcribeStub(
 
 /**
  * Fails the test if any counter function is reached — the tripwire the nesting rule needs.
- *
- * `reserveForRequest()` on a `covered` context performs **no RPC at all**, not even a read, so on
- * the correct path this object is never touched. The chat stub below hands it to the real
- * `reserveForRequest()`, which means every test that reaches the chat seam is also asserting
- * Requirement 14.1.
+ * `reserveForRequest()` on a `covered` context performs no RPC, so on the correct path this is
+ * never touched; the chat stub hands its coverage to the real `reserveForRequest()`.
  */
 const unreachableRpc: CounterRpc = {
   tryIncrement: () => {
@@ -228,14 +180,6 @@ interface ChatStub {
   readonly calls: { readonly input: ChatInput; readonly coverage: QuotaContext }[];
 }
 
-/**
- * Stands in for `ChatService` doing the one thing the nesting rule depends on: taking the coverage
- * it was handed to the SAME reserve entry point every service uses.
- *
- * That is what makes these tests assert something real rather than restating the stub. `rpc`
- * defaults to the tripwire, so a coverage context that was not `covered` fails loudly; a caller
- * that wants to *count* reserves passes its own counting stub instead.
- */
 function chatStub(options: { error?: unknown; rpc?: CounterRpc } = {}): ChatStub {
   const calls: { input: ChatInput; coverage: QuotaContext }[] = [];
 
@@ -331,7 +275,8 @@ const forbiddenCounter: CounterRpc = {
 
 interface Harness {
   readonly deps: VoiceDeps;
-  readonly storage: StorageStub;
+  readonly media: MediaReadStub;
+  readonly remover: RemoveStub;
   readonly transcription: TranscribeStub;
   readonly chat: ChatStub;
   readonly store: StoreStub;
@@ -340,30 +285,32 @@ interface Harness {
 
 function harness(
   options: {
-    storage?: StorageStub;
+    media?: MediaReadStub;
+    remover?: RemoveStub;
     transcription?: TranscribeStub;
     chat?: ChatStub;
     counter?: CounterStub;
     rpc?: CounterRpc;
   } = {},
 ): Harness {
-  const storage = options.storage ?? storageStub();
+  const media = options.media ?? mediaReadStub();
+  const remover = options.remover ?? removeStub();
   const transcription = options.transcription ?? transcribeStub();
   const counter = options.counter ?? counterStub();
   const chat = options.chat ?? chatStub();
   const store = storeStub();
 
   return {
-    storage,
+    media,
+    remover,
     transcription,
     chat,
     store,
     counter,
     deps: {
-      supabase: unreachableSupabase,
       chat: chat.chat,
-      storage: storage.client,
-      deleter: storage.client,
+      readMedia: media.read,
+      remove: remover.remove,
       store: store.store,
       transcribe: transcription.transcribe,
       quota: { rpc: options.rpc ?? counter.rpc, now: new Date('2026-09-15T19:30:00.000Z') },
@@ -387,27 +334,23 @@ async function failure(run: Promise<unknown>): Promise<AppError> {
 /* ========================================================================== */
 
 describe('transcribeAndAnswer — the transcript reaches ChatService verbatim', () => {
-  it('hands the provider text over unchanged, as a voice farmer message carrying the audio path', async () => {
+  it('hands the provider text over unchanged, as a voice farmer message carrying the media reference', async () => {
     const test = harness();
 
     const outcome = await transcribeAndAnswer(voiceInput(), test.deps);
 
     expect(test.chat.calls).toHaveLength(1);
     const call = test.chat.calls[0];
-    // Verbatim: byte for byte, leading space and Devanagari intact. Requirement 8.4 passes the
-    // transcript to the Chat_Service as a Farmer message, and an edited message is not the
-    // farmer's message.
     expect(call?.input.message).toBe(TRANSCRIPT);
     expect(call?.input.inputKind).toBe('voice');
-    expect(call?.input.transcriptOf).toBe(AUDIO_REF.path);
+    // A3: `transcriptOf` is the recording's Media_Reference, not a storage path.
+    expect(call?.input.transcriptOf).toEqual(AUDIO_REF);
     expect(call?.input.conversationId).toBe(CONVERSATION_ID);
     expect(call?.input.userId).toBe(USER);
     expect(call?.input.language).toBe('hi');
     expect(call?.input.channel).toBe('web');
-    // The boolean form of the nesting rule, as `schemas.ts` declares it.
     expect(call?.input.skipQuotaReserve).toBe(true);
 
-    // Requirement 8.6 — both halves come back, and in the exact shape the route serializes.
     expect(outcome.transcript).toBe(TRANSCRIPT);
     expect(outcome.answer.content).toContain('Early blight');
     expect(
@@ -430,7 +373,7 @@ describe('transcribeAndAnswer — the transcript reaches ChatService verbatim', 
     expect(outcome.quota.limit).toBe(DAILY_QUOTAS.voice);
   });
 
-  it('sends the resolved container and the farmer language to the provider', async () => {
+  it('sends the resolved container, the bytes and the farmer language to the provider (A3)', async () => {
     const test = harness();
 
     await transcribeAndAnswer(voiceInput({ mimeType: 'audio/webm;codecs=opus' }), test.deps);
@@ -438,10 +381,20 @@ describe('transcribeAndAnswer — the transcript reaches ChatService verbatim', 
     expect(test.transcription.calls).toHaveLength(1);
     expect(test.transcription.calls[0]?.container).toBe('audio/webm;codecs=opus');
     expect(test.transcription.calls[0]?.language).toBe('hi');
-    expect(test.transcription.calls[0]?.audioUrl).toContain(AUDIO_REF.path);
+    // A3, V34: the bytes travel as `audioBytes`, not by URL.
+    expect(test.transcription.calls[0]?.audioBytes).toBe(AUDIO_BYTES);
+    expect(test.media.readsFor).toEqual([AUDIO_REF.fileId]);
     expect(test.store.usage[0]?.outcome).toBe('success');
     expect(test.store.usage[0]?.operation).toBe('voice');
     expect(test.store.usage[0]?.quota_spent).toBe(true);
+  });
+
+  it('falls back to the stored MIME type for the container when the request carries none', async () => {
+    const test = harness({ media: mediaReadStub({ mimeType: 'audio/ogg' }) });
+
+    await transcribeAndAnswer(voiceInput(), test.deps);
+
+    expect(test.transcription.calls[0]?.container).toBe('audio/ogg');
   });
 });
 
@@ -451,8 +404,6 @@ describe('transcribeAndAnswer — the transcript reaches ChatService verbatim', 
 
 describe('transcribeAndAnswer — one voice message spends one unit', () => {
   it('touches the counter exactly once across both services', async () => {
-    // The SAME counter stub serves this service's reserve and the nested chat's, so a nested
-    // reserve would show up as a second increment rather than being invisible.
     const counter = counterStub();
     const test = harness({ counter, chat: chatStub({ rpc: counter.rpc }) });
 
@@ -470,8 +421,6 @@ describe('transcribeAndAnswer — one voice message spends one unit', () => {
     const coverage = test.chat.calls[0]?.coverage;
     expect(coverage?.role).toBe('covered');
     if (coverage?.role !== 'covered') throw new Error('expected covered coverage');
-    // `reservedHere: false` is what makes a nested refund a no-op instead of handing back a unit
-    // the outer request is still holding.
     expect(coverage.reservation.reservedHere).toBe(false);
     expect(coverage.reservation.operation).toBe('voice');
     expect(coverage.reservation.userId).toBe(USER);
@@ -490,11 +439,8 @@ describe('transcribeAndAnswer — an empty transcript produces no answer', () =>
 
     expect(error.code).toBe('TRANSCRIPT_EMPTY');
     expect(error.status).toBe(422);
-    // Retryable over the same object: the farmer can record again somewhere quieter.
     expect(error.retryable).toBe(true);
     expect(test.chat.calls).toHaveLength(0);
-    // V10's signal is logged, because it separates "recorded silence" from "the provider produced
-    // nothing" — which is why the bytes are worth keeping for the window.
     expect(error.context?.noSpeechProb).toBe(0.93);
   });
 
@@ -531,7 +477,7 @@ describe('transcribeAndAnswer — the recording is deleted only once its transcr
 
     const outcome = await transcribeAndAnswer(voiceInput(), test.deps);
 
-    expect(test.storage.removed).toEqual([AUDIO_REF.path]);
+    expect(test.remover.removed).toEqual([AUDIO_REF.fileId]);
     expect(outcome.audio).toEqual({ outcome: 'deleted' });
     expect(outcome.farmerMessageId).toBe(FARMER_MESSAGE_ID);
   });
@@ -541,7 +487,7 @@ describe('transcribeAndAnswer — the recording is deleted only once its transcr
 
     await failure(transcribeAndAnswer(voiceInput(), test.deps));
 
-    expect(test.storage.removed).toEqual([]);
+    expect(test.remover.removed).toEqual([]);
   });
 
   it('retains the original after a failed transcription (8.10)', async () => {
@@ -552,9 +498,8 @@ describe('transcribeAndAnswer — the recording is deleted only once its transcr
     const error = await failure(transcribeAndAnswer(voiceInput(), test.deps));
 
     expect(error.code).toBe('TRANSCRIPTION_FAILED');
-    expect(test.storage.removed).toEqual([]);
+    expect(test.remover.removed).toEqual([]);
     expect(test.store.usage[0]?.outcome).toBe('provider_error');
-    // Spent and not refunded: a provider call was attempted.
     expect(test.store.usage[0]?.quota_spent).toBe(true);
   });
 
@@ -564,49 +509,44 @@ describe('transcribeAndAnswer — the recording is deleted only once its transcr
     const error = await failure(transcribeAndAnswer(voiceInput(), test.deps));
 
     expect(error.code).toBe('PROVIDERS_UNAVAILABLE');
-    expect(test.storage.removed).toEqual([]);
+    expect(test.remover.removed).toEqual([]);
   });
 
   it('serves the answer even when the delete fails, and says so', async () => {
-    const test = harness({ storage: storageStub({ removeError: { message: 'storage offline' } }) });
+    const test = harness({ remover: removeStub({ error: new Error('gridfs offline') }) });
 
     const outcome = await transcribeAndAnswer(voiceInput(), test.deps);
 
-    // The transcript is committed and the farmer has an answer; a retention problem must not cost
-    // them a retry and another unit.
     expect(outcome.answer.content).toContain('Early blight');
     expect(outcome.audio).toEqual({ outcome: 'failed', reason: 'remove_failed' });
   });
 });
 
-describe('deleteVoiceOriginal — Requirement 8.11', () => {
-  it('refuses a path outside the requesting farmer prefix, without calling remove', async () => {
-    const storage = storageStub();
+describe('deleteVoiceOriginal — Requirement 8.11 (owner-scoped through the Data_Access_Layer)', () => {
+  it('deletes the recording through removeMediaForOwner and reports it deleted', async () => {
+    const remover = removeStub({ removed: true });
 
-    const disposition = await deleteVoiceOriginal(FOREIGN_REF, USER, storage.client);
-
-    expect(disposition).toEqual({ outcome: 'refused', reason: 'prefix_mismatch' });
-    expect(storage.removed).toEqual([]);
-    // Not even probed: comparing first means a cross-tenant path never reaches the network.
-    expect(storage.probed).toEqual([]);
-  });
-
-  it('treats an object that is already gone as deleted, not as an error', async () => {
-    const storage = storageStub({ exists: false });
-
-    const disposition = await deleteVoiceOriginal(AUDIO_REF, USER, storage.client);
-
-    expect(disposition).toEqual({ outcome: 'already_absent' });
-    expect(storage.removed).toEqual([]);
-  });
-
-  it('deletes a path under the farmer own prefix', async () => {
-    const storage = storageStub();
-
-    const disposition = await deleteVoiceOriginal(AUDIO_REF, USER, storage.client);
+    const disposition = await deleteVoiceOriginal(AUDIO_REF, USER, remover.remove);
 
     expect(disposition).toEqual({ outcome: 'deleted' });
-    expect(storage.removed).toEqual([AUDIO_REF.path]);
+    expect(remover.removed).toEqual([AUDIO_REF.fileId]);
+  });
+
+  it('treats a not-owned or already-absent file as already_absent, idempotently', async () => {
+    // The owner-scoped delete returns false for both — indistinguishable (Requirement 2.6).
+    const remover = removeStub({ removed: false });
+
+    const disposition = await deleteVoiceOriginal(AUDIO_REF, USER, remover.remove);
+
+    expect(disposition).toEqual({ outcome: 'already_absent' });
+  });
+
+  it('reports a delete that threw as failed, for the sweep to retry', async () => {
+    const remover = removeStub({ error: new Error('gridfs offline') });
+
+    const disposition = await deleteVoiceOriginal(AUDIO_REF, USER, remover.remove);
+
+    expect(disposition).toEqual({ outcome: 'failed', reason: 'remove_failed' });
   });
 });
 
@@ -615,17 +555,16 @@ describe('deleteVoiceOriginal — Requirement 8.11', () => {
 /* ========================================================================== */
 
 describe('transcribeAndAnswer — nothing is spent before the reserve', () => {
-  it('rejects a reference under another farmer prefix with the counter untouched (2.6)', async () => {
-    const test = harness({ rpc: forbiddenCounter });
+  it('rejects a recording that is not owned with the counter untouched (2.6)', async () => {
+    const test = harness({ media: mediaReadStub({ owned: false }), rpc: forbiddenCounter });
 
-    const error = await failure(
-      transcribeAndAnswer(voiceInput({ storageRef: FOREIGN_REF }), test.deps),
-    );
+    const error = await failure(transcribeAndAnswer(voiceInput(), test.deps));
 
     expect(error.code).toBe('STORAGE_REF_FORBIDDEN');
     expect(error.status).toBe(403);
     expect(test.transcription.calls).toHaveLength(0);
     expect(test.chat.calls).toHaveLength(0);
+    expect(test.remover.removed).toEqual([]);
   });
 
   it('rejects a recording over the duration limit with AUDIO_TOO_LONG (8.3)', async () => {
@@ -641,12 +580,6 @@ describe('transcribeAndAnswer — nothing is spent before the reserve', () => {
   });
 
   it('rejects a recording over the 10 MB size limit with FILE_TOO_LARGE (8.2, 8.3)', async () => {
-    /**
-     * The other half of Requirement 8.2, and until `/api/voice` learned to read the object's size
-     * there was nothing server-side to check it with. The number reaches here as an input fact —
-     * from Storage on the web path, from V14's media metadata on the WhatsApp path — and the
-     * judgement is made once, here, before the reserve.
-     */
     const test = harness({ rpc: forbiddenCounter });
 
     const error = await failure(
@@ -655,18 +588,12 @@ describe('transcribeAndAnswer — nothing is spent before the reserve', () => {
 
     expect(error.code).toBe('FILE_TOO_LARGE');
     expect(error.status).toBe(400);
-    /** The sentence quotes the audio ceiling, not `MAX_IMAGE_BYTES`, whatever the two are worth. */
     expect(error.details?.maxBytes).toBe(MAX_AUDIO_BYTES);
     expect(test.transcription.calls).toHaveLength(0);
     expect(test.chat.calls).toHaveLength(0);
   });
 
-  it('accepts a recording exactly at the size limit and forwards the size to the provider call', async () => {
-    /**
-     * V10's 25 MB provider cap in `groq.ts` only fires when `TranscribeRequest.bytes` has a value,
-     * and nothing on the web path used to supply one. This is the assertion that the floor now has
-     * a number under it: unreachable while Jamee's own 10 MB holds, and no longer dead.
-     */
+  it('forwards an explicit byte count to the provider call when the caller supplied one', async () => {
     const test = harness();
 
     await transcribeAndAnswer(voiceInput({ bytes: MAX_AUDIO_BYTES }), test.deps);
@@ -674,32 +601,23 @@ describe('transcribeAndAnswer — nothing is spent before the reserve', () => {
     expect(test.transcription.calls[0]?.bytes).toBe(MAX_AUDIO_BYTES);
   });
 
-  it('proceeds with no size check when the size could not be learned', async () => {
-    /**
-     * A probe that cannot answer must not fail a request whose bytes are already in the bucket and
-     * whose ownership has just been confirmed. The key is absent rather than zero, so the adapter
-     * skips its own check too instead of comparing against a number nobody measured.
-     */
+  it('forwards the read byte length when the caller supplied none (A3)', async () => {
+    // Under A3 the service always has the bytes (it read them), so it forwards their length as the
+    // provider-cap floor even when the caller passed no explicit size.
     const test = harness();
 
     await transcribeAndAnswer(voiceInput(), test.deps);
 
-    expect(test.transcription.calls).toHaveLength(1);
-    expect(test.transcription.calls[0]).not.toHaveProperty('bytes');
+    expect(test.transcription.calls[0]?.bytes).toBe(AUDIO_BYTES.byteLength);
   });
 
   it('refuses a container the transcription provider does not accept', async () => {
-    // V14 lists `audio/aac` for inbound WhatsApp audio; it is NOT a member of V10's accepted list.
-    // Refused here, before the reserve, rather than discovered as a provider rejection.
     const test = harness({ rpc: forbiddenCounter });
 
     const error = await failure(
       transcribeAndAnswer(voiceInput({ mimeType: 'audio/aac' }), test.deps),
     );
 
-    // `AUDIO_FORMAT_UNSUPPORTED`, not `TRANSCRIPTION_FAILED`: the container is the recorder's
-    // choice, so re-sending the identical object fails identically and Requirement 15.4's flag
-    // must be false. Task 22.2 added the code for exactly this case.
     expect(error.code).toBe('AUDIO_FORMAT_UNSUPPORTED');
     expect(error.status).toBe(400);
     expect(error.retryable).toBe(false);
@@ -720,19 +638,6 @@ describe('transcribeAndAnswer — nothing is spent before the reserve', () => {
     expect(test.store.usage[0]?.outcome).toBe('quota_declined');
     expect(test.store.usage[0]?.quota_spent).toBe(false);
   });
-
-  it('refunds the unit when the signed URL cannot be minted, before any provider call', async () => {
-    const counter = counterStub();
-    const test = harness({ counter, storage: storageStub({ signable: false }) });
-
-    const error = await failure(transcribeAndAnswer(voiceInput(), test.deps));
-
-    expect(error.code).toBe('INTERNAL_ERROR');
-    expect(counter.increments).toBe(1);
-    expect(counter.decrements).toBe(1);
-    expect(test.transcription.calls).toHaveLength(0);
-    expect(test.store.usage[0]?.quota_spent).toBe(false);
-  });
 });
 
 /* ========================================================================== */
@@ -747,12 +652,10 @@ describe('transcribeAndAnswer — a transcription timeout is not reported as a p
 
     const error = await failure(transcribeAndAnswer(voiceInput(), test.deps));
 
-    // `DIAGNOSIS_TIMEOUT`'s message tells the farmer to send the photo again, which is wrong twice
-    // over on this path. The audit keeps the distinction the farmer-facing sentence drops.
     expect(error.code).toBe('TRANSCRIPTION_FAILED');
     expect(test.store.usage[0]?.outcome).toBe('timeout');
     expect(test.store.usage[0]?.quota_spent).toBe(true);
-    expect(test.storage.removed).toEqual([]);
+    expect(test.remover.removed).toEqual([]);
   });
 });
 
@@ -761,17 +664,15 @@ describe('transcribeAndAnswer — a transcription timeout is not reported as a p
 /* ========================================================================== */
 
 describe('audioContainerOf', () => {
-  it('prefers the recorder MIME type, which is more specific than the extension', () => {
-    expect(audioContainerOf(voiceInput({ mimeType: 'audio/ogg;codecs=opus' }))).toBe(
-      'audio/ogg;codecs=opus',
-    );
+  it('prefers the recorder MIME type when one was sent', () => {
+    expect(audioContainerOf('audio/ogg;codecs=opus')).toBe('audio/ogg;codecs=opus');
   });
 
-  it('falls back to the object extension when no MIME type was sent', () => {
-    expect(audioContainerOf(voiceInput())).toBe('webm');
+  it('falls back to a bare "audio" container when no MIME type was sent', () => {
+    expect(audioContainerOf(undefined)).toBe('audio');
   });
 
   it('ignores a blank MIME type rather than declaring an empty container', () => {
-    expect(audioContainerOf(voiceInput({ mimeType: '   ' }))).toBe('webm');
+    expect(audioContainerOf('   ')).toBe('audio');
   });
 });

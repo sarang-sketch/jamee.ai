@@ -385,7 +385,7 @@ function recordingTranscribe(payload: unknown = verbosePayload()): {
 
 function transcribeRequest(overrides: Partial<TranscribeRequest> = {}): TranscribeRequest {
   return {
-    audioUrl: 'https://project.supabase.co/storage/v1/object/sign/voice-messages/u/note.webm?token=t',
+    audioBytes: Buffer.from('fake-opus-bytes'),
     container: 'audio/webm;codecs=opus',
     language: 'hi',
     ...overrides,
@@ -425,7 +425,7 @@ describe('groqTranscribeAdapter', () => {
     expect(GROQ_TRANSCRIBE_MODEL).toBe('whisper-large-v3-turbo');
   });
 
-  it('sends the resolved model, verbose_json, temperature 0, and the object by url not file', async () => {
+  it('sends the resolved model, verbose_json, temperature 0, and the audio by file not url (A3)', async () => {
     const { create, calls } = recordingTranscribe();
 
     const result = await groqTranscribeAdapter({ create }).invoke(
@@ -435,10 +435,11 @@ describe('groqTranscribeAdapter', () => {
 
     const body = calls[0]?.body as unknown as Record<string, unknown>;
     expect(body?.['model']).toBe(GROQ_TRANSCRIBE_MODEL);
-    // V10: `file` | `url` are mutually exclusive with one required. Jamee always sends `url`, so
-    // the storage object is fetched by the provider instead of being buffered into memory.
-    expect(body?.['url']).toBe(transcribeRequest().audioUrl);
-    expect(body).not.toHaveProperty('file');
+    // Amendment A3, V34: `file` | `url` are mutually exclusive with one required. There are no
+    // public URLs any more, so Jamee always sends `file` — the recording's bytes as an uploadable
+    // File built with the SDK's `toFile()`. `url` must not travel.
+    expect(body).toHaveProperty('file');
+    expect(body).not.toHaveProperty('url');
     // V10: verbose_json is what carries the confidence signals; temperature 0 is the recommendation.
     expect(body?.['response_format']).toBe(TRANSCRIBE_RESPONSE_FORMAT);
     expect(TRANSCRIBE_RESPONSE_FORMAT).toBe('verbose_json');

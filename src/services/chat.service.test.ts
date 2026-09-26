@@ -1,6 +1,8 @@
+import { ObjectId, type WithId } from 'mongodb';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner } from '@/lib/ai/capabilities';
+import type { DiagnosisDoc, MessageDoc } from '@/lib/db/collections';
 import { AppError } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
@@ -12,7 +14,7 @@ import {
   type Operation,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
+import type { TablesInsert } from '@/types/database';
 import {
   CONTEXT_MESSAGE_LIMIT,
   CONTEXT_TOKEN_BUDGET,
@@ -25,6 +27,7 @@ import {
   type ChatWriteStore,
   type ContextStore,
   type ConversationScope,
+  type MessageInsert,
 } from '@/services/chat.service';
 import {
   coveredBy,
@@ -35,28 +38,28 @@ import {
 
 /**
  * Unit tests for Conversation_Context assembly, with the database stubbed at the `ContextStore`
- * seam — two plain async functions, so nothing here reproduces a PostgREST builder chain or casts
- * its way past a client type.
+ * seam — two plain async functions, so nothing here touches the Data_Access_Layer's driver.
  *
  * Requirements: 7.1 (recent messages AND the conversation's most recent Diagnosis_Result),
  *               7.2 (keyed on the conversation identifier)
  *
- * `contextStoreFrom()` is deliberately not exercised: it is the one place a real Supabase client is
- * touched, and whether `.eq()`, `.order()` and `.limit()` behave is a question about a live database
- * and its two indexes, not about logic. The fake table below **mirrors** those queries — the same
- * two predicates, the same total order, the same row cap — so these tests pin the window that sits
- * on top of them. `tests/integration` is where the real queries, `messages_conversation_idx` and
- * `diagnoses_conversation_idx` get checked.
+ * *Amendment A3:* the seam now yields Data_Access_Layer documents (`WithId<MessageDoc>` /
+ * `WithId<DiagnosisDoc>`) rather than Supabase rows. `contextStoreFrom()` is deliberately not
+ * exercised: whether the owner-scoped accessors behave against a live Mongo replica set with its
+ * two indexes is `tests/integration`'s question. The fake store below **mirrors** those reads — the
+ * same owner + conversation scoping, the same total order, the same cap — so these tests pin the
+ * window that sits on top of them.
  */
 
 /* ========================================================================== */
 /* A fake messages + diagnoses pair                                            */
 /* ========================================================================== */
 
-const FARMER = '11111111-1111-4111-8111-111111111111';
-const OTHER_FARMER = '22222222-2222-4222-8222-222222222222';
-const THREAD = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const OTHER_THREAD = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const FARMER = 'auth-user-1111';
+const OTHER_FARMER = 'auth-user-2222';
+const THREAD = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+const OTHER_THREAD = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+const THREAD_OID = new ObjectId(THREAD);
 
 const SCOPE: ConversationScope = { conversationId: THREAD, userId: FARMER };
 
@@ -66,12 +69,13 @@ interface FakeStore extends ContextStore {
 }
 
 /**
- * In-memory `messages` and `diagnoses` applying exactly what the real queries apply: filter on
- * `conversation_id` AND `user_id`, order by `created_at desc, role desc, id desc`, take `limit`.
+ * In-memory `messages` and `diagnoses` applying exactly what the real accessors apply: scope on
+ * `ownerId` AND `conversationId`, order by `createdAt desc, role desc, _id desc`, take `limit`.
+ * `conversationId` is compared by hex string, as the store's `.toHexString()` scope check does.
  */
 function fakeStore(
-  messages: readonly MessageRow[] = [],
-  diagnoses: readonly DiagnosisRow[] = [],
+  msgs: readonly WithId<MessageDoc>[] = [],
+  diags: readonly WithId<DiagnosisDoc>[] = [],
 ): FakeStore {
   let lastLimit: number | null = null;
 
@@ -82,75 +86,92 @@ function fakeStore(
 
     async recentMessages(scope, limit) {
       lastLimit = limit;
-      return messages
+      return msgs
         .filter(
-          (row) => row.conversation_id === scope.conversationId && row.user_id === scope.userId,
+          (row) =>
+            row.conversationId.toHexString() === scope.conversationId &&
+            row.ownerId === scope.userId,
         )
         .sort(
           (a, b) =>
-            b.created_at.localeCompare(a.created_at) ||
+            b.createdAt.getTime() - a.createdAt.getTime() ||
             b.role.localeCompare(a.role) ||
-            b.id.localeCompare(a.id),
+            b._id.toHexString().localeCompare(a._id.toHexString()),
         )
         .slice(0, limit);
     },
 
     async latestDiagnosis(scope) {
-      const ordered = diagnoses
+      const ordered = diags
         .filter(
-          (row) => row.conversation_id === scope.conversationId && row.user_id === scope.userId,
+          (row) =>
+            row.conversationId.toHexString() === scope.conversationId &&
+            row.ownerId === scope.userId,
         )
-        .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
+        .sort(
+          (a, b) =>
+            b.createdAt.getTime() - a.createdAt.getTime() ||
+            b._id.toHexString().localeCompare(a._id.toHexString()),
+        );
       return ordered[0] ?? null;
     },
   };
 }
 
-/** An ISO instant that sorts lexicographically with its neighbours, like a timestamptz does. */
-function at(minute: number): string {
-  return `2026-09-15T10:${String(minute).padStart(2, '0')}:00.000Z`;
+/** A `Date` `minute` minutes past a fixed instant, so ordering is deterministic. */
+function at(minute: number): Date {
+  return new Date(Date.UTC(2026, 8, 15, 10, minute, 0));
 }
 
-function message(overrides: Partial<MessageRow> & { id: string }): MessageRow {
+/** A stable ObjectId derived from a short label, so a test can name a row and assert on its id. */
+function oid(label: string): ObjectId {
+  const hex = Buffer.from(label).toString('hex').padEnd(24, '0').slice(0, 24);
+  return new ObjectId(hex);
+}
+
+function message(overrides: Partial<WithId<MessageDoc>> & { id: string }): WithId<MessageDoc> {
+  const { id, ...rest } = overrides;
   return {
-    conversation_id: THREAD,
-    user_id: FARMER,
+    _id: oid(id),
+    ownerId: FARMER,
+    conversationId: THREAD_OID,
     role: 'farmer',
     content: 'why?',
     language: 'en',
     channel: 'web',
-    input_kind: 'text',
-    transcript_of: null,
-    created_at: at(0),
-    ...overrides,
-  };
+    inputKind: 'text',
+    transcriptOf: null,
+    createdAt: at(0),
+    ...rest,
+  } as WithId<MessageDoc>;
 }
 
-function diagnosis(overrides: Partial<DiagnosisRow> & { id: string }): DiagnosisRow {
+function diagnosis(overrides: Partial<WithId<DiagnosisDoc>> & { id: string }): WithId<DiagnosisDoc> {
+  const { id, ...rest } = overrides;
   return {
-    conversation_id: THREAD,
-    user_id: FARMER,
+    _id: oid(id),
+    ownerId: FARMER,
+    conversationId: THREAD_OID,
     status: 'identified',
-    disease_name: 'Tomato Early Blight',
-    knowledge_id: 'kb-1',
+    diseaseName: 'Tomato Early Blight',
+    knowledgeId: null,
     confidence: 0.82,
     severity: 'moderate',
     explanation: 'Dark spots with rings on the lower leaves.',
     language: 'en',
-    needs_expert: false,
+    needsExpert: false,
     channel: 'web',
-    image_bucket: 'crop-images',
-    image_path: `${FARMER}/2026/09/cccccccc-cccc-4ccc-8ccc-cccccccccccc.jpg`,
-    full_image_deleted_at: null,
-    model_provider: 'gemini',
-    created_at: at(0),
-    ...overrides,
-  };
+    mediaRef: { fileId: new ObjectId(), kind: 'crop-image' },
+    fullImageDeletedAt: null,
+    modelProvider: 'gemini',
+    createdAt: at(0),
+    ...rest,
+  } as WithId<DiagnosisDoc>;
 }
 
 /** A message whose content costs a known number of estimated tokens. */
-function sized(id: string, tokens: number, createdAt: string): MessageRow {
-  return message({ id, content: 'x'.repeat(tokens * 4), created_at: createdAt });
+function sized(id: string, tokens: number, createdAt: Date): WithId<MessageDoc> {
+  return message({ id, content: 'x'.repeat(tokens * 4), createdAt });
 }
 
 /* ========================================================================== */
@@ -162,15 +183,15 @@ describe('assembleContext — the most recent diagnosis of the conversation', ()
     const store = fakeStore(
       [],
       [
-        diagnosis({ id: 'older', disease_name: 'Potato Late Blight', created_at: at(10) }),
-        diagnosis({ id: 'newest', disease_name: 'Tomato Late Blight', created_at: at(30) }),
-        diagnosis({ id: 'middle', disease_name: 'Tomato Early Blight', created_at: at(20) }),
+        diagnosis({ id: 'older', diseaseName: 'Potato Late Blight', createdAt: at(10) }),
+        diagnosis({ id: 'newest', diseaseName: 'Tomato Late Blight', createdAt: at(30) }),
+        diagnosis({ id: 'middle', diseaseName: 'Tomato Early Blight', createdAt: at(20) }),
       ],
     );
 
     const context = await assembleContext(SCOPE, { store });
 
-    expect(context.latestDiagnosis?.id).toBe('newest');
+    expect(context.latestDiagnosis?._id.toHexString()).toBe(oid('newest').toHexString());
     // The field a subject-less follow-up resolves against (Requirement 7.3).
     expect(context.condition).toBe('Tomato Late Blight');
   });
@@ -186,17 +207,17 @@ describe('assembleContext — the most recent diagnosis of the conversation', ()
     const store = fakeStore(
       [],
       [
-        diagnosis({ id: 'identified', disease_name: 'Tomato Early Blight', created_at: at(10) }),
+        diagnosis({ id: 'identified', diseaseName: 'Tomato Early Blight', createdAt: at(10) }),
         // `diagnoses_unknown_shape` — an inconclusive row carries no name (Requirement 6.5).
         diagnosis({
           id: 'inconclusive',
           status: 'unknown',
-          disease_name: null,
-          knowledge_id: null,
+          diseaseName: null,
+          knowledgeId: null,
           confidence: null,
           severity: 'none',
-          needs_expert: true,
-          created_at: at(20),
+          needsExpert: true,
+          createdAt: at(20),
         }),
       ],
     );
@@ -205,7 +226,7 @@ describe('assembleContext — the most recent diagnosis of the conversation', ()
 
     // Most recent, full stop: no reaching back past it to the older identified row, because that
     // would answer a follow-up about a different photo than the one the farmer just sent.
-    expect(context.latestDiagnosis?.id).toBe('inconclusive');
+    expect(context.latestDiagnosis?._id.toHexString()).toBe(oid('inconclusive').toHexString());
     expect(context.condition).toBeNull();
   });
 
@@ -213,15 +234,15 @@ describe('assembleContext — the most recent diagnosis of the conversation', ()
     const store = fakeStore(
       [],
       [
-        diagnosis({ id: 'other-thread', conversation_id: OTHER_THREAD, created_at: at(50) }),
-        diagnosis({ id: 'other-farmer', user_id: OTHER_FARMER, created_at: at(40) }),
-        diagnosis({ id: 'ours', created_at: at(10) }),
+        diagnosis({ id: 'other-thread', conversationId: new ObjectId(OTHER_THREAD), createdAt: at(50) }),
+        diagnosis({ id: 'other-farmer', ownerId: OTHER_FARMER, createdAt: at(40) }),
+        diagnosis({ id: 'ours', createdAt: at(10) }),
       ],
     );
 
     const context = await assembleContext(SCOPE, { store });
 
-    expect(context.latestDiagnosis?.id).toBe('ours');
+    expect(context.latestDiagnosis?._id.toHexString()).toBe(oid('ours').toHexString());
   });
 });
 
@@ -231,33 +252,37 @@ describe('assembleContext — the most recent diagnosis of the conversation', ()
 
 describe('assembleContext — the window is keyed on the conversation', () => {
   it('excludes another conversation of the same farmer even when its messages interleave', async () => {
-    // Alternating timestamps, so a read that forgot `conversation_id` would produce a window that
+    // Alternating timestamps, so a read that forgot `conversationId` would produce a window that
     // still looked chronologically plausible — which is the failure worth catching.
     const store = fakeStore([
-      message({ id: 'ours-1', created_at: at(10), content: 'my tomato has spots' }),
-      message({ id: 'theirs-1', conversation_id: OTHER_THREAD, created_at: at(11) }),
-      message({ id: 'ours-2', created_at: at(12), content: 'how much water?' }),
-      message({ id: 'theirs-2', conversation_id: OTHER_THREAD, created_at: at(13) }),
-      message({ id: 'ours-3', created_at: at(14), content: 'why?' }),
-      message({ id: 'theirs-3', conversation_id: OTHER_THREAD, created_at: at(15) }),
+      message({ id: 'ours-1', createdAt: at(10), content: 'my tomato has spots' }),
+      message({ id: 'theirs-1', conversationId: new ObjectId(OTHER_THREAD), createdAt: at(11) }),
+      message({ id: 'ours-2', createdAt: at(12), content: 'how much water?' }),
+      message({ id: 'theirs-2', conversationId: new ObjectId(OTHER_THREAD), createdAt: at(13) }),
+      message({ id: 'ours-3', createdAt: at(14), content: 'why?' }),
+      message({ id: 'theirs-3', conversationId: new ObjectId(OTHER_THREAD), createdAt: at(15) }),
     ]);
 
     const context = await assembleContext(SCOPE, { store });
 
-    expect(context.messages.map((m) => m.id)).toEqual(['ours-1', 'ours-2', 'ours-3']);
-    expect(context.messages.every((m) => m.conversation_id === THREAD)).toBe(true);
+    expect(context.messages.map((m) => m._id.toHexString())).toEqual([
+      oid('ours-1').toHexString(),
+      oid('ours-2').toHexString(),
+      oid('ours-3').toHexString(),
+    ]);
+    expect(context.messages.every((m) => m.conversationId.toHexString() === THREAD)).toBe(true);
   });
 
   it("excludes another farmer's messages in the same-numbered window", async () => {
     const store = fakeStore([
-      message({ id: 'theirs', user_id: OTHER_FARMER, created_at: at(20) }),
-      message({ id: 'ours', created_at: at(10) }),
+      message({ id: 'theirs', ownerId: OTHER_FARMER, createdAt: at(20) }),
+      message({ id: 'ours', createdAt: at(10) }),
     ]);
 
     const context = await assembleContext(SCOPE, { store });
 
-    expect(context.messages.map((m) => m.id)).toEqual(['ours']);
-    expect(context.messages.every((m) => m.user_id === FARMER)).toBe(true);
+    expect(context.messages.map((m) => m._id.toHexString())).toEqual([oid('ours').toHexString()]);
+    expect(context.messages.every((m) => m.ownerId === FARMER)).toBe(true);
   });
 
   it('returns an empty window for a conversation with no messages', async () => {
@@ -270,29 +295,35 @@ describe('assembleContext — the window is keyed on the conversation', () => {
 
   it('orders the window chronologically, oldest first', async () => {
     const store = fakeStore([
-      message({ id: 'third', created_at: at(30) }),
-      message({ id: 'first', created_at: at(10) }),
-      message({ id: 'second', created_at: at(20) }),
+      message({ id: 'third', createdAt: at(30) }),
+      message({ id: 'first', createdAt: at(10) }),
+      message({ id: 'second', createdAt: at(20) }),
     ]);
 
     const context = await assembleContext(SCOPE, { store });
 
-    expect(context.messages.map((m) => m.id)).toEqual(['first', 'second', 'third']);
+    expect(context.messages.map((m) => m._id.toHexString())).toEqual([
+      oid('first').toHexString(),
+      oid('second').toHexString(),
+      oid('third').toHexString(),
+    ]);
   });
 
   it('keeps a same-instant turn in question-then-answer order', async () => {
-    // `created_at` defaults to `now()`, which is transaction-scoped in Postgres, so a farmer message
-    // and its answer persisted in one transaction share an instant. The `role` tiebreak is what
-    // stops the transcript reading answer-first.
+    // `createdAt` is stamped by the layer; a farmer message and its answer persisted in one turn
+    // share an instant. The `role` tiebreak is what stops the transcript reading answer-first.
     const store = fakeStore([
-      message({ id: 'answer', role: 'jamee', content: 'Because of...', created_at: at(10) }),
-      message({ id: 'question', role: 'farmer', content: 'why?', created_at: at(10) }),
+      message({ id: 'answer', role: 'jamee', content: 'Because of...', createdAt: at(10) }),
+      message({ id: 'question', role: 'farmer', content: 'why?', createdAt: at(10) }),
     ]);
 
     const context = await assembleContext(SCOPE, { store });
 
     expect(context.messages.map((m) => m.role)).toEqual(['farmer', 'jamee']);
-    expect(context.messages.map((m) => m.id)).toEqual(['question', 'answer']);
+    expect(context.messages.map((m) => m._id.toHexString())).toEqual([
+      oid('question').toHexString(),
+      oid('answer').toHexString(),
+    ]);
   });
 });
 
@@ -303,14 +334,14 @@ describe('assembleContext — the window is keyed on the conversation', () => {
 describe('assembleContext — the scope post-condition', () => {
   const leakedMessage = message({
     id: 'leaked',
-    conversation_id: OTHER_THREAD,
-    user_id: OTHER_FARMER,
-    created_at: at(10),
+    conversationId: new ObjectId(OTHER_THREAD),
+    ownerId: OTHER_FARMER,
+    createdAt: at(10),
   });
 
   it("rejects a message from another conversation rather than putting it in a prompt", async () => {
-    // The WhatsApp path runs on the service-role client with no RLS behind it, so a dropped `.eq()`
-    // must fail loudly instead of becoming another farmer's message inside a chat prompt.
+    // The Telegram/service path has no RLS behind it, so a dropped scope predicate must fail loudly
+    // instead of becoming another farmer's message inside a chat prompt.
     const leaky: ContextStore = {
       recentMessages: async () => [leakedMessage],
       latestDiagnosis: async () => null,
@@ -326,7 +357,8 @@ describe('assembleContext — the scope post-condition', () => {
   it('rejects a diagnosis from another conversation rather than answering against it', async () => {
     const leaky: ContextStore = {
       recentMessages: async () => [],
-      latestDiagnosis: async () => diagnosis({ id: 'leaked', conversation_id: OTHER_THREAD }),
+      latestDiagnosis: async () =>
+        diagnosis({ id: 'leaked', conversationId: new ObjectId(OTHER_THREAD) }),
     };
 
     await expect(assembleContext(SCOPE, { store: leaky })).rejects.toMatchObject({
@@ -356,7 +388,7 @@ describe('assembleContext — the bound', () => {
   it('reads at most N rows and reports that the read was capped', async () => {
     const store = fakeStore(
       Array.from({ length: CONTEXT_MESSAGE_LIMIT + 8 }, (_, index) =>
-        message({ id: `m${String(index)}`, created_at: at(index), content: 'short' }),
+        message({ id: `m${String(index)}`, createdAt: at(index), content: 'short' }),
       ),
     );
 
@@ -379,7 +411,10 @@ describe('assembleContext — the bound', () => {
 
     // 100 + 100 fits, the third would reach 300, so the OLDEST goes — a follow-up needs the end of
     // the conversation, not the beginning.
-    expect(context.messages.map((m) => m.id)).toEqual(['middle', 'newest']);
+    expect(context.messages.map((m) => m._id.toHexString())).toEqual([
+      oid('middle').toHexString(),
+      oid('newest').toHexString(),
+    ]);
     expect(context.bound.estimatedTokens).toBe(200);
     expect(context.bound.estimatedTokens).toBeLessThanOrEqual(250);
     expect(context.bound.rowsRead).toBe(3);
@@ -397,7 +432,9 @@ describe('assembleContext — the bound', () => {
 
     // `large` does not fit, and `small-oldest` is NOT then smuggled in behind it: a transcript with
     // a hole in the middle reads as a non-sequitur.
-    expect(context.messages.map((m) => m.id)).toEqual(['small-newest']);
+    expect(context.messages.map((m) => m._id.toHexString())).toEqual([
+      oid('small-newest').toHexString(),
+    ]);
     expect(context.bound.boundedBy).toBe('token_budget');
   });
 
@@ -408,7 +445,7 @@ describe('assembleContext — the bound', () => {
 
     // The floor of one: a window that silently emptied would lose the whole conversation over one
     // oversized row.
-    expect(context.messages.map((m) => m.id)).toEqual(['huge']);
+    expect(context.messages.map((m) => m._id.toHexString())).toEqual([oid('huge').toHexString()]);
     expect(context.bound.boundedBy).toBe('token_budget');
   });
 
@@ -427,12 +464,12 @@ describe('assembleContext — the bound', () => {
     // turns must fit, and twelve typical ones must too.
     const worstCase = fakeStore([
       ...Array.from({ length: 3 }, (_, turn) => [
-        message({ id: `q${String(turn)}`, content: 'q'.repeat(1000), created_at: at(turn * 2) }),
+        message({ id: `q${String(turn)}`, content: 'q'.repeat(1000), createdAt: at(turn * 2) }),
         message({
           id: `a${String(turn)}`,
           role: 'jamee',
           content: 'a'.repeat(1200),
-          created_at: at(turn * 2 + 1),
+          createdAt: at(turn * 2 + 1),
         }),
       ]).flat(),
     ]);
@@ -447,7 +484,7 @@ describe('assembleContext — the bound', () => {
         message({
           id: `m${String(index)}`,
           content: index % 2 === 0 ? 'why is this happening?' : 'x'.repeat(400),
-          created_at: at(index),
+          createdAt: at(index),
         }),
       ),
     );
@@ -714,8 +751,8 @@ describe('answerQuestion — an in-scope question grounds only in the resolved r
 describe('answerQuestion — a subject-less follow-up resolves against the diagnosis', () => {
   it('grounds "why?" in the conversation’s most recent condition', async () => {
     const store = fakeStore(
-      [message({ id: 'm1', content: 'my tomato has dark spots', created_at: at(10) })],
-      [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight', created_at: at(11) })],
+      [message({ id: 'm1', content: 'my tomato has dark spots', createdAt: at(10) })],
+      [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight', createdAt: at(11) })],
     );
     const knowledge = knowledgeStub();
     const models = modelStub();
@@ -780,7 +817,7 @@ describe('answerQuestion — the canonical name stays Latin script in every lang
   };
 
   const store = (): ContextStore =>
-    fakeStore([], [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight' })]);
+    fakeStore([], [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight' })]);
 
   for (const language of SUPPORTED_LANGUAGES) {
     it(`keeps it verbatim in a ${language} answer`, async () => {
@@ -828,7 +865,7 @@ describe('answerQuestion — cross-contamination is caught, in-scope siblings ar
     const models = modelStub(contaminated);
 
     const outcome = await answerQuestion(ask('why?'), {
-      store: fakeStore([], [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight' })]),
+      store: fakeStore([], [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight' })]),
       knowledge: knowledgeStub().read,
       models: models.runner,
     });
@@ -872,7 +909,7 @@ describe('answerQuestion — degradation is grounded, and it is reported', () =>
     const models = modelStub(new AppError('PROVIDERS_UNAVAILABLE', { context: { usedFallback: true } }));
 
     const outcome = await answerQuestion(ask('why?'), {
-      store: fakeStore([], [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight' })]),
+      store: fakeStore([], [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight' })]),
       knowledge: knowledgeStub().read,
       models: models.runner,
     });
@@ -890,7 +927,7 @@ describe('answerQuestion — degradation is grounded, and it is reported', () =>
     const models = modelStub(new AppError('DIAGNOSIS_TIMEOUT', { context: { budgetExhausted: true } }));
 
     const outcome = await answerQuestion(ask('why?'), {
-      store: fakeStore([], [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight' })]),
+      store: fakeStore([], [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight' })]),
       knowledge: knowledgeStub().read,
       models: models.runner,
     });
@@ -905,7 +942,7 @@ describe('answerQuestion — degradation is grounded, and it is reported', () =>
   it('serves the row when a returned answer is empty or absurdly long', async () => {
     for (const useless of ['   ', 'x'.repeat(5000)]) {
       const outcome = await answerQuestion(ask('why?'), {
-        store: fakeStore([], [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight' })]),
+        store: fakeStore([], [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight' })]),
         knowledge: knowledgeStub().read,
         models: modelStub(useless).runner,
       });
@@ -923,8 +960,8 @@ describe('answerQuestion — degradation is grounded, and it is reported', () =>
 describe('answerQuestion — the outcome carries its context for task 15.3', () => {
   it('returns the same window the answer was grounded in', async () => {
     const store = fakeStore(
-      [message({ id: 'm1', content: 'my tomato has dark spots', created_at: at(10) })],
-      [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight', created_at: at(11) })],
+      [message({ id: 'm1', content: 'my tomato has dark spots', createdAt: at(10) })],
+      [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight', createdAt: at(11) })],
     );
 
     const outcome = await answerQuestion(ask('why?'), {
@@ -937,7 +974,9 @@ describe('answerQuestion — the outcome carries its context for task 15.3', () 
     expect(outcome.context.conversationId).toBe(THREAD);
     expect(outcome.context.userId).toBe(FARMER);
     expect(outcome.context.condition).toBe('Tomato Early Blight');
-    expect(outcome.context.messages.map((m) => m.id)).toEqual(['m1']);
+    expect(outcome.context.messages.map((m) => m._id.toHexString())).toEqual([
+      oid('m1').toHexString(),
+    ]);
   });
 });
 
@@ -1014,7 +1053,7 @@ function counterStub(options: { start?: number; limit?: number } = {}): CounterS
 interface WriteStub {
   readonly writes: ChatWriteStore;
   /** Every row handed to `insertTurn`, flattened. Length is how "exactly two" is observed. */
-  readonly rows: TablesInsert<'messages'>[];
+  readonly rows: MessageInsert[];
   readonly usageLogs: TablesInsert<'usage_logs'>[];
   readonly touched: string[];
 }
@@ -1027,7 +1066,7 @@ function writeStub(
     usageLogError?: Error;
   } = {},
 ): WriteStub {
-  const rows: TablesInsert<'messages'>[] = [];
+  const rows: MessageInsert[] = [];
   const usageLogs: TablesInsert<'usage_logs'>[] = [];
   const touched: string[] = [];
   let nextId = 0;
@@ -1043,19 +1082,26 @@ function writeStub(
       async insertTurn(pair) {
         if (options.insertError !== undefined) throw options.insertError;
         rows.push(...pair);
-        // One statement, so both rows share `created_at` — the tie `recentMessages` breaks on `role`.
-        return pair.map((row) => ({
-          id: `msg-${(nextId += 1)}`,
-          conversation_id: row.conversation_id,
-          user_id: row.user_id,
-          role: row.role,
-          content: row.content,
-          language: row.language,
-          channel: row.channel,
-          input_kind: row.input_kind ?? 'text',
-          transcript_of: row.transcript_of ?? null,
-          created_at: at(59),
-        }));
+        // One turn, so both rows share a `createdAt` — the tie `recentMessages` breaks on `role`.
+        // The seam takes string-shaped rows (ChatTurnInsert) and the layer returns stored records,
+        // so this stub converts the string ids to ObjectId exactly as `insertChatTurn` does.
+        return pair.map(
+          (row): WithId<MessageDoc> => ({
+            _id: oid(`msg-${(nextId += 1)}`),
+            ownerId: row.ownerId,
+            conversationId: new ObjectId(row.conversationId),
+            role: row.role,
+            content: row.content,
+            language: row.language,
+            channel: row.channel,
+            inputKind: row.inputKind,
+            transcriptOf:
+              row.transcriptOf === undefined
+                ? null
+                : { fileId: new ObjectId(row.transcriptOf.fileId), kind: row.transcriptOf.kind },
+            createdAt: at(59),
+          }),
+        );
       },
       async insertUsageLog(row) {
         if (options.usageLogError !== undefined) throw options.usageLogError;
@@ -1069,15 +1115,15 @@ function writeStub(
   };
 }
 
-/** The client is never reached: every seam a turn uses is injected in these tests. */
-const NO_CLIENT = null as unknown as ChatTurnDeps['supabase'];
+/** No client is reached: every seam a turn uses is injected in these tests. */
+const NO_CLIENT: ChatTurnDeps['supabase'] = undefined;
 
 function turnDeps(
   overrides: Partial<ChatTurnDeps> & { writes: ChatWriteStore; quota: QuotaOptions },
 ): ChatTurnDeps {
   return {
     supabase: NO_CLIENT,
-    store: fakeStore([], [diagnosis({ id: 'd1', disease_name: 'Tomato Early Blight' })]),
+    store: fakeStore([], [diagnosis({ id: 'd1', diseaseName: 'Tomato Early Blight' })]),
     knowledge: knowledgeStub().read,
     models: modelStub().runner,
     ...overrides,
@@ -1115,42 +1161,47 @@ describe('chatTurn — persistence', () => {
 
     expect(farmer?.role).toBe('farmer');
     expect(farmer?.content).toBe('why?');
-    expect(farmer?.input_kind).toBe('text');
+    expect(farmer?.inputKind).toBe('text');
     expect(jamee?.role).toBe('jamee');
-    expect(jamee?.input_kind).toBe('text');
+    expect(jamee?.inputKind).toBe('text');
 
     // Requirement 16.5 and 7.4: same conversation, same farmer, the supplied channel, on both rows.
     for (const row of store.rows) {
-      expect(row.conversation_id).toBe(THREAD);
-      expect(row.user_id).toBe(FARMER);
+      expect(row.conversationId).toBe(THREAD);
+      expect(row.ownerId).toBe(FARMER);
       expect(row.channel).toBe('web');
     }
 
     // The answer the caller gets back carries the id of the row it was actually stored as.
-    expect(result.farmerMessageId).toBe('msg-1');
-    expect(result.answer.messageId).toBe('msg-2');
+    expect(result.farmerMessageId).toBe(oid('msg-1').toHexString());
+    expect(result.answer.messageId).toBe(oid('msg-2').toHexString());
     expect(result.conversationId).toBe(THREAD);
   });
 
-  it("records the voice path's transcript as a farmer message distinguished by input_kind", async () => {
+  it("records the voice path's transcript as a farmer message distinguished by inputKind", async () => {
     /**
      * Requirement 8.4: the transcript enters the conversation as a normal farmer message, and this
-     * column is what distinguishes it afterwards. Requirement 8.9's provenance travels with it.
+     * field is what distinguishes it afterwards. Requirement 8.9's provenance (the Media_Reference)
+     * travels with it.
      */
     const store = writeStub();
     const counter = counterStub();
 
     await chatTurn(
-      question({ inputKind: 'voice', transcriptOf: `${FARMER}/2026/09/note.webm`, message: 'why?' }),
+      question({
+        inputKind: 'voice',
+        transcriptOf: { fileId: 'dddddddddddddddddddddddd', kind: 'voice' },
+        message: 'why?',
+      }),
       turnDeps({ writes: store.writes, quota: { rpc: counter.rpc } }),
     );
 
     const [farmer, jamee] = store.rows;
-    expect(farmer?.input_kind).toBe('voice');
-    expect(farmer?.transcript_of).toBe(`${FARMER}/2026/09/note.webm`);
+    expect(farmer?.inputKind).toBe('voice');
+    expect(farmer?.transcriptOf).toEqual({ fileId: 'dddddddddddddddddddddddd', kind: 'voice' });
     /** Requirement 8.8 — Jamee never answers with audio, so its row is text on every channel. */
-    expect(jamee?.input_kind).toBe('text');
-    expect(jamee?.transcript_of ?? null).toBeNull();
+    expect(jamee?.inputKind).toBe('text');
+    expect(jamee?.transcriptOf ?? null).toBeNull();
   });
 
   it("ties the Jamee row's language to the answer, and the farmer row's to the request (D9)", async () => {
@@ -1653,8 +1704,8 @@ describe('chatAnswerer', () => {
       'farmerMessageId',
       'quota',
     ]);
-    expect(nested.farmerMessageId).toBe('msg-1');
-    expect(nested.answer.messageId).toBe('msg-2');
+    expect(nested.farmerMessageId).toBe(oid('msg-1').toHexString());
+    expect(nested.answer.messageId).toBe(oid('msg-2').toHexString());
     expect(counter.increments).toBe(1);
   });
 });

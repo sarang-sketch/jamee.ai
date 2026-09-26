@@ -1,25 +1,23 @@
-import { redirect } from 'next/navigation';
-
 import { ChatComposer } from '@/components/ChatComposer';
 import {
   CHAT_HEADING_ID,
   CHAT_MESSAGE_LIMIT,
-  CHAT_MESSAGES_SELECT,
   toChatTurns,
+  type ChatMessageRow,
 } from '@/components/ChatThread';
 import { LanguageProvider } from '@/components/LanguageProvider';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
-import { SIGN_IN_PATH } from '@/lib/auth/protected-paths';
+import { requireFarmer } from '@/lib/auth/session';
+import { farmerData } from '@/lib/db/farmer';
+import { farmerReads } from '@/lib/db/reads';
 import { AppError } from '@/lib/errors';
 import { activeLanguage } from '@/lib/language.server';
 import { messages } from '@/lib/messages';
 import {
   DEFAULT_LANGUAGE,
-  PROFILE_SETTINGS_SELECT,
   readProfileSettings,
   type ProfileSettings,
 } from '@/lib/profile';
-import { createServerSupabase, currentUserId } from '@/lib/supabase/server';
 import { conversationStoreFrom, findOrCreateActive } from '@/services/conversation.service';
 
 import styles from './page.module.css';
@@ -33,62 +31,56 @@ import styles from './page.module.css';
  *               13.2 (own rows only), 15.2 / 15.4 (the honest indicator and the returned error
  *               message are the composer's, bound to its real request)
  * Design: "Frontend" → screens table — `/chat` is a **server shell** that loads the conversation
- *          and its messages via RLS plus a client `ChatComposer`
+ *          and its messages via the Data_Access_Layer plus a client `ChatComposer`
  *
- * Server component: no `'use client'`, no state, no `fetch`. The design's rule of thumb applies
- * literally — *no route handler is called just to read data a server component can query directly
- * under RLS* — so the thread is read here and `/api/chat` is only ever asked to *write* a turn.
+ * =============================================================================
+ * AMENDMENT A3 — THE DATA_ACCESS_LAYER REPLACES THE RLS-SCOPED SUPABASE CLIENT
+ * =============================================================================
+ *
+ * Under Supabase this shell held an RLS-scoped `messages` query. Under A3 it holds no client: the
+ * thread is read through the owner-scoped `farmerReads(userId).conversationMessages(...)` accessor
+ * (D18), whose merged `ownerId` is the tenant boundary, and each `MessageDoc` is mapped to the
+ * `ChatMessageRow` view the thread renders. The design's rule of thumb still applies literally — no
+ * route handler is called just to read data a server component can query directly — so `/api/chat`
+ * is only ever asked to *write* a turn, and it uses no Supabase client.
  *
  * ### The conversation id is resolved here, and that is the point
  *
- * `/api/chat` requires a `conversationId` that is a uuid this farmer owns; anything else is
+ * `/api/chat` requires a `conversationId` that this farmer owns; anything else is
  * `CONVERSATION_NOT_FOUND`. So the id cannot come from the browser, and it is resolved with
- * `findOrCreateActive(userId, 'web')` — the same find-or-create the diagnosis path and the
- * WhatsApp adapter use, which is what keeps a farmer's web thread one long-running conversation
- * (Requirements 7.1, 7.2) and keeps it a *different row* from their WhatsApp thread.
- *
- * A consequence worth stating: loading this screen creates a conversation row for a farmer who has
- * none, before any question is asked. That is `conversations` doing what Requirement 7.5 already
- * has it do for a diagnosis started without one — an empty thread is not farmer-visible anywhere,
- * and the alternative (create on first send) would mean either the client inventing an id or a
- * round trip added to the first question of every session.
+ * `findOrCreateActive(userId, 'web')` — the same find-or-create the diagnosis path uses, which
+ * keeps a farmer's web thread one long-running conversation (Requirements 7.1, 7.2) and a
+ * different row from any other channel's thread.
  */
 
 /**
  * The session, the profile row and the farmer's messages decide the entire output, so this page
- * must never be prerendered. `cookies()` inside `createServerSupabase()` and `activeLanguage()`
- * already force a dynamic render; saying so is the honest version of that, and it keeps a build
- * without Supabase credentials from failing on a page whose output could not have been reused.
- * Same reasoning as `/`, `/diagnose`, `/history` and `/profile`.
+ * must never be prerendered. `requireFarmer()` (session) and `activeLanguage()` (language cookie)
+ * already force a dynamic render. Same reasoning as `/`, `/diagnose`, `/history` and `/profile`.
  */
 export const dynamic = 'force-dynamic';
 
 export default async function ChatPage() {
   /**
-   * Requirement 1.6, as the second layer. The first is `src/proxy.ts`, which gates every path in
-   * `PROTECTED_SCREEN_PATHS` — `/chat` among them — before this file runs at all. The check is
-   * here anyway because `currentUserId()` is `getUser()` underneath (server-confirmed, not a
-   * decoded cookie) and because `userId` is a value this render genuinely needs: it is the owner
-   * of the conversation resolved below and the `user_id` predicate on the message read.
-   *
-   * `redirect()` throws to unwind the render, so nothing below runs without a session.
+   * Requirement 1.6, as the second layer behind `src/proxy.ts`. `requireFarmer()` validates the
+   * session against the store (not a decoded cookie) and `redirect()`s a signed-out visitor,
+   * throwing to unwind the render. `userId` is the owner of the conversation resolved below and the
+   * scope of the message read.
    */
-  const userId = await currentUserId();
-  if (userId === null) redirect(SIGN_IN_PATH);
-
-  const supabase = await createServerSupabase();
+  const userId = await requireFarmer();
 
   /**
-   * The profile's preferred language is the standing default the switcher starts from
-   * (Requirement 1.8). `null` means the farmer has no profile row, which by construction should
-   * not happen, so the screen falls back to the column default rather than failing. Read with the
-   * RLS-scoped client, like everything else here.
+   * The profile's preferred language is the standing default the switcher starts from (Requirement
+   * 1.8). `null` means no profile row — which by construction should not happen — so the screen
+   * falls back to the column default rather than failing. Read through the owner-scoped
+   * Data_Access_Layer accessor.
    */
-  const settings: ProfileSettings = (await readProfileSettings(
-    () =>
-      supabase.from('profiles').select(PROFILE_SETTINGS_SELECT).eq('id', userId).maybeSingle(),
-    userId,
-  )) ?? { displayName: null, language: DEFAULT_LANGUAGE };
+  const settings: ProfileSettings = (await readProfileSettings(async () => {
+    const profile = await farmerData(userId).readProfile();
+    return profile === null
+      ? null
+      : { displayName: profile.displayName ?? null, language: profile.language };
+  })) ?? { displayName: null, language: DEFAULT_LANGUAGE };
 
   /**
    * The cookie if the farmer has chosen on this device, otherwise their profile's preference,
@@ -99,41 +91,32 @@ export default async function ChatPage() {
   const { ui } = messages(language);
 
   /**
-   * The active web thread. The store is built from **this page's** RLS-scoped client rather than
-   * left to the default, so the lookup, the insert and the message read below all run under the
-   * same session — one client per render instead of three.
+   * The active web thread. `conversationStoreFrom()` is the Data_Access_Layer store (its legacy
+   * client parameter is ignored under A3), so the lookup and the create both run owner-scoped.
    */
-  const conversation = await findOrCreateActive(userId, 'web', conversationStoreFrom(supabase));
+  const conversation = await findOrCreateActive(userId, 'web', conversationStoreFrom());
 
-  const { data: rows, error } = await supabase
-    .from('messages')
-    .select(CHAT_MESSAGES_SELECT)
-    .eq('conversation_id', conversation.id)
-    /**
-     * RLS is the authorization boundary — the cookie-scoped client carries the farmer's session,
-     * so PostgREST returns their rows and no others (Requirement 13.2). This predicate is the
-     * explicit second layer the design's *Defence in depth* note asks for, and `messages.user_id`
-     * is denormalized from the conversation for exactly that reason (migration 0003).
-     */
-    .eq('user_id', userId)
-    /**
-     * Newest first at the read so `CHAT_MESSAGE_LIMIT` drops the oldest, then reversed for display
-     * by `toChatTurns`. `id` breaks a timestamp tie so the order is total and two renders agree.
-     * Served by `messages_conversation_idx` on `(conversation_id, created_at desc)`.
-     */
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: false })
-    .limit(CHAT_MESSAGE_LIMIT);
-
-  if (error !== null) {
-    /**
-     * A failed read is not an empty conversation. Rendering a blank thread because a query failed
-     * would tell a farmer their questions are gone, so this fails loudly instead — the same
-     * distinction `conversation.service.ts` makes for its own read, and the same one the diagnosis
-     * detail screen makes for this table.
-     */
+  /**
+   * The thread, read through the owner-scoped Data_Access_Layer. `conversationMessages` merges
+   * `{ ownerId: userId }` (Requirement 13.2) and filters `conversationId`, newest-first with a cap
+   * of `CHAT_MESSAGE_LIMIT` so the bound drops the oldest; `toChatTurns` reverses it for display.
+   * The layer throws on a real failure, which surfaces as `INTERNAL_ERROR` rather than a blank
+   * thread — a farmer must never be told their questions are gone because a read failed.
+   */
+  let rows: ChatMessageRow[];
+  try {
+    const docs = await farmerReads(userId).conversationMessages(conversation.id, CHAT_MESSAGE_LIMIT);
+    rows = docs.map((doc) => ({
+      id: doc._id.toHexString(),
+      role: doc.role,
+      content: doc.content,
+      language: doc.language,
+      inputKind: doc.inputKind,
+      createdAt: doc.createdAt.toISOString(),
+    }));
+  } catch (cause) {
     throw new AppError('INTERNAL_ERROR', {
-      cause: error,
+      cause,
       context: {
         reason: 'chat_messages_read_failed',
         conversationId: conversation.id,
@@ -167,7 +150,7 @@ export default async function ChatPage() {
         </h1>
         <ChatComposer
           conversationId={conversation.id}
-          initialTurns={toChatTurns(rows ?? [])}
+          initialTurns={toChatTurns(rows)}
           labelledBy={CHAT_HEADING_ID}
         />
       </LanguageProvider>

@@ -1,18 +1,26 @@
 import 'server-only';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
-
 import { gatewayRunner, type CapabilityRunner } from '@/lib/ai/capabilities';
 import type { GatewayResult, RunOptions } from '@/lib/ai/gateway';
 import {
+  conversationBelongsTo,
+  farmerReads,
+  insertChatTurn,
+  latestConversationDiagnosis,
+  touchConversation as touchConversationDal,
+  type ChatTurnInsert,
+  type DiagnosisRecord,
+  type MessageRecord,
+} from '@/lib/db/reads';
+import {
   DEGRADATION_OUTCOME as SHARED_DEGRADATION_OUTCOME,
   rejectionReasonForDegradation,
+  usageLogWriterFrom,
   writeUsageLog,
   type UsageFacts,
 } from '@/lib/db/usage-log';
 import { AppError, isAppError } from '@/lib/errors';
 import {
-  knowledgeReaderFrom,
   resolveScope,
   rlsScopedReader,
   type KnowledgeEntry,
@@ -44,7 +52,7 @@ import {
   type QuotaReservation,
 } from '@/services/quota.service';
 import type { ChatAnswerer } from '@/services/voice.service';
-import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
+import type { TablesInsert } from '@/types/database';
 
 /**
  * Conversation_Context assembly — the read half of `ChatService`.
@@ -201,14 +209,14 @@ export interface ConversationScope {
 }
 
 /**
- * A message in the window, exactly as `messages` stores it.
+ * A message in the window, exactly as the Data_Access_Layer stores it (`MessageRecord`).
  *
- * The row rather than a projection, following `Conversation` in `conversation.service.ts` and
- * `KnowledgeEntry` in `knowledge.ts`: task 15.2's prompt needs `role`, `content` and `language`,
- * and a hand-written projection of three of nine columns is a second shape to keep in step with
- * 0003 for no gain.
+ * Amendment A3: the document rather than a Supabase row. The prompt needs `role`, `content` and
+ * `language`, and the document carries those under the same names; the id is `_id` and the tenant
+ * anchor is `ownerId`. `MessageRecord` is the layer's own re-export of the stored document with its
+ * `_id` (so this module needs no `mongodb` import — D18).
  */
-export type ContextMessage = MessageRow;
+export type ContextMessage = MessageRecord;
 
 /** Which bound stopped the window, and what it cost. */
 export type ContextBoundedBy =
@@ -244,7 +252,7 @@ export interface ConversationContext {
    * identified row would answer a follow-up about a different photo than the one the farmer just
    * sent.
    */
-  readonly latestDiagnosis: DiagnosisRow | null;
+  readonly latestDiagnosis: DiagnosisRecord | null;
   /**
    * The subject a subject-less follow-up resolves against (Requirement 7.3), ready to hand to
    * `resolveScope()`.
@@ -266,11 +274,9 @@ export interface ConversationContext {
 /**
  * The two reads this module makes.
  *
- * Two **functions** rather than a mirrored PostgREST builder, following `ConversationStore` and
- * `KnowledgeReader`: the real queries are five- and six-link chains, and mirroring them
- * structurally would force a unit test to reproduce a builder chain in order to assert something
- * about a window. The queries live once, in `contextStoreFrom()`, typed against the real client so
- * the compiler still checks the column names.
+ * Two **functions** rather than a mirrored builder, following `ConversationStore` and
+ * `KnowledgeReader`. Under Amendment A3 the real queries live once in `contextStoreFrom()`, over the
+ * owner-scoped Data_Access_Layer (`src/lib/db/reads.ts`) rather than a PostgREST client.
  */
 export interface ContextStore {
   /**
@@ -281,7 +287,7 @@ export interface ContextStore {
    */
   recentMessages(scope: ConversationScope, limit: number): Promise<readonly ContextMessage[]>;
   /** The most recent diagnosis of this conversation, or `null`. */
-  latestDiagnosis(scope: ConversationScope): Promise<DiagnosisRow | null>;
+  latestDiagnosis(scope: ConversationScope): Promise<DiagnosisRecord | null>;
 }
 
 function readFailure(
@@ -301,79 +307,58 @@ function readFailure(
 }
 
 /**
- * Adapt a Supabase client — RLS-scoped or service-role — into a store.
+ * Adapt the Data_Access_Layer into a context store.
  *
- * A PostgREST `error` is **not** an empty result and is never treated as one. Empty means the
- * conversation has no messages or no diagnosis yet, which is a legitimate first turn; an error
- * means Jamee could not find out, and answering a follow-up against a silently empty context would
- * turn a read failure into a confidently context-free answer — Requirement 7.3's subject would
- * vanish and the farmer would get a referral for a question Jamee could have answered. So an error
- * throws, the cause is logged server-side, and the farmer sees `INTERNAL_ERROR`.
+ * *Amended by Amendment A3:* this was `contextStoreFrom(client: SupabaseClient)`, two PostgREST
+ * reads on an RLS-scoped or service-role client. Under A3 there is no RLS and no service-role
+ * client — `messages` and `diagnoses` are reached only through the owner-scoped read accessors
+ * (`farmerReads`, D18), which merge the bound `ownerId` into every filter so the tenant boundary
+ * cannot be forgotten. The two predicates that were load-bearing under RLS are now structural:
+ * `conversationId` is Requirement 7.2's key (passed to the accessor), and `ownerId` is merged by
+ * the layer.
+ *
+ * The optional `_legacyClient` is accepted and ignored purely so a caller still written against the
+ * Supabase signature keeps compiling through this port — it selects no behaviour, exactly as the
+ * quota and conversation ports kept theirs. Production callers pass nothing.
+ *
+ * A driver error is **not** an empty result and is never treated as one: the layer throws on a real
+ * failure, so an error is surfaced as `INTERNAL_ERROR` rather than read as "no messages / no
+ * diagnosis yet" — which would turn a read failure into a confidently context-free answer and make
+ * Requirement 7.3's subject vanish.
  */
-export function contextStoreFrom(client: SupabaseClient<Database>): ContextStore {
+export function contextStoreFrom(_legacyClient?: unknown): ContextStore {
+  void _legacyClient; // accepted for call-site compatibility during the port; selects no behaviour.
   return {
     async recentMessages(scope, limit) {
-      const { data, error } = await client
-        .from('messages')
-        .select('*')
-        // Both predicates are load-bearing. `conversation_id` is the key of Requirement 7.2 and
-        // the leading column of `messages_conversation_idx`. `user_id` is the tenant boundary —
-        // the ONLY boundary on the service-role client (admin.ts) — and it is a column on
-        // `messages` precisely so this read needs no join (0003's denormalization note).
-        .eq('conversation_id', scope.conversationId)
-        .eq('user_id', scope.userId)
-        // The equality on `conversation_id` plus this key is what `messages_conversation_idx`
-        // serves; the two keys after it only order rows that tie on the instant.
-        .order('created_at', { ascending: false })
-        // A tie is real, not theoretical: `created_at` defaults to `now()`, which is
-        // transaction-scoped in Postgres, so the farmer message and the Jamee answer that task
-        // 15.3 persists for one turn can land on the identical timestamp. `role` descending puts
-        // `jamee` before `farmer` in this newest-first read, which reverses to question-then-answer
-        // in the transcript — the order the turn actually happened in.
-        .order('role', { ascending: false })
-        // Final tiebreak, so the order is total and the token trim below is repeatable across two
-        // runs of the same conversation.
-        .order('id', { ascending: false })
-        .limit(limit);
-
-      if (error !== null) throw readFailure('messages', error, scope);
-      return data ?? [];
+      try {
+        // `conversationMessages` merges `{ ownerId: scope.userId }` and filters `conversationId`,
+        // ordered `createdAt` desc, then `role` desc (so a farmer message and its answer sharing an
+        // instant reverse to question-then-answer), then `_id` desc as the total tiebreak — served
+        // by `owner_conversation_recent`. The same total order the retired PostgREST read produced.
+        return await farmerReads(scope.userId).conversationMessages(scope.conversationId, limit);
+      } catch (cause) {
+        throw readFailure('messages', cause, scope);
+      }
     },
 
     async latestDiagnosis(scope) {
-      const { data, error } = await client
-        .from('diagnoses')
-        .select('*')
-        .eq('conversation_id', scope.conversationId)
-        .eq('user_id', scope.userId)
-        // Served by `diagnoses_conversation_idx`, which 0005 created for exactly this read.
-        .order('created_at', { ascending: false })
-        .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (error !== null) throw readFailure('diagnoses', error, scope);
-      return data;
+      try {
+        return await latestConversationDiagnosis(scope.userId, scope.conversationId);
+      } catch (cause) {
+        throw readFailure('diagnoses', cause, scope);
+      }
     },
   };
 }
 
 /**
- * The default store: the farmer's own session, through RLS.
+ * The default store: the farmer's own data through the Data_Access_Layer.
  *
- * `createServerSupabase()` is imported **lazily** because it reads the App Router cookie store,
- * which exists only inside a request. A static import would make this module unloadable outside a
- * request scope — including in a unit test — for a dependency the WhatsApp adapter never uses.
+ * *Amended by A3:* this was an RLS-scoped store built lazily from the App Router session's Supabase
+ * client. Under A3 the accessors bind to the owner id the caller passes per read, so there is no
+ * lazy client import to make and this is simply `contextStoreFrom()`.
  */
-async function serverStore(): Promise<ContextStore> {
-  const { createServerSupabase } = await import('@/lib/supabase/server');
-  return contextStoreFrom(await createServerSupabase());
-}
-
-export const rlsScopedContextStore: ContextStore = {
-  recentMessages: async (scope, limit) => (await serverStore()).recentMessages(scope, limit),
-  latestDiagnosis: async (scope) => (await serverStore()).latestDiagnosis(scope),
-};
+export const rlsScopedContextStore: ContextStore = contextStoreFrom();
 
 /* ========================================================================== */
 /* Assembly                                                                    */
@@ -433,7 +418,14 @@ export async function assembleContext(
     // The single flip from index order to transcript order. See the module header.
     messages: [...kept].reverse(),
     latestDiagnosis,
-    condition: latestDiagnosis?.disease_name ?? null,
+    // Requirement 6.5 / `diagnoses_unknown_shape`: an inconclusive diagnosis carries no name, so
+    // `status` decides and `diseaseName` is read only on the identified branch. Both a
+    // conversation with no diagnosis and one whose most recent diagnosis is inconclusive reach the
+    // referral path by the same route.
+    condition:
+      latestDiagnosis === null || latestDiagnosis.status === 'unknown'
+        ? null
+        : (latestDiagnosis.diseaseName ?? null),
     bound: {
       rowsRead: newestFirst.length,
       estimatedTokens,
@@ -492,9 +484,9 @@ function applyTokenBudget(
  * (`toEnvelope` in `errors.ts`), and the farmer sees the generic 500 of Requirement 15.6.
  */
 interface ScopedRow {
-  readonly id: string;
-  readonly conversation_id: string;
-  readonly user_id: string;
+  readonly _id: { toHexString(): string };
+  readonly conversationId: { toHexString(): string };
+  readonly ownerId: string;
 }
 
 function assertInScope<T extends ScopedRow>(
@@ -502,15 +494,15 @@ function assertInScope<T extends ScopedRow>(
   scope: ConversationScope,
   table: 'messages' | 'diagnoses',
 ): T {
-  if (row.conversation_id !== scope.conversationId || row.user_id !== scope.userId) {
+  if (row.conversationId.toHexString() !== scope.conversationId || row.ownerId !== scope.userId) {
     throw new AppError('INTERNAL_ERROR', {
       context: {
         reason: 'context_scope_mismatch',
         table,
-        rowId: row.id,
+        rowId: row._id.toHexString(),
         requestedConversation: scope.conversationId,
         requestedBy: scope.userId,
-        // Neither the row's own `user_id` nor its `conversation_id` is logged: copying another
+        // Neither the row's own `ownerId` nor its `conversationId` is logged: copying another
         // farmer's identifiers into this line would spread the leak the check just stopped.
       },
     });
@@ -622,15 +614,15 @@ export interface ChatQuestion extends ConversationScope {
 
 export interface ChatDeps {
   /**
-   * The request's Supabase client, used for BOTH reads: the context window and the knowledge base.
-   *
-   * Optional, matching `assembleContext`'s default in this module: absent means the farmer's own
-   * session through RLS, which is the web path. **Any caller with no session must pass one** —
-   * `contextStoreFrom(createAdminClient())` is what the WhatsApp webhook has, since a webhook
-   * carries no cookies and the RLS default would try to read a cookie store outside a request.
+   * *Amendment A3 — an IGNORED optional legacy parameter.* This was the request's Supabase client,
+   * used for both reads. Under A3 there is no Supabase and no RLS: the context window and the
+   * knowledge base are read through the owner-scoped Data_Access_Layer, which is scoped by the
+   * `userId` on the question rather than by an injected credential. The field is kept so callers
+   * still written against the old signature keep compiling through the port — it selects no
+   * behaviour, exactly as the quota and conversation ports kept theirs.
    */
-  readonly supabase?: SupabaseClient<Database> | undefined;
-  /** Read seams, for a test or a caller that already built them. Default: derived from `supabase`. */
+  readonly supabase?: unknown;
+  /** Read seams, for a test or a caller that already built them. Default: the Data_Access_Layer. */
   readonly store?: ContextStore | undefined;
   readonly knowledge?: KnowledgeReader | undefined;
   /** The one model call. Defaults to the real gateway over the real adapter sets. */
@@ -702,12 +694,10 @@ export async function answerQuestion(
     conversationId: question.conversationId,
     userId: question.userId,
   };
-  const knowledge =
-    deps.knowledge ??
-    (deps.supabase === undefined ? rlsScopedReader : knowledgeReaderFrom(deps.supabase));
+  const knowledge = deps.knowledge ?? rlsScopedReader;
 
   const context = await assembleContext(scope, {
-    store: deps.store ?? (deps.supabase === undefined ? undefined : contextStoreFrom(deps.supabase)),
+    store: deps.store,
     messageLimit: deps.messageLimit,
     tokenBudget: deps.tokenBudget,
   });
@@ -1002,23 +992,31 @@ const OPERATION: Operation = 'chat';
  * different credentials on the same request (`chatWriteStoreFrom` explains why) and because a test
  * that wants to pin the window has no business stubbing an audit insert.
  */
+/**
+ * The insert shape for one message the turn persists. The string-shaped `ChatTurnInsert` from the
+ * Data_Access_Layer (`src/lib/db/reads.ts`), so this service builds a turn without importing the
+ * `mongodb` driver (D18): `conversationId` and `transcriptOf.fileId` are hex strings here, and the
+ * layer converts them to `ObjectId` and re-stamps `ownerId`/`createdAt` on insert. Re-exported
+ * under the module's own name so the write seam reads in this file's terms.
+ */
+export type MessageInsert = ChatTurnInsert;
+
 export interface ChatWriteStore {
   /**
-   * Requirement 7.4, in **one statement**: the farmer message and the Jamee answer.
+   * Requirement 7.4: the farmer message and the Jamee answer.
    *
-   * A tuple rather than an array, so "exactly one of each" is in the type. A single multi-row
-   * insert rather than two calls, so the pair cannot half-commit: two sequential inserts would let
-   * a failure leave a farmer's question in the thread with no answer under it, and there is no
-   * transaction available across two PostgREST calls.
-   *
-   * Both rows land on the same `created_at` — `now()` is transaction-scoped in Postgres — which is
-   * exactly the tie `recentMessages()` above breaks with `role desc`, so the transcript still reads
-   * question-then-answer.
+   * A tuple rather than an array, so "exactly one of each" is in the type. Both rows are persisted
+   * for one turn; the transcript still reads question-then-answer because `conversationMessages`
+   * orders `createdAt` desc then `role` desc, reversed for display.
    */
   insertTurn(
-    rows: readonly [TablesInsert<'messages'>, TablesInsert<'messages'>],
-  ): Promise<readonly MessageRow[]>;
-  /** Requirements 14.6, 14.7. Append-only (D10). */
+    rows: readonly [MessageInsert, MessageInsert],
+  ): Promise<readonly MessageRecord[]>;
+  /**
+   * Requirements 14.6, 14.7. Append-only (D10). Takes the wire-shaped audit row `usageLogRow()`
+   * builds (the shared `writeUsageLog` helper produces it), and forwards it to the owner-scoped
+   * `usageLogWriterFrom()` accessor which maps it to a `UsageLogDoc`.
+   */
   insertUsageLog(row: TablesInsert<'usage_logs'>): Promise<void>;
   /**
    * Whether the supplied conversation id is this farmer's.
@@ -1027,12 +1025,11 @@ export interface ChatWriteStore {
    * above declines to authorize one — a conversation belonging to someone else simply produces an
    * empty window there. That is why the check is here and why it is not optional: without it a
    * farmer could append their question, and Jamee's answer, to another farmer's thread. The
-   * `messages` RLS policy would not catch it, because it constrains `user_id`, not
-   * `conversation_id`.
+   * owner-scoped read merges `ownerId`, so a stranger's conversation simply does not match.
    */
   ownsConversation(conversationId: string, userId: string): Promise<boolean>;
   /**
-   * Bump `conversations.updated_at`. **Reports rather than throws** — see `chatTurn`.
+   * Bump `conversations.updatedAt`. **Reports rather than throws** — see `chatTurn`.
    *
    * Returns whether the bump landed.
    */
@@ -1040,85 +1037,61 @@ export interface ChatWriteStore {
 }
 
 /**
- * Bind the write seam to the request's client, with the audit write on the service role.
+ * Bind the write seam to the Data_Access_Layer.
  *
- * The same two-client split `diagnosisStoreFrom()` makes, and for the same reason — the policy set,
- * not a preference:
+ * *Amended by Amendment A3:* this was `chatWriteStoreFrom(client, auditClient)`, a two-Supabase-
+ * client split (the farmer session for `messages`/`conversations`, the service role for the
+ * append-only `usage_logs`). Under A3 there is no RLS and no service-role client: every write goes
+ * through the owner-scoped Data_Access_Layer (D18), which merges the owning Auth_User_Id and stamps
+ * timestamps. The two `_legacy*` parameters are accepted and ignored so a caller still written
+ * against the old signature keeps compiling through the port — they select no behaviour.
  *
- *  - **`messages`** has `messages_insert_own` (`auth.uid() = user_id`, migration 0003), so on the
- *    web path the insert is written with the farmer's own session and **RLS is a second boundary**
- *    behind the `user_id` this function supplies. On the WhatsApp path `client` *is* the service-role
- *    client and the application check is the only boundary — which is why every row's `user_id` is
- *    the resolved farmer and never anything derived from a payload.
- *  - **`conversations`** has `conversations_update_own`, so the activity bump works with either
- *    credential.
- *  - **`usage_logs`** has a select policy and nothing else (migration 0006). The audit row is
- *    therefore unwritable with a farmer session, by design, so it goes through `auditClient`.
+ *  - **messages** — `farmerData(row.ownerId).insertMessage`, resolved from each row's own owner
+ *    anchor, which stamps `ownerId` again and `createdAt`.
+ *  - **usage_logs** — `usageLogWriterFrom()`, the owner-scoped append-only accessor. "Append-only"
+ *    holds more strongly than the retired select-only RLS policy: a farmer session has no path to a
+ *    `usage_logs` write at all.
+ *  - **conversations** — the activity bump through `touchConversation` in `reads.ts`.
  *
- * A PostgREST `error` is never read as an empty result, the rule `knowledge.ts`,
- * `conversation.service.ts` and `contextStoreFrom` above all state: the cause is logged server-side
- * and the farmer sees `INTERNAL_ERROR` (Requirement 15.6).
+ * The layer throws on a real failure, so an error is surfaced as `INTERNAL_ERROR` rather than read
+ * as an empty result (Requirement 15.6).
  */
 export function chatWriteStoreFrom(
-  client: SupabaseClient<Database>,
-  auditClient: SupabaseClient<Database>,
+  _legacyClient?: unknown,
+  _legacyAuditClient?: unknown,
 ): ChatWriteStore {
+  void _legacyClient;
+  void _legacyAuditClient;
+  const audit = usageLogWriterFrom();
   return {
     async insertTurn(rows) {
-      const { data, error } = await client.from('messages').insert([...rows]).select('*');
-      if (error !== null || data === null) {
+      // `insertChatTurn` (Data_Access_Layer) converts the string ids to `ObjectId`, re-stamps
+      // `ownerId` from each row and stamps `createdAt`, and inserts in order. A failure propagates
+      // as `INTERNAL_ERROR` from the layer.
+      try {
+        return await insertChatTurn(rows);
+      } catch (cause) {
         throw new AppError('INTERNAL_ERROR', {
-          cause: error,
+          cause,
           context: {
             reason: 'messages_insert_failed',
-            userId: rows[0].user_id,
-            conversationId: rows[0].conversation_id,
+            userId: rows[0]?.ownerId,
+            conversationId: rows[0]?.conversationId,
           },
         });
       }
-      return data;
     },
 
     async insertUsageLog(row) {
-      const { error } = await auditClient.from('usage_logs').insert(row);
-      if (error !== null) {
-        throw new AppError('INTERNAL_ERROR', {
-          cause: error,
-          context: { reason: 'usage_log_insert_failed', userId: row.user_id, outcome: row.outcome },
-        });
-      }
+      await audit.insertUsageLog(row);
     },
 
     async ownsConversation(conversationId, userId) {
-      const { data, error } = await client
-        .from('conversations')
-        .select('id')
-        // Both predicates matter: `id` selects the row, `user_id` is the tenant boundary — the only
-        // boundary when `client` is the service-role client (admin.ts).
-        .eq('id', conversationId)
-        .eq('user_id', userId)
-        .maybeSingle();
-
-      if (error !== null) {
-        throw new AppError('INTERNAL_ERROR', {
-          cause: error,
-          context: { reason: 'conversation_lookup_failed', conversationId, userId },
-        });
-      }
-      return data !== null;
+      return conversationBelongsTo(conversationId, userId);
     },
 
     async touchConversation(conversationId, userId) {
-      // The value sent is overwritten by 0003's `conversations_set_updated_at` trigger, which sets
-      // `now()` on every update. It is sent anyway so the *intent* of the statement is legible in
-      // the code rather than only in the migration.
-      const { error } = await client
-        .from('conversations')
-        .update({ updated_at: new Date().toISOString() })
-        .eq('id', conversationId)
-        .eq('user_id', userId);
-
-      return error === null;
+      return touchConversationDal(conversationId, userId);
     },
   };
 }
@@ -1129,16 +1102,14 @@ export function chatWriteStoreFrom(
 
 export interface ChatTurnDeps extends ChatDeps {
   /**
-   * The request's Supabase client: RLS-scoped for the web path, service-role for WhatsApp.
-   *
-   * **Required** here although `ChatDeps.supabase` is optional, for the reason
-   * `DiagnosisDeps.supabase` states: a default would be one credential, and the caller needing the
-   * other would have to remember to override it — on the WhatsApp path that mistake surfaces as a
-   * cookie read outside a request scope, which is a confusing failure for a straightforward
-   * omission. A turn writes rows, so the credential decision is made visible at every call site.
+   * *Amendment A3 — an IGNORED optional legacy parameter*, overriding `ChatDeps.supabase` only to
+   * keep the field documented here. Under A3 the write store is the owner-scoped Data_Access_Layer,
+   * scoped by the `userId` on each row rather than by an injected credential, so a caller supplies
+   * nothing. Kept so a call site still written against the old required-client signature keeps
+   * compiling through the port.
    */
-  readonly supabase: SupabaseClient<Database>;
-  /** Defaults to `chatWriteStoreFrom(supabase, createAdminClient())`, built on first use. */
+  readonly supabase?: unknown;
+  /** Defaults to `chatWriteStoreFrom()` — the Data_Access_Layer write store — built on first use. */
   readonly writes?: ChatWriteStore | undefined;
   /**
    * Step 2, Requirement 13.8. `/api/chat` binds `burstLimiter()` from `src/lib/rate-limit.ts`.
@@ -1245,7 +1216,7 @@ export async function chatTurn(
   const startedMs = now();
   const { userId, conversationId, language, channel } = input;
 
-  const writes = deps.writes ?? (await defaultWriteStore(deps.supabase));
+  const writes = deps.writes ?? chatWriteStoreFrom();
   const burst = deps.burst ?? noBurstCheck;
   const quotaOptions: QuotaOptions = deps.quota ?? {};
 
@@ -1540,9 +1511,11 @@ async function persistTurn(
   input: ChatInput,
   answer: PendingChatAnswer,
 ): Promise<PersistedTurn> {
+  // String-shaped rows: `conversationId` and `transcriptOf.fileId` are hex strings, and the
+  // Data_Access_Layer converts them to `ObjectId` on insert — so this service imports no driver.
   const shared = {
-    conversation_id: input.conversationId,
-    user_id: input.userId,
+    ownerId: input.userId,
+    conversationId: input.conversationId,
     channel: input.channel,
   } as const;
 
@@ -1552,15 +1525,19 @@ async function persistTurn(
       role: 'farmer',
       content: input.message,
       language: input.language,
-      input_kind: input.inputKind ?? 'text',
-      ...(input.transcriptOf === undefined ? {} : { transcript_of: input.transcriptOf }),
+      inputKind: input.inputKind ?? 'text',
+      // Requirement 8.9's provenance: the recording's Media_Reference. Present only on the voice
+      // path, where the caller supplied it; the layer converts `fileId` to an ObjectId.
+      ...(input.transcriptOf === undefined
+        ? {}
+        : { transcriptOf: { fileId: input.transcriptOf.fileId, kind: input.transcriptOf.kind } }),
     },
     {
       ...shared,
       role: 'jamee',
       content: answer.content,
       language: answer.language,
-      input_kind: 'text',
+      inputKind: 'text',
     },
   ]);
 
@@ -1580,7 +1557,7 @@ async function persistTurn(
     });
   }
 
-  return { farmerMessageId: farmer.id, answerMessageId: jamee.id };
+  return { farmerMessageId: farmer._id.toHexString(), answerMessageId: jamee._id.toHexString() };
 }
 
 /* ========================================================================== */
@@ -1622,13 +1599,8 @@ function isRateLimited(error: unknown): boolean {
 }
 
 /**
- * The default write store, built on first use.
- *
- * `createAdminClient()` is imported **lazily** so a caller that injects its own store — every unit
- * test — never reads `SUPABASE_SERVICE_ROLE_KEY`. Same reasoning as the lazy `createServerSupabase`
- * import in `serverStore()` above, applied to the other credential.
+ * *Amendment A3:* the former `defaultWriteStore(client)` — which built the store from a farmer
+ * client plus a lazily-imported service-role `createAdminClient()` for the append-only `usage_logs`
+ * write — is gone. Under A3 the write store is the owner-scoped Data_Access_Layer with no client at
+ * all, so `chatTurn` builds it inline as `chatWriteStoreFrom()`.
  */
-async function defaultWriteStore(client: SupabaseClient<Database>): Promise<ChatWriteStore> {
-  const { createAdminClient } = await import('@/lib/supabase/admin');
-  return chatWriteStoreFrom(client, createAdminClient());
-}

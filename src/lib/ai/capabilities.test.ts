@@ -46,7 +46,7 @@ function providerCall(overrides: Partial<ProviderCall> = {}): ProviderCall {
 }
 
 const VISION_CALL: VisionCall = {
-  imageUrl: 'https://storage.test/crop.jpg?token=abc',
+  imageBase64: 'aGVsbG8=',
   imageMimeType: 'image/jpeg',
   prompt: 'classify this leaf',
   responseSchema: { type: 'object' },
@@ -113,7 +113,7 @@ describe('visionAdapters', () => {
     // `GeminiOutput.status` is dropped: nothing above this layer may branch on a transport fact.
     expect(answer).toBe('{"status":"unclear","disease_name":null}');
     expect(gemini.calls[0]?.input).toEqual([
-      { type: 'image', uri: VISION_CALL.imageUrl, mime_type: 'image/jpeg' },
+      { type: 'image', data: VISION_CALL.imageBase64, mime_type: 'image/jpeg' },
       { type: 'text', text: VISION_CALL.prompt },
     ]);
     expect(gemini.calls[0]?.response_format.schema).toEqual(VISION_CALL.responseSchema);
@@ -132,12 +132,18 @@ describe('visionAdapters', () => {
     expect(groq.calls[0]?.model).toBe(VISION_MODEL);
     expect(groq.calls[0]?.messages[0]?.content).toEqual([
       { type: 'text', text: VISION_CALL.prompt },
-      { type: 'image_url', image_url: { url: VISION_CALL.imageUrl } },
+      {
+        type: 'image_url',
+        image_url: { url: `data:${VISION_CALL.imageMimeType};base64,${VISION_CALL.imageBase64}` },
+      },
     ]);
     // V9: the request is JSON-object mode, not schema-enforced — so `responseSchema` cannot travel,
     // and D2's stage-1 shape validation is the first check of any kind on this member.
     expect(groq.calls[0]?.response_format).toEqual({ type: 'json_object' });
-    expect(JSON.stringify(groq.calls[0])).not.toContain('image/jpeg');
+    // A3, V34: the Groq member wraps the bytes in a `data:<mime>;base64,<bytes>` URL, so the mime
+    // type IS part of the request here (it is the data URL's prefix) — the schema still does not
+    // travel, which is the fact this member's shape has to preserve.
+    expect(JSON.stringify(groq.calls[0])).not.toContain('"schema"');
   });
 });
 

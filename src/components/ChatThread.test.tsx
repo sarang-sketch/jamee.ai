@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest';
 import {
   CHAT_HEADING_ID,
   CHAT_MESSAGE_LIMIT,
-  CHAT_MESSAGES_SELECT,
   ChatThread,
   toChatTurns,
   type ChatMessageRow,
@@ -33,8 +32,8 @@ const FARMER_ROW: ChatMessageRow = {
   role: 'farmer',
   content: 'My tomato leaves have dark patches.',
   language: 'en',
-  input_kind: 'text',
-  created_at: '2026-09-15T06:00:00.000Z',
+  inputKind: 'text',
+  createdAt: '2026-09-15T06:00:00.000Z',
 };
 
 const ANSWER_ROW: ChatMessageRow = {
@@ -42,8 +41,8 @@ const ANSWER_ROW: ChatMessageRow = {
   role: 'jamee',
   content: 'Those patches suggest late blight. Remove the affected leaves.',
   language: 'en',
-  input_kind: 'text',
-  created_at: '2026-09-15T06:00:05.000Z',
+  inputKind: 'text',
+  createdAt: '2026-09-15T06:00:05.000Z',
 };
 
 const VOICE_ROW: ChatMessageRow = {
@@ -51,8 +50,8 @@ const VOICE_ROW: ChatMessageRow = {
   role: 'farmer',
   content: '\u092E\u093E\u091D\u094D\u092F\u093E \u091F\u094B\u092E\u0945\u091F\u094B\u0935\u0930 \u0921\u093E\u0917 \u0906\u0939\u0947\u0924.',
   language: 'mr',
-  input_kind: 'voice',
-  created_at: '2026-09-15T06:01:00.000Z',
+  inputKind: 'voice',
+  createdAt: '2026-09-15T06:01:00.000Z',
 };
 
 /** The rows as the query returns them: newest first. */
@@ -92,9 +91,9 @@ describe('toChatTurns', () => {
 
     expect(turns.map((turn) => turn.id)).toEqual([FARMER_ROW.id, ANSWER_ROW.id, VOICE_ROW.id]);
     expect(turns.map((turn) => turn.createdAt)).toEqual([
-      FARMER_ROW.created_at,
-      ANSWER_ROW.created_at,
-      VOICE_ROW.created_at,
+      FARMER_ROW.createdAt,
+      ANSWER_ROW.createdAt,
+      VOICE_ROW.createdAt,
     ]);
   });
 
@@ -132,14 +131,22 @@ describe('toChatTurns', () => {
 
 describe('the read contract', () => {
   /**
-   * The select must name every column `ChatTurn` is built from — and must not name
-   * `transcript_of`, which is a storage path this screen never reads.
+   * *Amendment A3:* there is no PostgREST select string any more — the chat shell reads `messages`
+   * through the owner-scoped Data_Access_Layer and maps each document to `ChatMessageRow`. The
+   * contract that remains is the view row's field set (which `toChatTurns` reads) and the bound.
    */
-  it('selects exactly the columns the thread renders', () => {
-    const columns = CHAT_MESSAGES_SELECT.split(',').map((column) => column.trim());
-
-    expect(columns).toEqual(['id', 'role', 'content', 'language', 'input_kind', 'created_at']);
-    expect(columns).not.toContain('transcript_of');
+  it('exposes exactly the fields the thread renders on a row', () => {
+    const row: ChatMessageRow = FARMER_ROW;
+    expect(Object.keys(row).sort()).toEqual([
+      'content',
+      'createdAt',
+      'id',
+      'inputKind',
+      'language',
+      'role',
+    ]);
+    // `transcriptOf` is not part of the view — a reference this screen never loads.
+    expect(Object.keys(row)).not.toContain('transcriptOf');
   });
 
   /** The bound drops the oldest messages, so it has to be large enough to be a bound. */
@@ -240,6 +247,6 @@ describe('ChatThread', () => {
   it('renders each turn\u2019s instant as a machine-readable time', () => {
     const markup = render(toChatTurns([FARMER_ROW])).toLowerCase();
 
-    expect(markup).toContain(`datetime="${FARMER_ROW.created_at.toLowerCase()}"`);
+    expect(markup).toContain(`datetime="${FARMER_ROW.createdAt.toLowerCase()}"`);
   });
 });

@@ -47,8 +47,8 @@ const STORED_ROW: ChatMessageRow = {
   role: 'farmer',
   content: 'What should I spray on my potatoes?',
   language: 'en',
-  input_kind: 'text',
-  created_at: '2026-09-15T06:00:00.000Z',
+  inputKind: 'text',
+  createdAt: '2026-09-15T06:00:00.000Z',
 };
 
 function chatResponse(overrides: Partial<ChatResponse> = {}): ChatResponse {

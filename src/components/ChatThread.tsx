@@ -1,7 +1,6 @@
 import { messages } from '@/lib/messages';
 import type { InputKind, Language, MessageRole } from '@/lib/schemas';
 import { formatInstant } from '@/lib/time';
-import type { MessageRow } from '@/types/database';
 
 import styles from './ChatThread.module.css';
 
@@ -19,12 +18,12 @@ import styles from './ChatThread.module.css';
  * ### Deliberately NOT a client component
  *
  * There is no `'use client'` here, and that is load-bearing rather than an omission. The server
- * shell (`src/app/chat/page.tsx`) imports `CHAT_MESSAGES_SELECT`, `CHAT_MESSAGE_LIMIT` and
- * `toChatTurns` and calls them **during the server render**; every export of a `'use client'`
- * module becomes a client reference when a server component imports it, so the select string
- * would arrive as a proxy and `toChatTurns` would throw. Keeping this module directive-free lets
- * one file hold the read contract and the rendering of what it returns, and `ChatComposer`
- * (which *is* a client component) pulls it into the browser bundle by importing it.
+ * shell (`src/app/chat/page.tsx`) imports `CHAT_MESSAGE_LIMIT` and `toChatTurns` and calls them
+ * **during the server render**; every export of a `'use client'` module becomes a client reference
+ * when a server component imports it, so `toChatTurns` would arrive as a proxy and throw. Keeping
+ * this module directive-free lets one file hold the view contract and the rendering of what it
+ * returns, and `ChatComposer` (which *is* a client component) pulls it into the browser bundle by
+ * importing it.
  *
  * Everything imported here is isomorphic for the same reason: the catalogs are literals and
  * `formatInstant` is `Intl` pinned to `Asia/Kolkata`, so a server render and a client render of
@@ -44,20 +43,25 @@ import styles from './ChatThread.module.css';
 /* ========================================================================== */
 
 /**
- * The `messages` columns the thread needs.
+ * The message fields the thread renders, as an Amendment A3 view row.
  *
- * Enumerated rather than `*`, and `as const` rather than a widened `string`: PostgREST parses the
- * select string at the **type** level, so this literal is what makes the row type below checkable
- * at the call site. `transcript_of` stays out — it is a storage path, and a path to an object this
- * screen never reads has no business in a page's props.
+ * *Amended by A3:* this was a `Pick<MessageRow, …>` paired with a PostgREST `CHAT_MESSAGES_SELECT`
+ * string. Under A3 there is no PostgREST and no Supabase row type — the chat server shell reads
+ * `messages` through the owner-scoped Data_Access_Layer and maps each `MessageDoc` to this shape.
+ * So the select-string export is gone (nothing parses one now), and this is a small explicit view
+ * model in the fields the thread actually uses: the row `id` as a hex string, `role`, `content`,
+ * the stored `language`, the `inputKind`, and the `createdAt` instant as ISO-8601. `transcriptOf`
+ * stays out — a reference to a recording this screen never loads has no business in a page's props.
  */
-export const CHAT_MESSAGES_SELECT =
-  'id, role, content, language, input_kind, created_at' as const;
-
-export type ChatMessageRow = Pick<
-  MessageRow,
-  'id' | 'role' | 'content' | 'language' | 'input_kind' | 'created_at'
->;
+export interface ChatMessageRow {
+  id: string;
+  role: MessageRole;
+  content: string;
+  language: Language;
+  inputKind: InputKind;
+  /** ISO-8601 — `messages.createdAt` rendered by `formatInstant`. */
+  createdAt: string;
+}
 
 /**
  * How many stored messages the screen loads.
@@ -136,8 +140,8 @@ export function toChatTurns(rowsNewestFirst: readonly ChatMessageRow[]): ChatTur
     role: row.role,
     content: row.content,
     language: row.language,
-    inputKind: row.input_kind,
-    createdAt: row.created_at,
+    inputKind: row.inputKind,
+    createdAt: row.createdAt,
   }));
 }
 

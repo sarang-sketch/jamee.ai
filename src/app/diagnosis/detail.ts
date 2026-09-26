@@ -1,18 +1,16 @@
-import { QUOTA_TIME_ZONE } from '@/lib/time';
-import {
-  signedUrlOrNull,
-  thumbRefFor,
-  type StorageClientLike,
-} from '@/lib/storage';
+import type { DiagnosisDoc } from '@/lib/db/collections';
+import type { DiagnosisRecord, FarmerReads, MessageRecord } from '@/lib/db/reads';
+import { mediaUrl } from '@/lib/media/url';
 import type {
   Channel,
+  InputKind,
   KnowledgePayload,
   Language,
+  MessageRole,
   Severity,
-  StorageRef,
   VerifiedCondition,
 } from '@/lib/schemas';
-import type { DiagnosisRow, MessageRow } from '@/types/database';
+import { QUOTA_TIME_ZONE } from '@/lib/time';
 
 /**
  * Everything the diagnosis detail screen decides, separated from how it renders.
@@ -20,89 +18,86 @@ import type { DiagnosisRow, MessageRow } from '@/types/database';
  * Requirements: 12.3 (the detail view carries the crop image, the reported condition or the
  *               inconclusive label, the confidence value, the Severity_Value, the full
  *               explanation, and the related Conversation messages), 12.5 (a stored image or
- *               thumbnail is loaded through a Signed_URL), 12.8 / 12.9 / 12.10 (which image, and
- *               what to say when it is gone), 12.11 (every remaining field still renders),
- *               6.5 (an inconclusive result carries no disease name and no treatment content),
- *               9.4 (the Canonical_Disease_Name is never translated)
- * Design: "Media lifecycle and retention"; "Frontend" — `diagnosis/[id]/page.tsx`
+ *               thumbnail is loaded through the Media_Endpoint, Amendment A3), 12.8 / 12.9 / 12.10
+ *               (which image, and what to say when it is gone), 12.11 (every remaining field still
+ *               renders), 6.5 (an inconclusive result carries no disease name and no treatment
+ *               content), 9.4 (the Canonical_Disease_Name is never translated)
+ * Design: "Media lifecycle and retention"; "Frontend" — `diagnosis/[id]/page.tsx`; D17, D18,
+ *          Amendment A3 (the browser reads a file through the Media_Endpoint, not a Signed_URL)
  *
  * ### Why this is a module and not the page body
  *
- * Three of the four decisions here are worth asserting directly, and none of them needs React to
- * be true: which of the row's two shapes it is, which image to read, and how a confidence value
- * reads to a farmer. An `async` server component is not a unit-testable function — so the page
- * awaits two queries and hands the rows to `toDiagnosisDetail`, and `detail.test.ts` covers the
- * branches without a request, a cookie store, or a Supabase client.
+ * Three of the four decisions here are worth asserting directly, and none needs React to be true:
+ * which of the row's two shapes it is, which image to read, and how a confidence value reads to a
+ * farmer. An `async` server component is not a unit-testable function — so the page awaits two
+ * reads and hands the documents to `toDiagnosisDetail` / `resolveDetailImage`, and `detail.test.ts`
+ * covers the branches without a request, a cookie store, or a database.
  *
  * It lives in `src/app/diagnosis/` rather than `src/lib/` because nothing outside this screen
  * consumes it, and because `[id]/` is a dynamic-segment directory whose brackets are a character
  * class to a glob — the test runner's `src/**` pattern reaches this path without that hazard.
+ *
+ * =============================================================================
+ * AMENDMENT A3 — THE DATA_ACCESS_LAYER AND THE MEDIA_ENDPOINT REPLACE SUPABASE
+ * =============================================================================
+ *
+ * Under Supabase this module took PostgREST select strings and a storage client, minted a
+ * Signed_URL, derived the thumbnail path by convention and probed storage for presence. Under A3
+ * there is neither PostgREST nor Storage: the page reads the diagnosis and its messages through the
+ * owner-scoped Data_Access_Layer, so this module takes the layer's DOCUMENTS, and the image is the
+ * constant `/api/media/<fileId>` from `mediaUrl` (no minting, no expiry, no probe). Thumbnail
+ * presence is a stored link — the derivative's `metadata.sourceRef` — resolved by
+ * `FarmerReads.thumbnailFileIdFor`, not a derived path plus an `exists()` call.
  */
 
 /* ========================================================================== */
-/* The two reads, as column lists                                              */
+/* How many messages the thread renders                                        */
 /* ========================================================================== */
-
-/**
- * The `diagnoses` columns this screen reads.
- *
- * Enumerated rather than `*` for the reason `profile.ts` gives about `PROFILE_SETTINGS_SELECT`:
- * PostgREST parses the select string at the **type** level, so this literal is what makes the row
- * type below checkable — and a screen that never selects `knowledge_id` or `model_provider`
- * cannot leak Jamee's internals into a rendered page.
- *
- * `full_image_deleted_at` is the load-bearing one. The design chose a column read over a storage
- * probe precisely so "deleted by policy" is distinguishable from "missing unexpectedly", and
- * Requirements 12.8–12.10 turn on that distinction.
- */
-export const DIAGNOSIS_DETAIL_SELECT =
-  'id, user_id, conversation_id, status, disease_name, confidence, severity, explanation, language, needs_expert, channel, image_bucket, image_path, full_image_deleted_at, created_at' as const;
-
-export type DiagnosisDetailRow = Pick<
-  DiagnosisRow,
-  | 'id'
-  | 'user_id'
-  | 'conversation_id'
-  | 'status'
-  | 'disease_name'
-  | 'confidence'
-  | 'severity'
-  | 'explanation'
-  | 'language'
-  | 'needs_expert'
-  | 'channel'
-  | 'image_bucket'
-  | 'image_path'
-  | 'full_image_deleted_at'
-  | 'created_at'
->;
-
-/**
- * The `messages` columns the thread needs. `transcript_of` is a storage path, so it stays out.
- *
- * `as const` for the same reason as above: PostgREST derives the row type from this literal, and
- * a widened `string` makes the call site stop compiling rather than silently returning `any`.
- */
-export const DIAGNOSIS_MESSAGES_SELECT =
-  'id, role, content, language, input_kind, created_at' as const;
-
-export type DiagnosisMessageRow = Pick<
-  MessageRow,
-  'id' | 'role' | 'content' | 'language' | 'input_kind' | 'created_at'
->;
 
 /**
  * How many messages of the conversation the detail view renders, newest-first at the read and
  * chronological on the page.
  *
  * Requirement 12.3 says "the related Conversation messages" and does not bound them, but a
- * WhatsApp conversation is one long-running thread per farmer (`conversation.service.ts`), so the
- * row count grows without limit while the screen's usefulness does not. At 50 chat messages a day
- * (Requirement 14.1) this is several days of continuous conversation, and the messages a farmer
- * came back for are the recent ones — so the bound drops the oldest rather than truncating the
- * end a farmer is reading toward.
+ * conversation is one long-running thread per farmer per channel (`conversation.service.ts`), so
+ * the row count grows without limit while the screen's usefulness does not. At 50 chat messages a
+ * day (Requirement 14.1) this is several days of continuous conversation, and the messages a farmer
+ * came back for are the recent ones — so the bound drops the oldest rather than truncating the end
+ * a farmer is reading toward. `CHAT_MESSAGE_LIMIT` in `ChatThread.tsx` happens to carry the same
+ * number for its own screen; they are separate bounds on separate reads.
  */
 export const DETAIL_MESSAGE_LIMIT = 200;
+
+/* ========================================================================== */
+/* The message view row                                                        */
+/* ========================================================================== */
+
+/**
+ * One conversation message as the detail thread renders it — an Amendment A3 view row, mapped from
+ * a `MessageDoc` by the page. `transcriptOf` stays out: a reference to a recording this screen
+ * never loads has no business in a page's props.
+ */
+export interface DiagnosisMessageRow {
+  id: string;
+  role: MessageRole;
+  content: string;
+  language: Language;
+  inputKind: InputKind;
+  /** ISO-8601 — `messages.createdAt` rendered by `formatTimestamp`. */
+  createdAt: string;
+}
+
+/** Map a Data_Access_Layer message document to the detail thread's view row. */
+export function toDiagnosisMessageRow(doc: MessageRecord): DiagnosisMessageRow {
+  return {
+    id: doc._id.toHexString(),
+    role: doc.role,
+    content: doc.content,
+    language: doc.language,
+    inputKind: doc.inputKind,
+    createdAt: doc.createdAt.toISOString(),
+  };
+}
 
 /* ========================================================================== */
 /* The view model — one discriminated union, mirroring `diagnosisResultSchema`  */
@@ -125,21 +120,18 @@ interface DiagnosisDetailCommon {
  * The detail view of one diagnosis, in the same two shapes the domain result takes.
  *
  * **The union is what enforces Requirement 6.5 at the UI layer**, and it is the reason this
- * function exists at all rather than the page reading `row.disease_name` directly:
+ * function exists at all rather than the page reading `doc.diseaseName` directly:
  *
  *  - `diseaseName: null` and `confidence: null` are *literal* `null` on the inconclusive branch,
  *    so `detail.diseaseName.toUpperCase()` and `formatConfidence(detail.confidence)` are compile
  *    errors there. The rejected model's name and confidence were discarded when the row was
- *    written (`diagnoses_unknown_shape` in migration `0005`); this keeps them un-renderable too.
+ *    written (`diagnoses_unknown_shape`); this keeps them un-renderable too.
  *  - `knowledge: null` on the inconclusive branch means **the compiler refuses treatment text for
- *    an inconclusive result.** There is no cast that reaches it and no optional chain that
- *    survives it — `null` is not an empty payload, which is exactly the point `schemas.ts` makes
- *    about `inconclusiveResultSchema`.
+ *    an inconclusive result.**
  *
- * `knowledge` is `KnowledgePayload | null` on the *identified* branch rather than required,
- * because the row and the knowledge base are two reads: a deployment whose seed migration has not
- * run returns `{ found: false }` from `lookupCondition`, and Requirement 12.11 still wants every
- * other field on the screen. So a missing entry costs the grounded sections and nothing else.
+ * `knowledge` is `KnowledgePayload | null` on the *identified* branch rather than required, because
+ * the row and the knowledge base are two reads: a deployment whose seed has not run returns
+ * `{ found: false }` from `lookupCondition`, and Requirement 12.11 still wants every other field.
  */
 export type DiagnosisDetail =
   | (DiagnosisDetailCommon & {
@@ -157,50 +149,43 @@ export type DiagnosisDetail =
     });
 
 /**
- * A `diagnoses` row as the screen sees it, or `null` when the row contradicts its own status.
+ * A `diagnoses` document as the screen sees it, or `null` when the row contradicts its own status.
  *
- * `null` rather than a thrown error, and rather than a cast. The two check constraints in
- * migration `0005` already make an identified row without a `disease_name` unwritable, so
- * reaching that branch means the database and this code disagree about the shape of a row — and
- * the honest answer to "show me a row Jamee cannot interpret" is the same 404 as "show me a row
- * that is not yours" (the page calls `notFound()` on both). Reporting it as a 500 would tell a
- * farmer Jamee is broken about a row nobody can act on; asserting past it with
- * `row.disease_name as VerifiedCondition` would put `null` on the screen where a condition name
- * belongs.
- *
- * `confidence` is checked the same way. It is `numeric(4,3)` and nullable, and Requirement 12.3
- * lists it as a field of the detail view, so an identified row that lost it is the same kind of
- * contradiction as one that lost its name.
+ * `null` rather than a thrown error, and rather than a cast. The setup validator makes an
+ * identified row without a `diseaseName` unwritable, so reaching that branch means the database and
+ * this code disagree about the shape of a row — and the honest answer to "show me a row Jamee
+ * cannot interpret" is the same 404 as "show me a row that is not yours" (the page calls
+ * `notFound()` on both).
  */
 export function toDiagnosisDetail(
-  row: DiagnosisDetailRow,
+  doc: DiagnosisRecord,
   knowledge: KnowledgePayload | null,
 ): DiagnosisDetail | null {
   const common: DiagnosisDetailCommon = {
-    id: row.id,
-    conversationId: row.conversation_id,
-    severity: row.severity,
-    explanation: row.explanation,
-    language: row.language,
-    channel: row.channel,
-    createdAt: row.created_at,
-    needsExpert: row.needs_expert,
+    id: doc._id.toHexString(),
+    conversationId: doc.conversationId.toHexString(),
+    severity: doc.severity,
+    explanation: doc.explanation,
+    language: doc.language,
+    channel: doc.channel,
+    createdAt: doc.createdAt.toISOString(),
+    needsExpert: doc.needsExpert,
   };
 
-  if (row.status === 'unknown') {
-    // Requirement 6.5. The row cannot carry these (`diagnoses_unknown_shape`), and pinning them
-    // to `null` here is what stops the render from reintroducing them.
-    if (row.disease_name !== null || row.confidence !== null) return null;
+  if (doc.status === 'unknown') {
+    // Requirement 6.5. The row cannot carry these (`diagnoses_unknown_shape`), and pinning them to
+    // `null` here is what stops the render from reintroducing them.
+    if ((doc.diseaseName ?? null) !== null || (doc.confidence ?? null) !== null) return null;
     return { ...common, status: 'unknown', diseaseName: null, confidence: null, knowledge: null };
   }
 
-  if (row.disease_name === null || row.confidence === null) return null;
+  if ((doc.diseaseName ?? null) === null || (doc.confidence ?? null) === null) return null;
 
   return {
     ...common,
     status: 'identified',
-    diseaseName: row.disease_name,
-    confidence: row.confidence,
+    diseaseName: doc.diseaseName as VerifiedCondition,
+    confidence: doc.confidence as number,
     knowledge,
   };
 }
@@ -224,88 +209,47 @@ export type DetailImage =
   /** 12.10 — neither derivative is present. */
   | { readonly kind: 'none' };
 
-type ImageRowFields = Pick<
-  DiagnosisDetailRow,
-  'image_bucket' | 'image_path' | 'full_image_deleted_at'
->;
-
 /**
- * Resolve the one image this screen shows, preferring the full-size original.
+ * Resolve the one image this screen shows, **preferring the Full_Size_Image** (Requirement 12.8).
  *
- * ### The order, and what each step is allowed to conclude
+ * ### The order, and what each step is allowed to conclude — the opposite of the history list
  *
- * 1. **`full_image_deleted_at !== null` skips the original entirely.** The sweep stamped it
- *    (Requirement 18.7), so the object is gone by policy and probing for it would be a round trip
- *    spent confirming what the row already states. This is the column read the design chose over
- *    a probe.
- * 2. **Otherwise the original is probed, then signed.** The probe is `exists()`, whose three-way
- *    behaviour `storage.ts` documents against the pinned SDK. It is here because
- *    `createSignedUrl` signs a *path*: V3 does not say it fails for a missing object, and a URL
- *    minted over nothing renders as a broken-image icon instead of Requirement 12.10's sentence.
- *    One probe per detail render is affordable — the design's objection to probing was about
- *    paying it per row on the history *list*.
- * 3. **The thumbnail is the fallback, and it is derived, never stored.** `thumbRefFor()` is the
- *    single source of that convention (Requirement 2.13), which is why `image_path` is left
- *    intact after the sweep.
- * 4. **Absent thumbnail is a real, ordinary state.** A WhatsApp-originated diagnosis never had
- *    one — the derivative is produced in the browser (Requirement 2.13) — so past the retention
- *    window those entries land on 12.10 rather than on 12.9. The same is true for a web upload
- *    whose thumbnail upload failed after the original succeeded (Requirement 2.14).
+ * The list prefers the thumbnail (Requirement 12.6, a storage-budget rule for 20 rows at once);
+ * the detail view prefers the original (Requirement 12.8), because this is where a farmer looks
+ * closely at a lesion. Both share the primitive — `mediaUrl(fileId)`, the one spelling of
+ * `/api/media/<fileId>`.
  *
- * A signing failure while the row says the object is present collapses into the absent branch, on
- * the same reasoning `signedUrlOrNull` gives for returning `null`: the view's question is "can
- * this be shown", and it already has honest copy for "no". The alternative would be a fourth
- * state with a fourth sentence in three catalogs, for a transport failure a reload fixes.
+ * 1. **`fullImageDeletedAt == null` ⇒ the original is present.** A `diagnoses` document exists only
+ *    because an upload succeeded, and this column is the sweep's own record of whether the original
+ *    was later deleted (Requirement 18.7). Absent stamp ⇒ present original ⇒ its URL. No probe: the
+ *    Media_Endpoint is the one owner check, and a URL to a file that briefly cannot be read degrades
+ *    to that endpoint's answer rather than to a fourth state here.
+ * 2. **Swept original ⇒ fall back to the Thumbnail_Derivative** (Requirement 12.9), resolved by its
+ *    stored `metadata.sourceRef` link (`thumbnailFileIdFor`), owner-scoped. A thumbnail is never
+ *    deleted (Requirement 18.5), so it can survive the original.
+ * 3. **No thumbnail either ⇒ no image** (Requirement 12.10). A Telegram-originated diagnosis never
+ *    had one (the derivative is produced in the browser), and a web upload whose thumbnail failed
+ *    after the original succeeded (Requirement 2.14) lands here too once the original is swept.
  */
 export async function resolveDetailImage(
-  row: ImageRowFields,
-  client: StorageClientLike,
+  doc: Pick<DiagnosisDoc, 'mediaRef' | 'fullImageDeletedAt'>,
+  reads: Pick<FarmerReads, 'thumbnailFileIdFor'>,
 ): Promise<DetailImage> {
-  const original: StorageRef = { bucket: row.image_bucket, path: row.image_path };
+  const fullImageFileId = doc.mediaRef.fileId.toHexString();
 
-  if (row.full_image_deleted_at === null && (await objectExists(original, client))) {
-    const url = await signedUrlOrNull(original, client);
-    if (url !== null) return { kind: 'full', url };
+  /** Requirement 12.8 — the original is present unless the sweep stamped it gone. */
+  if (doc.fullImageDeletedAt === null || doc.fullImageDeletedAt === undefined) {
+    return { kind: 'full', url: mediaUrl(fullImageFileId) };
   }
 
-  const thumbnail = thumbnailRefOrNull(original);
-  if (thumbnail !== null && (await objectExists(thumbnail, client))) {
-    const url = await signedUrlOrNull(thumbnail, client);
-    if (url !== null) return { kind: 'thumbnail', url };
+  /** Requirement 12.9 — the original is gone by policy; the derivative may survive it. */
+  const thumbnailFileId = await reads.thumbnailFileIdFor(fullImageFileId);
+  if (thumbnailFileId !== null) {
+    return { kind: 'thumbnail', url: mediaUrl(thumbnailFileId) };
   }
 
+  /** Requirement 12.10 — neither survives. */
   return { kind: 'none' };
-}
-
-/**
- * `thumbRefFor` throws on a path with no extension, which every stored path has by
- * `storageRefSchema`. A row that somehow does not is a corrupt row, not a reason to fail the
- * render — it simply has no derivable thumbnail, which is Requirement 12.10's state.
- */
-function thumbnailRefOrNull(ref: StorageRef): StorageRef | null {
-  try {
-    return thumbRefFor(ref);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Present, as far as the storage service will say.
- *
- * `{ data: false }` is what the pinned SDK returns for 400 and 404, so absence arrives as a value
- * rather than as a throw. Anything that does throw — a transport failure, a misconfigured policy —
- * is not evidence of presence either, and this view has copy for absence, so it is reported as
- * absent rather than escalated. `assertOwnership()` in `storage.ts` makes the opposite choice for
- * the same call, because there a failed probe must not be reported as "you do not own this".
- */
-async function objectExists(ref: StorageRef, client: StorageClientLike): Promise<boolean> {
-  try {
-    const { data } = await client.storage.from(ref.bucket).exists(ref.path);
-    return data;
-  } catch {
-    return false;
-  }
 }
 
 /* ========================================================================== */
@@ -313,20 +257,16 @@ async function objectExists(ref: StorageRef, client: StorageClientLike): Promise
 /* ========================================================================== */
 
 /**
- * A stored confidence — `numeric(4,3)`, so `0` to `1` — as a whole-number percentage.
+ * A stored confidence — `0` to `1` — as a whole-number percentage.
  *
  * A percentage rather than `0.87`, because a farmer reads "87%" and does not read a decimal
- * fraction. Rounded to a whole number for the same reason: the third decimal place of a model's
- * self-reported confidence is not information, and printing it would suggest it is.
+ * fraction. Rounded to a whole number for the same reason. Deliberately **not**
+ * `Intl.NumberFormat`: its percent style inserts locale-specific spacing and can select a
+ * non-Latin numbering system, and a plain `%` is what the three catalogs' own numeric copy uses.
  *
- * Deliberately **not** `Intl.NumberFormat`. Its percent style inserts locale-specific spacing and
- * can select a non-Latin numbering system, and this string is rendered on the server for a farmer
- * whose locale Jamee tracks as a *language* choice, not a formatting one. A plain `%` is what the
- * three catalogs' own numeric copy already uses.
- *
- * The clamp is not defensive noise about the database: `diagnoses.confidence` has a
- * `between 0 and 1` check, so a value outside it means a caller passed something that is not a
- * stored confidence, and reading "1400%" as a confidence would be worse than reading "100%".
+ * The clamp is not defensive noise: `confidence` is validated `between 0 and 1`, so a value outside
+ * it means a caller passed something that is not a stored confidence, and reading "1400%" would be
+ * worse than "100%".
  */
 export function formatConfidence(confidence: number): string {
   const clamped = Math.min(1, Math.max(0, confidence));
@@ -334,18 +274,13 @@ export function formatConfidence(confidence: number): string {
 }
 
 /**
- * A stored `timestamptz` as a date and time a farmer can place, in Asia/Kolkata.
+ * A stored instant as a date and time a farmer can place, in Asia/Kolkata.
  *
- * The zone is `QUOTA_TIME_ZONE` from `time.ts` rather than a second literal — not because a
- * rendered date participates in quota accounting (it does not), but because Jamee has exactly one
- * answer to "what clock is a farmer on", and two spellings of `Asia/Kolkata` would be two answers.
- * A server render has no access to the browser's zone, so a fixed regional zone is the honest
- * choice over UTC, which would show a 5.5-hour-old timestamp as the wrong day after 18:30 local.
- *
- * `language` picks the locale so month names and digit order follow the text around them. An
- * unparseable value returns the input unchanged: a detail view is not the place to fail over a
- * timestamp, and Requirement 12.11's "present every remaining field" applies to the rest of the
- * screen regardless.
+ * The zone is `QUOTA_TIME_ZONE` from `time.ts` rather than a second literal — Jamee has one answer
+ * to "what clock is a farmer on". A server render has no access to the browser's zone, so a fixed
+ * regional zone is the honest choice over UTC. `language` picks the locale so month names and digit
+ * order follow the text around them. An unparseable value returns the input unchanged: a detail
+ * view is not the place to fail over a timestamp (Requirement 12.11).
  */
 export function formatTimestamp(iso: string, language: Language): string {
   const parsed = new Date(iso);
@@ -362,15 +297,12 @@ export function formatTimestamp(iso: string, language: Language): string {
  * ### What is deliberately NOT here
  *
  * **No retention arithmetic, and no import of `MEDIA_RETENTION_DAYS`.** The screen never computes
- * whether an image *should* be gone; it reads whether it *is*. A view that recomputed the cutoff
- * would disagree with the sweep the first time the constant changed, and the row's
- * `full_image_deleted_at` is the record of what actually happened (Requirement 18.7). The window
- * lives in `src/lib/config/media.ts`, which is where a reader should go for it.
+ * whether an image *should* be gone; it reads whether it *is* — `fullImageDeletedAt` is the record
+ * of what actually happened (Requirement 18.7).
  *
- * **No `DiagnosisResult` construction.** Building the domain union from a row would mean
- * re-validating stored content through `diagnosisResultSchema`, and its `knowledge` field is
- * required on the identified branch — which would turn an unseeded knowledge base into a render
- * failure instead of a screen missing its grounded sections. The union above carries the same
- * guarantee for the field that matters (`knowledge: null` on the inconclusive branch) without
- * making the knowledge read load-bearing.
+ * **No `DiagnosisResult` construction.** Building the domain union from a row would re-validate
+ * stored content through `diagnosisResultSchema`, whose `knowledge` field is required on the
+ * identified branch — turning an unseeded knowledge base into a render failure instead of a screen
+ * missing its grounded sections. The union above carries the guarantee that matters
+ * (`knowledge: null` on the inconclusive branch) without making the knowledge read load-bearing.
  */

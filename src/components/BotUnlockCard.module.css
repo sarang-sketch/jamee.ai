@@ -1,0 +1,65 @@
+/*
+ * Bot recharge card styles.
+ *
+ * Design: "Mobile layout and accessibility" — single column, tap targets at least 44×44 px, body
+ * text in relative units, contrast at WCAG 2.1 AA, and no time-driven CSS (Requirement 15.2). The
+ * same rules `TelegramLinkCard.module.css` and `ProfileForm.module.css` follow.
+ */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  background-color: #ffffff;
+}
+
+.heading {
+  margin: 0;
+  font-size: 1.25rem;
+  line-height: var(--line-height-tight);
+}
+
+.state {
+  margin: 0;
+  min-height: 1.5rem;
+  color: #374151;
+}
+
+.testNote {
+  margin: 0;
+  /* Smaller and muted, but still AA against white: an aside, not the message. */
+  font-size: 0.9375rem;
+  color: #4b5563;
+}
+
+.errorSlot {
+  margin: 0;
+}
+
+.primary {
+  min-height: var(--tap-target-min);
+  min-width: var(--tap-target-min);
+  padding: 0.625rem 1rem;
+  font-family: inherit;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  /* #15803d under #ffffff text is ≈5:1 — above the 4.5:1 AA threshold. */
+  color: #ffffff;
+  background-color: #15803d;
+  border: 1px solid #15803d;
+  border-radius: 0.375rem;
+  cursor: pointer;
+}
+
+.primary:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.primary:focus-visible {
+  outline: 3px solid #0f766e;
+  outline-offset: 2px;
+}

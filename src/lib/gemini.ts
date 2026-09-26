@@ -232,14 +232,19 @@ export type JsonSchema = Record<string, unknown>;
  * One content block of an Interactions API input.
  *
  * V6 records three ways to pass an image: a Files API `uri` + `mime_type`, inline base64, or a
- * public URL. Jamee uses the `uri` form with the signed URL `storage.ts` mints, so the image bytes
- * are fetched provider-side and **never read into this process** — the whole point of D1's
- * upload-then-post-a-reference shape, and what keeps a 10 MB photo away from a 4.5 MB request body
- * ceiling (V16).
+ * public URL. **Amendment A3 switches Jamee to the inline form** (`{ type: 'image', data:
+ * <base64>, mime_type }`, V34): the analysis reads the Full_Size_Image bytes from GridFS through
+ * the Data_Access_Layer and hands them to the model directly, because there is no Supabase Storage
+ * and therefore no signed URL to fetch provider-side. Jamee's own re-encode targets the ~400 KB
+ * Downscale_Target, so a compliant image is far under any plausible inline limit (U-V34 records
+ * that Gemini publishes no explicit inline size, and the Groq 20 MB request cap is enforced in
+ * `groq.ts`). The `uri` form is retained on the union so a caller that still holds a URL — none
+ * today — remains expressible; the vision adapter below sends the inline form.
  */
 export type GeminiContentPart =
   | { readonly type: 'text'; readonly text: string }
-  | { readonly type: 'image'; readonly uri: string; readonly mime_type: string };
+  | { readonly type: 'image'; readonly uri: string; readonly mime_type: string }
+  | { readonly type: 'image'; readonly data: string; readonly mime_type: string };
 
 /** V7: JSON output is requested with a `response_format` carrying the MIME type and the schema. */
 export interface GeminiResponseFormat {
@@ -407,10 +412,17 @@ function sdkInteractionCreate(
 /* The adapters                                                                */
 /* ========================================================================== */
 
-/** The signed image URL and the prompt for one classification. Bytes are never read here. */
+/** The image bytes and the prompt for one classification. Under A3 the bytes are sent inline. */
 export interface GeminiVisionInput {
-  /** A signed, time-limited URL from `storage.ts` (V3). */
-  readonly imageUrl: string;
+  /**
+   * The Full_Size_Image bytes, base64-encoded — the `data` half of V34's inline content part.
+   *
+   * **Amendment A3:** the analysis reads these from GridFS through the Data_Access_Layer and hands
+   * them to the model inline, rather than minting a signed URL for the provider to fetch. There is
+   * no Supabase Storage under A3, so there is no URL to mint; `imageBase64` is the successor to the
+   * retired `imageUrl` field.
+   */
+  readonly imageBase64: string;
   /** The object's MIME type, from the admission check (`ACCEPTED_IMAGE_TYPES`). */
   readonly imageMimeType: string;
   readonly prompt: string;
@@ -506,9 +518,11 @@ async function invokeInteraction(
  * `vision-classify` on Gemini — the primary member of that chain.
  *
  * The image part comes first and the prompt second, and the response format is JSON against the
- * caller's schema. Requirement 3.1 is satisfied by the request, not by the wording: V7 records that
- * Gemini's structured output is schema-enforced, and also that the output is only *syntactically*
- * guaranteed — which is why D2 still validates twice downstream.
+ * caller's schema. **Amendment A3:** the image part is the inline `{ type: 'image', data, mime_type }`
+ * form (V34) carrying the base64 bytes the analysis read from GridFS, not a `uri`. Requirement 3.1
+ * is satisfied by the request, not by the wording: V7 records that Gemini's structured output is
+ * schema-enforced, and also that the output is only *syntactically* guaranteed — which is why D2
+ * still validates twice downstream.
  */
 export function geminiVisionAdapter(
   deps: GeminiAdapterDeps = {},
@@ -523,7 +537,7 @@ export function geminiVisionAdapter(
       const request: GeminiInteractionRequest = {
         model: GEMINI_MODEL,
         input: [
-          { type: 'image', uri: input.imageUrl, mime_type: input.imageMimeType },
+          { type: 'image', data: input.imageBase64, mime_type: input.imageMimeType },
           { type: 'text', text: input.prompt },
         ],
         generation_config: generationConfig(

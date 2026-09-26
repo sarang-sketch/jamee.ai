@@ -4,8 +4,6 @@ import { parseJsonBody, type IssueMapper } from '@/lib/api/request-body';
 import { withErrorHandling } from '@/lib/errors';
 import { burstLimiter } from '@/lib/rate-limit';
 import { voiceRequestSchema, type Language, type VoiceResponse } from '@/lib/schemas';
-import { objectSizeOf } from '@/lib/storage';
-import { createServerSupabase } from '@/lib/supabase/server';
 import { chatAnswerer } from '@/services/chat.service';
 import { transcribeAndAnswer, voiceRequestDeadline } from '@/services/voice.service';
 
@@ -221,8 +219,6 @@ export const POST = authenticatedRoute(async (request, session) => {
    */
   return withErrorHandling(
     async () => {
-      const supabase = await createServerSupabase();
-
       /**
        * One deadline, computed once, for transcription *and* the answer it produces. See the module
        * header; `runOptions` is the nested turn's only channel for it.
@@ -230,49 +226,40 @@ export const POST = authenticatedRoute(async (request, session) => {
       const deadlineMs = voiceRequestDeadline({ requestStartMs: Date.now() });
       const runOptions: RunOptions = { deadlineMs };
 
-      /** The size half of Requirement 8.2 — see the section comment above on where it comes from. */
-      const bytes = await objectSizeOf(body.audio, supabase);
-
       /**
        * The one service call.
        *
        * `channel: 'web'` is a literal because `VoiceInput.channel` is required (Requirement 16.5)
-       * and this route is only ever the web channel; the WhatsApp adapter passes its own.
-       * `durationSeconds` is the browser's measurement, already bounded by the schema and re-checked
-       * inside the service. `mimeType` and `bytes` are spread conditionally rather than passed as
-       * `undefined`, which `exactOptionalPropertyTypes` distinguishes.
+       * and this route is only ever the web channel. Under Amendment A3 the body carries a `voice`
+       * Media_Reference, not a storage path: the service reads the recording's bytes from GridFS
+       * through the Data_Access_Layer and sends them to the transcription provider as `file` — this
+       * route holds no client and passes no bytes (D1). The recording's size was already admitted at
+       * the Media_Endpoint against `MAX_AUDIO_BYTES` (A3), so there is no size probe here; the
+       * service re-checks the byte length it read against the same cap. `mimeType` is spread
+       * conditionally rather than passed as `undefined`, which `exactOptionalPropertyTypes`
+       * distinguishes.
        *
-       * `chat: chatAnswerer({ supabase, runOptions })` is the nested `ChatService`, bound to this
-       * request's credential and this request's budget. The reservation travels separately — the
-       * service hands the nested call `coveredBy()` on the voice unit it took — so nothing here can
-       * turn one voice message into two spent units.
-       *
-       * Everything a farmer sees comes back from here, including `TRANSCRIPT_EMPTY` (Requirement
-       * 8.7), whose object the service deliberately retains (Requirement 8.10), and the deletion of
-       * the recording once the transcript is a durable `messages` row (Requirements 8.9, 8.11).
+       * `chat: chatAnswerer({ runOptions })` is the nested `ChatService`, bound to this request's
+       * budget. The reservation travels separately — the service hands the nested call `coveredBy()`
+       * on the voice unit it took — so nothing here can turn one voice message into two spent units.
        */
       const outcome = await transcribeAndAnswer(
         {
           userId: session.userId,
-          storageRef: body.audio,
+          audio: body.audio,
           language,
           channel: 'web',
           conversationId: body.conversationId,
           durationSeconds: body.durationSeconds,
-          ...(bytes === undefined ? {} : { bytes }),
           ...(body.mimeType === undefined ? {} : { mimeType: body.mimeType }),
         },
         {
-          supabase,
           /**
            * **No `burst` here, deliberately.** Requirement 13.8's slot for this request is taken by
            * the limiter below, against the `voice` ceiling; the answer this request produces is
-           * covered by it, exactly as it is covered by the voice quota unit. `chatTurn()` would skip
-           * the check anyway on a covered context (`checkBurstForRequest` in `rate-limit.ts`) — this
-           * omission is the second half of that guarantee, and the reason a chat burst slot cannot be
-           * consumed by a farmer who never sent a chat message.
+           * covered by it, exactly as it is covered by the voice quota unit.
            */
-          chat: chatAnswerer({ supabase, runOptions }),
+          chat: chatAnswerer({ runOptions }),
           burst: burstLimiter(),
           deadlineMs,
         },

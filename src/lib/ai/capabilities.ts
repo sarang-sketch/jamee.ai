@@ -78,8 +78,11 @@ import {
 /**
  * One image classification.
  *
- * `imageUrl` is a signed, time-limited Storage URL (V3, Requirement 2.8), so the bytes are fetched
- * provider-side and never enter this process. `responseSchema` is honoured by the member that
+ * **Amendment A3: the image travels inline as bytes, not by URL** (V34). `imageBase64` is the
+ * Full_Size_Image the analysis read from GridFS, base64-encoded; the Gemini member sends it as the
+ * inline `{ type: 'image', data, mime_type }` content part and the Groq member wraps it in a
+ * `data:<mime>;base64,<bytes>` URL. There is no Supabase Storage under A3 and therefore no signed
+ * URL to mint, so the bytes are the only form. `responseSchema` is honoured by the member that
  * supports one and ignored by the member that does not — see the table above.
  *
  * `system` is declared without `| undefined` deliberately: under `exactOptionalPropertyTypes` that
@@ -87,7 +90,7 @@ import {
  * instruction is an absent property rather than an explicit `undefined`.
  */
 export interface VisionCall {
-  readonly imageUrl: string;
+  readonly imageBase64: string;
   readonly imageMimeType: string;
   readonly prompt: string;
   readonly responseSchema: JsonSchema;
@@ -145,7 +148,7 @@ function identity(value: string): string {
 
 function toGeminiVision(input: VisionCall): GeminiVisionInput {
   return {
-    imageUrl: input.imageUrl,
+    imageBase64: input.imageBase64,
     imageMimeType: input.imageMimeType,
     prompt: input.prompt,
     responseSchema: input.responseSchema,
@@ -164,7 +167,9 @@ function toGeminiText(input: TextCall): GeminiTextInput {
 
 function toGroqVision(input: VisionCall): VisionClassifyRequest {
   return {
-    imageUrl: input.imageUrl,
+    // A3, V34: Groq takes the image as a `data:<mime>;base64,<bytes>` URL. The 20 MB request cap is
+    // enforced inside `groq.ts` before the call; Jamee's ~400 KB re-encode is far below it.
+    imageUrl: `data:${input.imageMimeType};base64,${input.imageBase64}`,
     prompt: input.prompt,
     // `json` is left at its default, which `groq.ts` sets to ON for this member: it exists only as
     // the fallback for a JSON-only classification contract.

@@ -7,7 +7,6 @@ import {
   type DiagnoseResponse,
   type Language,
 } from '@/lib/schemas';
-import { createServerSupabase } from '@/lib/supabase/server';
 import { diagnose } from '@/services/diagnosis.service';
 
 /**
@@ -130,27 +129,27 @@ export const POST = authenticatedRoute(async (request, session) => {
    */
   return withErrorHandling(
     async () => {
-      const supabase = await createServerSupabase();
-
       /**
        * The one service call. `channel: 'web'` is a literal because `DiagnoseInput.channel` is
-       * required (Requirement 16.5) and this route is only ever the web channel; the WhatsApp
-       * adapter passes its own. `conversationId` is spread conditionally rather than passed as
-       * `undefined`, which `exactOptionalPropertyTypes` distinguishes.
+       * required (Requirement 16.5) and this route is only ever the web channel. Under Amendment A3
+       * the body carries Media_References, not a storage path: `image` (a `crop-image` reference)
+       * and an optional `thumbnail` reference, both validated by `diagnoseRequestSchema`. The
+       * service reads the image bytes from GridFS through the Data_Access_Layer and sends them
+       * inline — this route holds no client and passes no bytes (D1).
        *
-       * Everything a farmer sees comes back from here. `DIAGNOSIS_TIMEOUT` (Requirement 3.7)
-       * included: the service records `outcome = 'timeout'` in `usage_logs` before it throws, and
-       * the envelope below turns it into HTTP 504 with the retryable flag the taxonomy assigns.
+       * `thumbnail` and `conversationId` are spread conditionally rather than passed as `undefined`,
+       * which `exactOptionalPropertyTypes` distinguishes.
        */
       const outcome = await diagnose(
         {
           userId: session.userId,
-          storageRef: body.image,
+          image: body.image,
+          ...(body.thumbnail === undefined ? {} : { thumbnail: body.thumbnail }),
           language,
           channel: 'web',
           ...(body.conversationId === undefined ? {} : { conversationId: body.conversationId }),
         },
-        { supabase, burst: burstLimiter() },
+        { burst: burstLimiter() },
       );
 
       /**

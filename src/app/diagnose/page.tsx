@@ -1,18 +1,15 @@
-import { redirect } from 'next/navigation';
-
 import { DIAGNOSE_HEADING_ID, DiagnosisPanel } from '@/components/DiagnosisResultCard';
 import { LanguageProvider } from '@/components/LanguageProvider';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
-import { SIGN_IN_PATH } from '@/lib/auth/protected-paths';
+import { requireFarmer } from '@/lib/auth/session';
+import { farmerData } from '@/lib/db/farmer';
 import { activeLanguage } from '@/lib/language.server';
 import { messages } from '@/lib/messages';
 import {
   DEFAULT_LANGUAGE,
-  PROFILE_SETTINGS_SELECT,
   readProfileSettings,
   type ProfileSettings,
 } from '@/lib/profile';
-import { createServerSupabase, currentUserId } from '@/lib/supabase/server';
 
 import styles from './page.module.css';
 
@@ -44,32 +41,23 @@ export const dynamic = 'force-dynamic';
 export default async function DiagnosePage() {
   /**
    * Requirement 1.6, as the second layer. The first is `src/proxy.ts`, which gates every path in
-   * `PROTECTED_SCREEN_PATHS` — `/diagnose` among them — before this file runs at all. This check
-   * is here anyway because `currentUserId()` is `getUser()` underneath (server-confirmed, not a
-   * decoded cookie) and because `userId` is a value this render genuinely needs: it becomes the
-   * first path segment of every uploaded object and the id the storage policy re-checks against
-   * `auth.uid()`. A page that needed it and did not have it would be a runtime failure rather
-   * than a redirect.
-   *
-   * `redirect()` throws to unwind the render, so nothing below runs without a session.
+   * `PROTECTED_SCREEN_PATHS` — `/diagnose` among them — before this file runs at all. `requireFarmer()`
+   * is the real check: it validates the session against the store (Better Auth's server-confirmed
+   * `getSession`, V30) and `redirect()`s a signed-out visitor, so nothing below runs without a
+   * session. `userId` is a value this render genuinely needs — it is the owner every uploaded media
+   * file is stamped with and the id the Data_Access_Layer scopes every read to (D18).
    */
-  const userId = await currentUserId();
-  if (userId === null) redirect(SIGN_IN_PATH);
-
-  const supabase = await createServerSupabase();
+  const userId = await requireFarmer();
 
   /**
    * The profile's preferred language is the standing default the switcher starts from
-   * (Requirement 1.8). `null` means the farmer has no profile row, which by construction should
-   * not happen — the trigger in `0002_profiles.sql` writes it at signup and the auth callback
-   * upserts it defensively on every sign-in — so the screen falls back to the column default
-   * rather than failing. Read with the RLS-scoped client, so the database decides which row is
-   * visible.
+   * (Requirement 1.8). `null` means the farmer has no profile row, which by construction should not
+   * happen — the D8 bootstrap upsert writes it on every authenticated request — so the screen falls
+   * back to the column default rather than failing. Read through the owner-scoped Data_Access_Layer
+   * (D18): `farmerData(userId).readProfile()` returns only this farmer's row.
    */
-  const settings: ProfileSettings = (await readProfileSettings(
-    () =>
-      supabase.from('profiles').select(PROFILE_SETTINGS_SELECT).eq('id', userId).maybeSingle(),
-    userId,
+  const settings: ProfileSettings = (await readProfileSettings(() =>
+    farmerData(userId).readProfile(),
   )) ?? { displayName: null, language: DEFAULT_LANGUAGE };
 
   /**

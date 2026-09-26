@@ -1405,27 +1405,27 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - A partial unique index lets any number of profiles omit `telegram_user_id` but rejects a second identical present value; two `bot_entitlements` for one `user_id` fail (primary key) and two rows carrying one `provider_payment_id` fail (unique index); `counter_try_increment` returns the new count below the limit and null/`11000` at it
     - _Requirements: 4.1, 6.4, 6.5, 13.3, 13.4, 21.16, 22.11, 22.12_
 
-- [ ] 54. Build the GridFS media store, the Media_Endpoint, and the browser upload/record changes
+- [x] 54. Build the GridFS media store, the Media_Endpoint, and the browser upload/record changes
   - [x] 54.1 Create `src/lib/media/*` — GridFS write, read, and delete through the Data_Access_Layer
     - Write an upload stream setting `metadata.kind`, `metadata.ownerId`, and `metadata.sourceRef`; a download stream that reads bytes for inline model sends and for the serve path; `bucket.delete(id)` normalized so an absent id is "already deleted" not an error (V29); an owner check comparing `metadata.ownerId` to the requesting Farmer
     - Replace `storageRefSchema`/`thumbPathFor` reasoning with `mediaRefSchema` = `{ fileId, kind }` already added to `src/lib/schemas.ts`; the diagnose request refines `kind === 'crop-image'`, voice refines `kind === 'voice'` — a client cannot submit a thumbnail or fabricate a path (there is no path)
     - _Requirements: 2.5, 2.6, 2.8, 12.5_
     - _Design: D17; depends on V29, V34_
 
-  - [ ] 54.2 Create `src/app/api/media/route.ts` — the authenticated upload endpoint and the owner-checked serve
+  - [x] 54.2 Create `src/app/api/media/route.ts` — the authenticated upload endpoint and the owner-checked serve
     - POST (multipart, under the 4.5 MB Request_Body_Ceiling): session check, write the file to GridFS with `metadata.ownerId` set from the **session** (never from client input), return a Media_Reference. GET/serve: stream a file back only after the Data_Access_Layer confirms `metadata.ownerId` equals the requesting Farmer; a mismatch is `STORAGE_REF_FORBIDDEN` (403)
     - No session ⇒ 401 and no write; `maxDuration = 60`
     - _Requirements: 1.7, 2.1, 2.5, 2.6, 2.7, 12.5_
     - _Design: D1 (amended), D18; depends on V29_
 
-  - [ ] 54.3 Update the browser uploader and recorder for the upload-through-endpoint change
+  - [x] 54.3 Update the browser uploader and recorder for the upload-through-endpoint change
     - `ImageUploader`: keep the select-time admission (jpeg/png/webp, 10 MB, stating both on rejection) and the re-encode toward the ~400 KB Downscale_Target and the thumbnail; POST both the Full_Size_Image and the Thumbnail_Derivative to `/api/media`, then POST only the returned crop-image Media_Reference to `/api/diagnose`; an upload failure produces an upload error and no diagnosis request (15.5); a thumbnail upload failure after a successful full-size upload still sends the diagnosis (2.14)
     - `VoiceRecorder`: **3 MB** post-stop cap (A3, down from 10 MB) stated alongside the 120 s limit, MIME picked from the provider's accepted containers (V10, V20), upload to `/api/media` as a `voice` file, then POST the Media_Reference and measured duration to `/api/voice`
     - History thumbnails load through the owner-checked Media_Endpoint, not signed URLs; loading states stay bound to real request state (no timed bars)
     - _Requirements: 2.1, 2.3, 2.4, 2.7, 2.9, 2.10, 2.11, 2.12, 2.13, 2.14, 8.1, 8.2, 8.3, 12.5, 15.2, 15.5_
     - _Design: Frontend — Browser upload through the Media_Endpoint, Voice capture; depends on V10, V20, V29_
 
-  - [ ]* 54.4 Write tests for the Media_Endpoint owner check and the client admission
+  - [x]* 54.4 Write tests for the Media_Endpoint owner check and the client admission
     - The endpoint sets `ownerId` from the session and refuses to serve another farmer's file with 403; a diagnose request whose Media_Reference names a `thumbnail` or `voice` kind, or a file owned by another farmer, is rejected with the quota untouched
     - Image admission at the 10 MB boundary; voice admission at the 3 MB and 120 s boundaries stating both limits; a failed upload issues no analysis request; the analysis body carries a Media_Reference and no bytes
     - _Requirements: 2.3, 2.4, 2.5, 2.6, 8.2, 8.3, 15.5_
@@ -1462,7 +1462,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 7.5, 10.5, 10.8, 14.1, 14.2, 14.3, 14.6, 14.7_
     - _Design: D10, D19_
 
-  - [ ] 56.2 Port the diagnosis, chat, voice, history, and profile read paths
+  - [x] 56.2 Port the diagnosis, chat, voice, history, and profile read paths
     - `diagnosis.service.ts` reads the crop image **bytes directly from GridFS** by the Media_Reference and sends them inline to the model (V34); persists the Diagnosis_Result, the Media_Reference, and `channel` through the layer; the pipeline order (ownership → burst → reserve → read bytes → classify → validate → ground → persist → log) is unchanged. `chat.service.ts` and `voice.service.ts` reuse the one grounding/rephrase implementation and read/write only through the layer; voice reads GridFS bytes inline and deletes the voice file on a durable transcript. History and detail screens and the profile screen query through the owner-scoped accessors, not a browser DB client
     - `channel` stays a required service parameter; no service takes or consults an entitlement (D14)
     - _Requirements: 2.8, 3.2, 3.3, 7.1, 7.2, 8.4, 8.6, 8.9, 12.1, 12.2, 12.3, 12.5, 16.1, 16.3, 16.5_
@@ -1498,22 +1498,22 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - Secret-token verification (matching passes; absent header, wrong value, flipped byte, unconfigured secret all 401 body-unparsed, constant-time); a redelivered `update_id` reaches no download/reserve/service; a farmer whose window has lapsed gets the recharge/unlock reply for photo/text/voice with zero quota and no `messages`/`diagnoses` row, while `/start` and the recharge command are still served and web requests are unchanged
     - _Requirements: 11.2, 11.3, 11.4, 11.5, 11.6, 22.13, 22.14, 22.15, 22.16, 22.17_
 
-- [ ] 58. Implement Telegram account linking with the consume-and-bind transaction
-  - [ ] 58.1 Create `src/services/linking.service.ts` and `src/app/api/link/token/route.ts`
+- [x] 58. Implement Telegram account linking with the consume-and-bind transaction
+  - [x] 58.1 Create `src/services/linking.service.ts` and `src/app/api/link/token/route.ts`
     - Mint from a cryptographically secure source with no part derived from an Auth_User_Id, Google_Email, Telegram_User_Id, or timestamp; store the sha-256, never the plaintext; `expires_at = now() + LINK_TOKEN_TTL_MINUTES`; return the `https://t.me/<bot>?start=<token>` deep link from `NEXT_PUBLIC_TELEGRAM_BOT_USERNAME`. POST mints for the session user only (no body); DELETE unlinks — clear `telegram_user_id`, invalidate outstanding tokens, touch no Conversation/Message/Diagnosis/entitlement; no session ⇒ 401
     - _Requirements: 1.7, 21.1, 21.2, 21.3, 21.4, 21.5, 21.15, 22.20_
     - _Design: D13; depends on V33_
 
-  - [ ] 58.2 Implement `consumeAndBind` as one multi-document transaction
+  - [x] 58.2 Implement `consumeAndBind` as one multi-document transaction
     - Inside a transaction (V33): `findOneAndUpdate` on `link_tokens` filtered `{ tokenHash, consumedAt: null, expiresAt: { $gt: now } }` setting `consumedAt`, whose returned document is the authorization; then the bind write on `profiles`. The four outcomes (bind-and-confirm; same id already stored → already-linked; different id, sender on no profile → replace + notify the replaced id; sender already on another profile → unique-key `11000` aborts the transaction, token left unconsumed, reply unlink-there-first). Unknown/expired/consumed share one reply and one path
     - _Requirements: 21.6, 21.7, 21.8, 21.10, 21.11, 21.12, 21.13, 21.14, 21.18, 21.19_
     - _Design: D13, D19; depends on V33_
 
-  - [ ] 58.3 Create `src/components/TelegramLinkCard.tsx` and wire the profile screen
+  - [x] 58.3 Create `src/components/TelegramLinkCard.tsx` and wire the profile screen
     - The server shell reads the access state (`GET /api/profile/access`) so this card and the recharge card render from one round trip; show whether the Profile holds a `telegram_user_id` and offer the link or unlink action
     - _Requirements: 1.8, 21.20, 22.18_
 
-  - [ ]* 58.4 Write unit tests for the named linking cases and the token shape
+  - [x]* 58.4 Write unit tests for the named linking cases and the token shape
     - The already-linked reply and the replacement path (incl. the message to the replaced id); the token is never stored in plaintext, derives from no forbidden input, and an expired token is refused by the statement not a prior read; two concurrent `/start` deliveries of one token bind exactly once
     - _Requirements: 21.2, 21.7, 21.10, 21.11, 21.12_
 
@@ -1523,17 +1523,17 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 22.1, 22.5_
     - _Depends on: V27_
 
-  - [ ] 59.2 Create `src/app/api/payment/order/route.ts` and the order half of `src/services/payment.service.ts`
+  - [x] 59.2 Create `src/app/api/payment/order/route.ts` and the order half of `src/services/payment.service.ts`
     - Amount (from `access.ts`), currency, and owning Auth_User_Id all server-side, none read from the body; no session ⇒ 401 with no order created; insert `payment_orders` as `created` and return checkout identifiers. A farmer whose window has lapsed or who holds any non-`captured` order can always start another — a further Payment_Order is the normal case (A2 supersedes 22.18)
     - _Requirements: 22.1, 22.2, 22.3, 22.22_
     - _Design: Amendment A2 decision 5_
 
-  - [ ] 59.3 Create `src/app/api/payment/webhook/route.ts`
+  - [x] 59.3 Create `src/app/api/payment/webhook/route.ts`
     - Read the body once as text, verify the signature over those exact bytes in constant time, only then parse; a missing header, a failed verification, and an absent secret are **one** 401 branch with nothing parsed or recorded; no session consulted; the per-caller `webhook_throttle` bound on a hash of the platform-reported address, stated as a cost control not authentication; `maxDuration = 60`
     - _Requirements: 13.9, 22.5, 22.6, 22.24_
     - _Design: D15, D16, D19_
 
-  - [ ] 59.4 Create `src/services/entitlement.service.ts` and the grant-plus-extend half in one transaction
+  - [x] 59.4 Create `src/services/entitlement.service.ts` and the grant-plus-extend half in one transaction
     - Derive the paying farmer, amount, and outcome only from the verified payload plus the recorded `payment_orders` row — the grant takes its `user_id` from that row, never the payload. In one transaction (V33): claim `provider_payment_id` via `insertOne` whose `11000` duplicate-key error is the "already granted/handled" signal, and **extend the window** to `nextExpiry(now, currentExpiry)` = `max(now, currentExpiry) + 7 days` in the *same* transaction so a redelivery cannot double-extend (A2 decision 3). A verified failed-payment webhook records nothing and leaves the window untouched. `holdsUnexpiredEntitlement(userId)` — an expiry-in-the-future check — is the only read the adapter gate needs (A2 decision 4); the entitlement is keyed to the Auth_User_Id, never the Telegram_User_Id
     - _Requirements: 22.7, 22.8, 22.9, 22.10, 22.11, 22.12, 22.13, 22.19, 22.20, 22.21_
     - _Design: D14, D15, D19; Amendment A2 decisions 3 and 4; depends on V33_
@@ -1543,7 +1543,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 22.4, 22.7, 22.18_
     - _Design: Amendment A2 decision 5_
 
-  - [ ]* 59.6 Write unit tests for signature verification, the grant, and the extension
+  - [x]* 59.6 Write unit tests for signature verification, the grant, and the extension
     - Valid signature over the raw body passes; flipped byte, truncated digest, absent header, unconfigured secret, and a re-serialized body all fail, comparison constant-time; two concurrent verified webhooks with one `provider_payment_id` grant/extend exactly once; a browser-reported success grants nothing; the window extends by `max(now, currentExpiry) + 7 days` and a redelivery does not double-extend
     - _Requirements: 22.5, 22.6, 22.7, 22.10, 22.11_
 

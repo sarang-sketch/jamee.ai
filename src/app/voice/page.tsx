@@ -1,18 +1,15 @@
-import { redirect } from 'next/navigation';
-
 import { LanguageProvider } from '@/components/LanguageProvider';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { VoicePanel } from '@/components/VoiceAnswerCard';
-import { SIGN_IN_PATH } from '@/lib/auth/protected-paths';
+import { requireFarmer } from '@/lib/auth/session';
+import { farmerData } from '@/lib/db/farmer';
 import { activeLanguage } from '@/lib/language.server';
 import { messages } from '@/lib/messages';
 import {
   DEFAULT_LANGUAGE,
-  PROFILE_SETTINGS_SELECT,
   readProfileSettings,
   type ProfileSettings,
 } from '@/lib/profile';
-import { createServerSupabase, currentUserId } from '@/lib/supabase/server';
 import { conversationStoreFrom, findOrCreateActive } from '@/services/conversation.service';
 
 import styles from './page.module.css';
@@ -83,28 +80,22 @@ const VOICE_HEADING_ID = 'jamee-voice-heading';
 export default async function VoicePage() {
   /**
    * Requirement 1.6, as the second layer. The first is `src/proxy.ts`, which gates every path in
-   * `PROTECTED_SCREEN_PATHS` — `/voice` among them — before this file runs at all. The check is
-   * here anyway because `currentUserId()` is `getUser()` underneath (server-confirmed, not a
-   * decoded cookie) and because `userId` is a value this render genuinely needs: it becomes the
-   * first path segment of every uploaded recording and the id the storage policy re-checks against
-   * `auth.uid()`.
-   *
-   * `redirect()` throws to unwind the render, so nothing below runs without a session.
+   * `PROTECTED_SCREEN_PATHS` — `/voice` among them — before this file runs at all. `requireFarmer()`
+   * validates the session against the store (Better Auth's server-confirmed `getSession`, V30) and
+   * `redirect()`s a signed-out visitor, so nothing below runs without a session. `userId` is a value
+   * this render needs — the owner every uploaded recording is stamped with and the id the
+   * Data_Access_Layer scopes every read to (D18).
    */
-  const userId = await currentUserId();
-  if (userId === null) redirect(SIGN_IN_PATH);
-
-  const supabase = await createServerSupabase();
+  const userId = await requireFarmer();
 
   /**
    * The profile's preferred language is the standing default the switcher starts from
-   * (Requirement 1.8). `null` means the farmer has no profile row, which by construction should
-   * not happen, so the screen falls back to the column default rather than failing. Read with the
-   * RLS-scoped client, like everything else here.
+   * (Requirement 1.8). `null` means the farmer has no profile row, which by construction should not
+   * happen, so the screen falls back to the column default rather than failing. Read through the
+   * owner-scoped Data_Access_Layer (D18).
    */
-  const settings: ProfileSettings = (await readProfileSettings(
-    () => supabase.from('profiles').select(PROFILE_SETTINGS_SELECT).eq('id', userId).maybeSingle(),
-    userId,
+  const settings: ProfileSettings = (await readProfileSettings(() =>
+    farmerData(userId).readProfile(),
   )) ?? { displayName: null, language: DEFAULT_LANGUAGE };
 
   /**
@@ -117,11 +108,11 @@ export default async function VoicePage() {
   const { ui } = messages(language);
 
   /**
-   * The active web thread — the same row `/chat` resolves, built from **this page's** RLS-scoped
-   * client rather than left to the default, so the lookup and any insert run under the farmer's
-   * own session.
+   * The active web thread — the same row `/chat` resolves, through the owner-scoped Data_Access_Layer
+   * (`conversationStoreFrom()` binds to `farmerData(userId)` per call under A3, so the lookup and any
+   * insert are scoped to this farmer by construction — no client to pass).
    */
-  const conversation = await findOrCreateActive(userId, 'web', conversationStoreFrom(supabase));
+  const conversation = await findOrCreateActive(userId, 'web', conversationStoreFrom());
 
   return (
     /**
