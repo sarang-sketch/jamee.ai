@@ -25,7 +25,7 @@ import type { MessageCatalog } from '@/lib/messages/types';
 export const hi: MessageCatalog = {
   errors: {
     AUTH_REQUIRED: 'आगे बढ़ने के लिए साइन इन करें।',
-    OTP_INVALID: 'यह कोड गलत है या खत्म हो गया है। नया कोड मंगाएँ।',
+    OAUTH_INCOMPLETE: 'साइन इन पूरा नहीं हुआ। कृपया फिर से साइन इन करें।',
     LANGUAGE_UNSUPPORTED: 'जामी केवल अंग्रेजी, हिन्दी और मराठी में जवाब देता है।',
     MESSAGE_INVALID: 'जामी यह प्रश्न पढ़ नहीं पाया। कृपया इसे दोबारा लिखकर भेजें।',
     STORAGE_REF_INVALID: 'यह फोटो नहीं मिली। कृपया दोबारा भेजें।',
@@ -62,7 +62,10 @@ export const hi: MessageCatalog = {
 
     /** Machine-to-machine; never rendered to a farmer. Present so the record stays total. */
     WEBHOOK_SIGNATURE_INVALID: 'अनुरोध की पहचान सत्यापित नहीं हुई।',
-    WEBHOOK_VERIFY_TOKEN_INVALID: 'सत्यापन टोकन मेल नहीं खाया।',
+    WEBHOOK_SECRET_TOKEN_INVALID: 'वेबहुक सीक्रेट टोकन मेल नहीं खाया।',
+
+    /** Requirement 22.1 — provider order creation failed; no provider text (D15). */
+    PAYMENT_ORDER_FAILED: 'जामी अभी भुगतान शुरू नहीं कर पाया। कृपया फिर कोशिश करें।',
 
     CONVERSATION_NOT_FOUND: 'यह बातचीत नहीं मिली।',
     DIAGNOSIS_NOT_FOUND: 'यह परिणाम नहीं मिला।',
@@ -125,6 +128,8 @@ export const hi: MessageCatalog = {
     appName: 'Jamee',
     tagline: 'टमाटर और आलू के किसानों के लिए फसल रोग सहायता।',
     signInHeading: 'अपने मोबाइल नंबर से साइन इन करें',
+    googleSignIn: 'Google से जारी रखें',
+    signInDidNotComplete: 'साइन इन पूरा नहीं हुआ। कृपया फिर से साइन इन करें।',
     phoneLabel: 'मोबाइल नंबर',
     phoneHint: 'देश का कोड भी लिखें, जैसे +919876543210।',
     sendCode: 'कोड भेजें',
@@ -168,6 +173,7 @@ export const hi: MessageCatalog = {
     channelLabel: 'माध्यम',
     channelWeb: 'वेबसाइट',
     channelWhatsapp: 'WhatsApp',
+    channelTelegram: 'Telegram',
     dateLabel: 'तारीख',
     symptomsHeading: 'क्या देखना है',
     causesHeading: 'यह क्यों होता है',
@@ -195,6 +201,55 @@ export const hi: MessageCatalog = {
       'जामी इस वॉइस नोट को सुन नहीं सका। कृपया अपना सवाल यहाँ लिखकर भेजें।',
     takingLonger:
       'जामी को इस फोटो में सामान्य से अधिक समय लग रहा है। कृपया कुछ देर बाद फिर भेजें।',
+  },
+
+  /**
+   * Telegram replies (Amendment A1). Static Hindi copy, no model call (D5). The invalid-link
+   * string gives no hint of which case it is (Requirement 21.8), and the gated reply's amount is
+   * `{price}`, never a literal.
+   */
+  telegram: {
+    linkingInstructions:
+      'जामी में स्वागत है। यह Telegram खाता अभी जुड़ा नहीं है। कृपया अपने वेब ब्राउज़र में जामी खोलें, साइन इन करें, और अपनी प्रोफ़ाइल से एक लिंक लें। इस Telegram खाते को जोड़ने के लिए वह लिंक खोलें।',
+    invalidLink:
+      'यह लिंक काम नहीं आया। कृपया अपने वेब ब्राउज़र में जामी खोलें, साइन इन करें, और अपनी प्रोफ़ाइल से नया लिंक लें।',
+    alreadyLinked: 'यह Telegram खाता पहले से आपके जामी खाते से जुड़ा है।',
+    replaced:
+      'यह Telegram खाता अब आपके जामी खाते से जुड़ा है। इससे पहले जुड़ा खाता अब उस तक नहीं पहुँचता।',
+    replacedNotice:
+      'यह Telegram खाता अब उस जामी खाते से जुड़ा नहीं है। उसकी जगह दूसरा Telegram खाता जोड़ा गया है।',
+    alreadyLinkedElsewhere:
+      'यह Telegram खाता पहले से किसी दूसरे जामी खाते से जुड़ा है। कृपया पहले उसे वहाँ से हटाएँ, फिर कोशिश करें।',
+    gated:
+      'यह Telegram खाता जुड़ा है। जामी को यहाँ इस्तेमाल करने के लिए \u20B9{price} का रिचार्ज करें — इससे 7 दिन मिलते हैं। जामी वेब ऐप में Payments के अंतर्गत भुगतान करें, या यहाँ /recharge भेजें और भुगतान लिंक पाएँ। रिचार्ज होने के बाद अपनी फसल की फोटो भेजें।',
+    rechargeCommand:
+      'जामी को 7 दिन इस्तेमाल करने के लिए \u20B9{price} का रिचार्ज करें। भुगतान के लिए यह लिंक खोलें: {link}',
+    lapsedWindow:
+      'आपकी जामी सुविधा समाप्त हो गई है। और 7 दिन के लिए \u20B9{price} का रिचार्ज करें। भुगतान लिंक के लिए यहाँ /recharge भेजें, या जामी वेब ऐप में भुगतान करें।',
+    unsupportedType: 'जामी फोटो, लिखित संदेश और वॉइस नोट स्वीकार करता है।',
+    takingLonger:
+      'जामी को इसमें सामान्य से अधिक समय लग रहा है। कृपया कुछ देर बाद फिर भेजें।',
+    rechargeConfirmation:
+      'आपका रिचार्ज हो गया। जामी {expiry} तक चालू है। यहाँ अपनी फसल की फोटो भेजें।',
+  },
+
+  /**
+   * Web recharge card and Telegram link card (Amendment A1/A2/A3). Static Hindi copy; `{price}`
+   * from `RECHARGE_PRICE_RUPEES`, `{expiry}` from the entitlement.
+   */
+  access: {
+    rechargeHeading: 'Telegram बॉट सुविधा',
+    rechargeButton: '\u20B9{price} का रिचार्ज करें',
+    rechargeActiveUntil: 'आपकी Telegram सुविधा {expiry} तक चालू है।',
+    rechargeInactive: 'आपके पास कोई चालू Telegram सुविधा नहीं है। जामी बॉट इस्तेमाल करने के लिए रिचार्ज करें।',
+    rechargeConfirming: 'आपका भुगतान जाँचा जा रहा है…',
+    rechargeTestModeNote:
+      'यह टेस्ट-मोड भुगतान है। असली पैसे नहीं कटते; टेस्ट कार्ड इस्तेमाल करें।',
+    linkHeading: 'Telegram खाता',
+    linkButton: 'Telegram खाता जोड़ें',
+    unlinkButton: 'यह Telegram खाता हटाएँ',
+    linkedState: 'एक Telegram खाता आपके जामी खाते से जुड़ा है।',
+    notLinkedState: 'अभी कोई Telegram खाता जुड़ा नहीं है।',
   },
 
   severity: {

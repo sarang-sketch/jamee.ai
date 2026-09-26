@@ -472,7 +472,16 @@ export type ErrorDetails = z.infer<typeof errorDetailsSchema>;
  */
 export const ERROR_CODES = [
   'AUTH_REQUIRED', //               401  1.7
-  'OTP_INVALID', //                 400  1.3
+  /**
+   * 401 1.3 (retryable) — Google sign-in did not complete.
+   *
+   * Amendment A1 replaced phone OTP with `signInWithOAuth({ provider: 'google' })`, so the old
+   * `OTP_INVALID` retired with the SMS path. This ONE code covers a cancelled authorization, a
+   * provider error, and a callback that returned nothing exchangeable, because the farmer's next
+   * action is identical in all three — sign in again — and distinguishing them would only
+   * describe Google's internals. Retryable because that next action is a retry.
+   */
+  'OAUTH_INCOMPLETE', //            401  1.3
   'LANGUAGE_UNSUPPORTED', //        400  9.5
   /**
    * 400 7.1, 15.3 — the request body does not carry a usable Farmer message.
@@ -510,8 +519,30 @@ export const ERROR_CODES = [
   'TRANSCRIPTION_FAILED', //        502  8.4
   'PROVIDERS_UNAVAILABLE', //       503  14.5, 14.8, D6
   'DIAGNOSIS_TIMEOUT', //           504  3.7
-  'WEBHOOK_SIGNATURE_INVALID', //   401  11.4
-  'WEBHOOK_VERIFY_TOKEN_INVALID', // 403 11.2
+  /**
+   * 401 15.4, 22.6 (D15) — the payment webhook's raw-body signature did not verify, or the
+   * signing secret is unconfigured. An unconfigured secret falls into THIS branch on purpose:
+   * a deployment that forgot the variable must not become one where anyone can grant an
+   * entitlement by POSTing a body. Not retryable and the body carries no content — the caller
+   * is a payment provider reading a status, not a farmer reading prose.
+   */
+  'WEBHOOK_SIGNATURE_INVALID', //   401  11.4, 22.6
+  /**
+   * 401 11.3, 11.4 (D12) — the Telegram webhook's `X-Telegram-Bot-Api-Secret-Token` header was
+   * absent or did not match the configured token, compared in constant time before the body is
+   * parsed. An unconfigured token is a FAILED verification here for the same reason as above.
+   * Replaces the retired `WEBHOOK_VERIFY_TOKEN_INVALID`: Telegram has no GET verification
+   * handshake, so there is no verify-token challenge to model — registration is an outbound
+   * `setWebhook` call Jamee makes once.
+   */
+  'WEBHOOK_SECRET_TOKEN_INVALID', // 401 11.3, 11.4
+  /**
+   * 502 22.1 (retryable) — creating a Payment_Order with the provider failed. Its message never
+   * carries the provider's error text (D15): a provider payload in a farmer-facing message is a
+   * leak, and the farmer's action is the same whatever the provider said — try the payment
+   * again.
+   */
+  'PAYMENT_ORDER_FAILED', //        502  22.1
   'CONVERSATION_NOT_FOUND', //      404  — a conversation id that is not this farmer's
   'DIAGNOSIS_NOT_FOUND', //         404  — a diagnosis id that is not this farmer's
   'SWEEP_UNAUTHORIZED', //          401  18.12

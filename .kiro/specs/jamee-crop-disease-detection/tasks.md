@@ -1299,23 +1299,23 @@ Amendment A3 does **not** renumber any requirement, criterion, or correctness pr
 
 Two items are **BLOCKED on a verification outcome, not a product decision**, and are recorded outside the numbered work at the end of this phase: the age-based orphan backstop still ships behind its flag until V29 confirms the GridFS `uploadDate` query (P8-1), and the retention window on M0 is a number to review early because the ~512 MB budget is tighter than Supabase's and now shared with records (P8-2).
 
-- [ ] 50. Resolve V28–V35 and retire V1, V3, V4, V5, V22, and V23 before any Amendment A3 code is written
-  - [ ] 50.1 Append V28–V35 to `docs/VERIFIED_VALUES.md` and mark V1, V3, V4, V5, V22, and V23 retired in place
+- [x] 50. Resolve V28–V35 and retire V1, V3, V4, V5, V22, and V23 before any Amendment A3 code is written
+  - [x] 50.1 Append V28–V35 to `docs/VERIFIED_VALUES.md` and mark V1, V3, V4, V5, V22, and V23 retired in place
     - Resolve each against the installed package and official docs, recording the exact value, the document consulted, and the date, exactly as task 1.1 did: **V28** the MongoDB Node.js driver — package name and exact version, `MongoClient` construction and options, the `globalThis`-cached reuse across serverless invocations within the M0 connection limit, the duplicate-key error code (`11000`) and where it sits on the thrown error, the `findOneAndUpdate` return shape (pre- vs post-update and under which option), and how a `$jsonSchema` validation failure is reported; **V29** GridFS — `GridFSBucket` upload and download streams, how `metadata` is written and read, whether `bucket.delete(id)` errors on an absent id, the `files` fields available for a query (notably `uploadDate`, `length`, `metadata`), and how a download stream pipes to a route `Response`; **V30** the auth library's Google-provider config, its MongoDB adapter package and how it is pointed at this database, the sign-in / user-created hook for the D8 bootstrap, the server-side session-read call that replaces `src/proxy.ts`'s Supabase check, where the library secret and Google client id/secret are configured, and which callback/redirect URLs to register; **V31** `mongodb-memory-server` — package and version, how to start it as a single-node replica set so multi-document transactions work, its startup cost and any binary download, and how the harness points the Data_Access_Layer at it; **V32** Atlas M0 limits — the ~512 MB cluster-storage allowance, the concurrent-connection cap the cached pool must stay under, and any operation/throughput caps at the 6-farmer scale; **V33** transactions on M0 — confirmation a multi-document transaction runs on the M0 replica set, the session/transaction API on the driver, and the retryable-write / transient-transaction-error semantics; **V34** the Gemini and Groq inline-byte limits for an image and for inline audio, since analysis now sends bytes inline rather than by URL
     - Retire V1, V3, V4, V5, V22, and V23 **in place, keeping their numbers and their already-resolved findings**, each row naming its successor (V1→V28/V30, V3→V29, V4→D18/V29, V5→D8/V30, V22→V29, V23→V30/V35), so a reader arriving from a `docs/VERIFIED_VALUES.md` citation finds the number and learns it no longer applies
     - Mark any unresolvable item explicitly as UNRESOLVED — never as an assumed value; the V-item rule holds unchanged (an unconfirmed value fails loudly at startup)
     - _Requirements: 17.3_
     - _Design: Amendment A3 — V-items; Values to verify before coding_
 
-  - [ ] 50.2 Resolve V35 (the auth-library choice) by reading the bundled Next.js docs first, and install the pinned packages
+  - [x] 50.2 Resolve V35 (the auth-library choice) by reading the bundled Next.js docs first, and install the pinned packages
     - Read `node_modules/next/dist/docs` (resolved from `AGENTS.md`'s directory) to establish the installed Next.js major/minor **before** choosing, as AGENTS.md requires; then pick Auth.js (NextAuth v5) or Better Auth by which one's current release supports that version (D18a) and record the decision and the evidence in `docs/VERIFIED_VALUES.md` under V35
     - Exact-pinned installs, no open ranges: `mongodb` at the version resolved in V28; `mongodb-memory-server` as a **dev dependency** at the version resolved in V31; the chosen auth library and its MongoDB adapter at the versions resolved in V30/V35
     - Do not install until V28, V30, V31, and V35 are resolved — an unresolved package name or version is a blocker, not a guess
     - _Requirements: 17.8, 2.1_
     - _Design: D18a; depends on V28, V30, V31, V35_
 
-- [ ] 51. Finish the shared contracts from the working tree on MongoDB: environment, access constants, catalogs, error taxonomy
-  - [ ] 51.1 Finish `src/lib/env.ts`, `src/lib/env.public.ts`, `src/lib/config/verified.ts`, and `.env.example`
+- [x] 51. Finish the shared contracts from the working tree on MongoDB: environment, access constants, catalogs, error taxonomy
+  - [x] 51.1 Finish `src/lib/env.ts`, `src/lib/env.public.ts`, `src/lib/config/verified.ts`, and `.env.example`
     - Continue the uncommitted working-tree edit to completion: the env contract still carries Supabase variables, and A3 removes `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` from the `serverEnv`/public schemas and from `.env.example`
     - Add to `serverEnv`: `MONGODB_URI` and the auth library's secret plus `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (named per the chosen library, V30), each with its consuming module in the comment. Keep `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and `RETENTION_SWEEP_SECRET` (the design's env table names the retention secret `RETENTION_SWEEP_SECRET`)
     - `NEXT_PUBLIC_TELEGRAM_BOT_USERNAME` and `NEXT_PUBLIC_RAZORPAY_KEY_ID` stay in `env.public.ts` as the only public values; there is no public database URL or key anymore
@@ -1324,27 +1324,27 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 1.10, 13.7, 17.2, 22.25_
     - _Design: Security boundary — Environment variables; depends on V28, V30_
 
-  - [ ] 51.2 Replace the `BOT_UNLOCK_PRICE` placeholder in `src/lib/config/access.ts` with the A2 window constants
+  - [x] 51.2 Replace the `BOT_UNLOCK_PRICE` placeholder in `src/lib/config/access.ts` with the A2 window constants
     - O22-1 and O22-3 are resolved (A2, A3 point 6). Replace the `PRICE_UNDECIDED` placeholder that 37.2 shipped with the real values: the price as a single compile-time constant readable from one place — ₹20, expressed in **paise (2000)** because Razorpay takes minor units — and the recharge period as **7 days**, both constants and neither an environment variable
     - Add `nextExpiry(now, currentExpiry)` computing `max(now, currentExpiry) + 7 days` (A2 decision 3): recharging early loses no paid days, recharging after a lapse starts at payment. Keep `LINK_TOKEN_TTL_MINUTES`
     - Keep the shape of `src/lib/config/media.ts`; keep every value out of `.env.example` and the env schema so a change is a reviewable diff (22.4)
     - _Requirements: 21.4, 22.4_
     - _Design: Amendment A2 decisions 1 and 3; resolves 49.1, 49.2_
 
-  - [ ] 51.3 Finish the farmer-facing copy in `src/lib/messages/{en,hi,mr}.ts`
+  - [x] 51.3 Finish the farmer-facing copy in `src/lib/messages/{en,hi,mr}.ts`
     - Complete the uncommitted en/hi/mr bot copy: the linking instructions (sender on no Profile, and `/start` with no payload), the one invalid-link reply serving unknown/expired/consumed identically in each language, the already-linked and replacement replies plus the message to the replaced Telegram_User_Id, and the already-linked-elsewhere reply
     - The **recharge** copy A2 adds: the gated reply now states an *expired or absent* window, the ₹20 recharge price from `BOT_UNLOCK_PRICE`, and where to recharge (the bot recharge command and the Web_App card); a confirmation after a successful recharge stating the new expiry
     - All static, pre-translated, no catalog lookup reaching a model call (D5); replies go out in the resolved Profile's language, English where none resolved
     - _Requirements: 10.3, 21.8, 21.9, 21.10, 21.11, 21.12, 21.13, 21.17, 21.19, 22.14_
     - _Design: D5, D13; Amendment A2 decision 5_
 
-  - [ ] 51.4 Finish the error taxonomy in `src/lib/errors.ts`
+  - [x] 51.4 Finish the error taxonomy in `src/lib/errors.ts`
     - Complete the working-tree edit: `OAUTH_INCOMPLETE` (401, retryable) replacing `OTP_INVALID`; `WEBHOOK_SECRET_TOKEN_INVALID` (Telegram) and `WEBHOOK_SIGNATURE_INVALID` (payment) with `WEBHOOK_VERIFY_TOKEN_INVALID` retired; `PAYMENT_ORDER_FAILED` (502, retryable) whose message never carries provider text; `STORAGE_REF_INVALID`/`STORAGE_REF_FORBIDDEN` keep their stable code names but now mean a Media_Reference (`{fileId,kind}`) and a GridFS `metadata.ownerId` mismatch; `AUDIO_TOO_LONG`/`FILE_TOO_LARGE` state the 3 MB audio limit (A3)
     - Keep the four Telegram outcomes (linking instructions, invalid-link, already-linked-elsewhere, gated reply) **out** of the taxonomy — they are catalog sentences with HTTP 200 audited by `telegram_inbound.status`, not error envelopes
     - _Requirements: 1.3, 8.3, 11.3, 11.4, 15.3, 15.4, 22.1, 22.6_
     - _Design: Error taxonomy_
 
-  - [ ]* 51.5 Finish the unit tests for the amended contracts
+  - [x]* 51.5 Finish the unit tests for the amended contracts
     - Every new server variable throws at first use with its own name; no removed Supabase name survives in `env.ts`, `env.public.ts`, `verified.ts`, or `.env.example`
     - `BOT_UNLOCK_PRICE` now reads a real ₹20/2000-paise value and no longer throws; `nextExpiry` returns `max(now, currentExpiry) + 7 days` for an early recharge, a lapsed recharge, and a first grant
     - The three invalid-token cases resolve to one byte-identical string within each of en/hi/mr; every amended taxonomy code yields its status, retryable flag, and a non-empty message in all three languages

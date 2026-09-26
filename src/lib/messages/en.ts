@@ -13,7 +13,12 @@ import type { MessageCatalog } from '@/lib/messages/types';
 export const en: MessageCatalog = {
   errors: {
     AUTH_REQUIRED: 'Please sign in to continue.',
-    OTP_INVALID: 'That code is incorrect or has expired. Please request a new one.',
+    /**
+     * Requirement 1.3, as amended by A1. Google sign-in did not complete — cancelled, a provider
+     * error, or a callback with nothing to exchange. The farmer's one action is to sign in again,
+     * so the sentence says exactly that and names none of Google's internals.
+     */
+    OAUTH_INCOMPLETE: 'Sign-in did not complete. Please try signing in again.',
     LANGUAGE_UNSUPPORTED: 'Jamee answers in English, Hindi and Marathi only.',
 
     /**
@@ -61,13 +66,22 @@ export const en: MessageCatalog = {
       'Looking at your crop photo took longer than usual. Please send the photo again.',
 
     /**
-     * Requirement 11.4 and 11.2 are machine-to-machine. Meta reads a status code, not prose,
-     * and the design is explicit that these responses carry no body content — so these two
-     * strings exist only to keep `Record<ErrorCode, string>` total, and are never rendered to
-     * a farmer.
+     * Requirements 11.3, 11.4, 22.6 are machine-to-machine. Telegram and Razorpay read a status
+     * code, not prose, and these responses carry no body content — so these strings exist only to
+     * keep `Record<ErrorCode, string>` total, and are never rendered to a farmer.
+     * `WEBHOOK_SIGNATURE_INVALID` is the payment route (raw-body signature); the Telegram route's
+     * `WEBHOOK_SECRET_TOKEN_INVALID` is the header secret. The old verify-token code retired with
+     * the WhatsApp GET handshake.
      */
     WEBHOOK_SIGNATURE_INVALID: 'Request signature could not be verified.',
-    WEBHOOK_VERIFY_TOKEN_INVALID: 'Verification token did not match.',
+    WEBHOOK_SECRET_TOKEN_INVALID: 'Webhook secret token did not match.',
+
+    /**
+     * Requirement 22.1. Creating the payment order failed on the provider's side. The provider's
+     * own error text is deliberately NOT here (D15) — the farmer can only try again, so that is
+     * all the sentence says.
+     */
+    PAYMENT_ORDER_FAILED: 'Jamee could not start the payment just now. Please try again.',
 
     CONVERSATION_NOT_FOUND: 'That conversation could not be found.',
     DIAGNOSIS_NOT_FOUND: 'That result could not be found.',
@@ -158,6 +172,8 @@ export const en: MessageCatalog = {
     appName: 'Jamee',
     tagline: 'Crop disease help for tomato and potato farmers.',
     signInHeading: 'Sign in with your phone number',
+    googleSignIn: 'Continue with Google',
+    signInDidNotComplete: 'Sign-in did not complete. Please try signing in again.',
     phoneLabel: 'Phone number',
     phoneHint: 'Include your country code, for example +919876543210.',
     sendCode: 'Send code',
@@ -202,6 +218,7 @@ export const en: MessageCatalog = {
     channelLabel: 'Sent from',
     channelWeb: 'Website',
     channelWhatsapp: 'WhatsApp',
+    channelTelegram: 'Telegram',
     dateLabel: 'Date',
     symptomsHeading: 'What to look for',
     causesHeading: 'Why it happens',
@@ -236,6 +253,75 @@ export const en: MessageCatalog = {
     /** D11's soft deadline. The farmer's next send is a new message id, so it is processed. */
     takingLonger:
       'Jamee is taking longer than usual on this photo. Please send it again in a moment.',
+  },
+
+  /**
+   * Telegram replies (Amendment A1). Static, in-repository copy — no model call is reachable
+   * (D5). The four outcomes here are successful handling, not errors (37.4). English is also the
+   * fallback for a `/start` from a sender on no Profile, who has no resolved language.
+   */
+  telegram: {
+    /** Requirement 10.3 / 21.9 — not linked yet: what to do on the web profile screen. */
+    linkingInstructions:
+      'Welcome to Jamee. This Telegram account is not linked yet. Please open Jamee in your web browser, sign in, and go to your profile to get a link. Open that link to connect this Telegram account.',
+    /**
+     * Requirement 21.8 — ONE string for unknown, expired, and consumed. It must give no hint of
+     * which case it is: it never says "expired" or "already used", only that the link did not
+     * work and where to get a fresh one.
+     */
+    invalidLink:
+      'This link did not work. Please open Jamee in your web browser, sign in, and get a new link from your profile.',
+    /** Requirement 21.10 — the token bound an account already on this Profile. */
+    alreadyLinked: 'This Telegram account is already linked to your Jamee account.',
+    /** Requirement 21.11 — sent to the new account that replaced the old one. */
+    replaced:
+      'This Telegram account is now linked to your Jamee account. The account linked before this one no longer reaches it.',
+    /** Requirement 21.12 — sent to the account that was replaced. */
+    replacedNotice:
+      'This Telegram account is no longer linked to that Jamee account. Another Telegram account was linked in its place.',
+    /** Requirement 21.13 — this account belongs to a different Jamee account. */
+    alreadyLinkedElsewhere:
+      'This Telegram account is already linked to a different Jamee account. Please unlink it there first, then try again.',
+    /**
+     * Requirement 22.14 — linked but not entitled. Price interpolated as `{price}` from
+     * `RECHARGE_PRICE_RUPEES`; the copy carries no literal amount. Amendment A2: names the 7-day
+     * window and the /recharge command as an in-Telegram alternative to the web app.
+     */
+    gated:
+      'This Telegram account is linked. To use Jamee here, recharge for \u20B9{price} — that gives you 7 days. Pay in the Jamee web app under Payments, or send /recharge here for a payment link. After it goes through, send your crop photo.',
+    /** Amendment A2 decision 5 — the /recharge command, exempt from the gate. Price as `{price}`. */
+    rechargeCommand:
+      'Recharge Jamee for \u20B9{price} to use the bot for 7 days. Open this link to pay: {link}',
+    /** A window that was active before but has lapsed. Price as `{price}`. */
+    lapsedWindow:
+      'Your Jamee access has ended. Recharge for \u20B9{price} to use the bot for another 7 days. Send /recharge here for a payment link, or pay in the Jamee web app.',
+    /** Requirement 10.9 — a type outside text, photo and voice note. */
+    unsupportedType: 'Jamee accepts photos, text and voice notes.',
+    /** D11's soft deadline. The farmer's next send is a new update, so it is processed. */
+    takingLonger:
+      'Jamee is taking longer than usual on this. Please send it again in a moment.',
+    /** Confirmation after a successful recharge, naming the new expiry as `{expiry}`. */
+    rechargeConfirmation:
+      'Your recharge went through. Jamee is active until {expiry}. Send your crop photo here.',
+  },
+
+  /**
+   * Web recharge card and Telegram link card (Amendment A1/A2/A3). Static copy; `{price}` from
+   * `RECHARGE_PRICE_RUPEES`, `{expiry}` from the entitlement.
+   */
+  access: {
+    rechargeHeading: 'Telegram bot access',
+    rechargeButton: 'Recharge for \u20B9{price}',
+    rechargeActiveUntil: 'Your Telegram access is active until {expiry}.',
+    rechargeInactive: 'You have no active Telegram access. Recharge to use the Jamee bot.',
+    rechargeConfirming: 'Confirming your payment\u2026',
+    rechargeTestModeNote:
+      'This is a test-mode payment. No real money is charged; use a test card.',
+    linkHeading: 'Telegram account',
+    linkButton: 'Link a Telegram account',
+    unlinkButton: 'Unlink this Telegram account',
+    linkedState: 'A Telegram account is linked to your Jamee account.',
+    notLinkedState: 'No Telegram account is linked yet.',
   },
 
   severity: {

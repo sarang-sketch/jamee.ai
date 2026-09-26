@@ -85,7 +85,7 @@ interface DocumentedCode {
  */
 const DOCUMENTED: Record<ErrorCode, DocumentedCode> = {
   AUTH_REQUIRED: { status: 401, retryable: false },
-  OTP_INVALID: { status: 400, retryable: true },
+  OAUTH_INCOMPLETE: { status: 401, retryable: true },
   LANGUAGE_UNSUPPORTED: { status: 400, retryable: false },
   MESSAGE_INVALID: { status: 400, retryable: false },
   STORAGE_REF_INVALID: { status: 400, retryable: false },
@@ -101,7 +101,8 @@ const DOCUMENTED: Record<ErrorCode, DocumentedCode> = {
   PROVIDERS_UNAVAILABLE: { status: 503, retryable: true },
   DIAGNOSIS_TIMEOUT: { status: 504, retryable: true },
   WEBHOOK_SIGNATURE_INVALID: { status: 401, retryable: false },
-  WEBHOOK_VERIFY_TOKEN_INVALID: { status: 403, retryable: false },
+  WEBHOOK_SECRET_TOKEN_INVALID: { status: 401, retryable: false },
+  PAYMENT_ORDER_FAILED: { status: 502, retryable: true },
   CONVERSATION_NOT_FOUND: { status: 404, retryable: false },
   DIAGNOSIS_NOT_FOUND: { status: 404, retryable: false },
   SWEEP_UNAUTHORIZED: { status: 401, retryable: false },

@@ -5,50 +5,49 @@ import {
   ALL_ENV_KEYS,
   missingServerEnvKeys,
   OPTIONAL_SERVER_ENV_KEYS,
-  optionalServerEnv,
   PUBLIC_ENV_VARS,
   SERVER_ENV_KEYS,
   serverEnv,
   type ServerEnvKey,
 } from '@/lib/env';
-import { hasPublicEnv, publicEnv } from '@/lib/env.public';
+import {
+  hasPublicEnv,
+  razorpayPublicKeyId,
+  telegramBotUsername,
+} from '@/lib/env.public';
 
 /**
  * Unit tests for the environment accessor (`src/lib/env.ts`, `src/lib/env.public.ts`) and for the
  * resolved-value constants (`src/lib/config/verified.ts`).
  *
- * Requirements: 13.7 (the Service_Role_Key is referenced only in server modules), 17.2 (every
- *               variable is documented, and a model identifier is a reviewed constant rather than
- *               an environment value)
+ * Requirements: 13.7 (secrets are referenced only in server modules), 17.2 (every variable is
+ *               documented, and a model identifier is a reviewed constant rather than an
+ *               environment value)
+ *
+ * ### Amendment A3
+ *
+ * MongoDB replaces Supabase. The four Supabase names are gone; `MONGODB_URI`, `BETTER_AUTH_SECRET`,
+ * `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` take their place, and the two
+ * public Supabase names are replaced by the Telegram bot username and the Razorpay checkout key id.
+ * These tests assert the new contract and that **no Supabase or WhatsApp env name survives** in the
+ * schema, the completeness list, or the public names (task 51.5).
  *
  * ### What this file adds that Property 30 does not
  *
- * `tests/property/deliverable.property.test.ts` (Property 30) reads `.env.example` off the
- * filesystem and asserts it lists every key in `ALL_ENV_KEYS`, each with a placeholder rather than
- * a live credential. That is a claim about the **documentation**. It never calls `serverEnv()`, so
- * nothing there observes:
- *
- *  - that a missing variable throws **at first use** rather than at import, or ever;
- *  - that the thrown message names the variable the *current* call needed, and not the others;
- *  - that `verified.ts`'s constants are populated — Property 30's placeholder rules are pointed at
- *     `.env.example`, and a `TODO` sitting in a model identifier would pass every one of them.
- *
- * Those three are this file's subject. Every value stubbed below is obviously synthetic; the
- * accessor only checks presence and length, so a realistic shape would buy nothing and would put a
- * credential-looking string in the repository.
+ * Property 30 reads `.env.example` and asserts it lists every key in `ALL_ENV_KEYS`. That is a claim
+ * about the documentation and never calls `serverEnv()`. This file observes the accessor's own
+ * behaviour: a missing variable throws at first use naming only the key that was read, and every
+ * constant in `verified.ts` is populated (a placeholder in a model identifier would pass every one
+ * of Property 30's `.env.example` checks).
  */
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures                                                                    */
 /* -------------------------------------------------------------------------- */
 
-/**
- * A value that satisfies every server key's rule — `min(1)` for seven of them and `min(16)` for
- * `CRON_SECRET` — while reading as scaffolding to anyone who finds it in a log.
- */
+/** Satisfies every server key's rule — `min(1)` for twelve of them and `min(16)` for `CRON_SECRET`. */
 const SYNTHETIC = 'synthetic-test-value-not-a-secret';
 
-/** `vi.stubEnv(key, undefined)` deletes the variable, which is the "operator forgot it" case. */
 function clearAllServerEnv(): void {
   for (const key of SERVER_ENV_KEYS) vi.stubEnv(key, undefined);
 }
@@ -76,29 +75,69 @@ afterEach(() => {
 /* ========================================================================== */
 
 describe('the environment key sets', () => {
-  it('name eight required server variables and three public ones', () => {
+  it('name thirteen required server variables and two public ones', () => {
+    // Amendment A3: MongoDB replaces Supabase, so SUPABASE_SERVICE_ROLE_KEY is gone and MONGODB_URI
+    // plus the four Better-Auth/Google names take its place. Amendment A1 already retired the
+    // WHATSAPP_* names for Telegram + Razorpay.
     expect([...SERVER_ENV_KEYS].sort()).toStrictEqual([
+      'BETTER_AUTH_SECRET',
+      'BETTER_AUTH_URL',
       'CRON_SECRET',
       'GEMINI_API_KEY',
+      'GOOGLE_CLIENT_ID',
+      'GOOGLE_CLIENT_SECRET',
       'GROQ_API_KEY',
-      'SUPABASE_SERVICE_ROLE_KEY',
-      'WHATSAPP_ACCESS_TOKEN',
-      'WHATSAPP_APP_SECRET',
-      'WHATSAPP_PHONE_NUMBER_ID',
-      'WHATSAPP_VERIFY_TOKEN',
+      'MONGODB_URI',
+      'RAZORPAY_KEY_ID',
+      'RAZORPAY_KEY_SECRET',
+      'RAZORPAY_WEBHOOK_SECRET',
+      'TELEGRAM_BOT_TOKEN',
+      'TELEGRAM_WEBHOOK_SECRET_TOKEN',
     ]);
-    expect(OPTIONAL_SERVER_ENV_KEYS).toStrictEqual(['WHATSAPP_API_VERSION']);
-    expect(PUBLIC_ENV_VARS).toHaveLength(3);
+    expect(OPTIONAL_SERVER_ENV_KEYS).toStrictEqual([]);
+    expect(PUBLIC_ENV_VARS).toHaveLength(2);
     // Every public name is prefixed, which is the half of Requirement 13.7 the bundler enforces.
     for (const name of PUBLIC_ENV_VARS) expect(name.startsWith('NEXT_PUBLIC_')).toBe(true);
+    // The only public values are the Telegram bot username and the Razorpay checkout key id.
+    expect([...PUBLIC_ENV_VARS].sort()).toStrictEqual([
+      'NEXT_PUBLIC_RAZORPAY_KEY_ID',
+      'NEXT_PUBLIC_TELEGRAM_BOT_USERNAME',
+    ]);
   });
 
-  it('keeps the required and optional sets disjoint', () => {
-    // `WHATSAPP_API_VERSION` is optional *because* it defaults to the V12-pinned constant. Listing
-    // it in both places would make an absent override a hard failure for every WhatsApp request.
-    for (const optional of OPTIONAL_SERVER_ENV_KEYS) {
-      expect(SERVER_ENV_KEYS as readonly string[]).not.toContain(optional);
+  it('carries no retired Supabase or WhatsApp name anywhere in the env contract', () => {
+    // 51.1 / 51.5: no removed Supabase or WhatsApp name survives in env.ts or env.public.ts.
+    const retired = [
+      // Supabase (retired by A3)
+      'SUPABASE_SERVICE_ROLE_KEY',
+      'NEXT_PUBLIC_SUPABASE_URL',
+      'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY',
+      'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+      // WhatsApp (retired by A1)
+      'WHATSAPP_ACCESS_TOKEN',
+      'WHATSAPP_PHONE_NUMBER_ID',
+      'WHATSAPP_VERIFY_TOKEN',
+      'WHATSAPP_APP_SECRET',
+      'WHATSAPP_API_VERSION',
+    ];
+    for (const name of retired) {
+      expect(ALL_ENV_KEYS, `${name} still in ALL_ENV_KEYS`).not.toContain(name);
+      expect(SERVER_ENV_KEYS as readonly string[], `${name} still in SERVER_ENV_KEYS`).not.toContain(
+        name,
+      );
     }
+    for (const name of PUBLIC_ENV_VARS) {
+      expect(name, `${name} mentions Supabase`).not.toMatch(/SUPABASE/i);
+      expect(name, `${name} mentions WhatsApp`).not.toMatch(/WHATSAPP/i);
+    }
+    // The completeness list must not mention either family.
+    for (const key of ALL_ENV_KEYS) {
+      expect(key).not.toMatch(/SUPABASE/i);
+      expect(key).not.toMatch(/WHATSAPP/i);
+    }
+  });
+
+  it('keeps the key list free of duplicates', () => {
     expect(new Set(ALL_ENV_KEYS).size).toBe(ALL_ENV_KEYS.length);
   });
 });
@@ -113,77 +152,45 @@ describe('serverEnv on a missing variable', () => {
 
     for (const key of SERVER_ENV_KEYS) {
       const error = thrownBy(() => serverEnv(key));
-
-      // The whole point of the accessor: the message says which variable, so an operator reading a
-      // 500 in the platform log knows what to set without opening the codebase.
       expect(error.message, `${key} did not name itself`).toContain(key);
       expect(error.message).toContain('is not set');
-      // And it points at where the answer lives, which is the other half of Requirement 17.2.
       expect(error.message).toContain('.env.example');
     }
   });
 
   it('throws at first use rather than at import, and only for the key that was read', () => {
-    // This module imported `serverEnv` at the top of the file with nothing configured, and that
-    // import did not throw — a module-scope `parse()` would have failed `next build`, where the
-    // production secrets are legitimately absent, for a reason unrelated to the build.
+    // This module imported `serverEnv` at the top with nothing configured, and that import did not
+    // throw — a module-scope parse() would have failed `next build`, where production secrets are
+    // legitimately absent, for a reason unrelated to the build.
     clearAllServerEnv();
     vi.stubEnv('GEMINI_API_KEY', SYNTHETIC);
 
-    // A request that needs only the Gemini key succeeds while seven others are unset.
     expect(serverEnv('GEMINI_API_KEY')).toBe(SYNTHETIC);
 
-    // And the failure for a different key names that key alone. A whole-object parse would list
-    // every absent variable, so `/api/diagnose` would report four WhatsApp names it never needed.
-    const error = thrownBy(() => serverEnv('WHATSAPP_APP_SECRET'));
-    expect(error.message).toContain('WHATSAPP_APP_SECRET');
-    expect(error.message).not.toContain('SUPABASE_SERVICE_ROLE_KEY');
+    // A failure for a different key names that key alone. A whole-object parse would list every
+    // absent variable, so `/api/diagnose` would report the Telegram and Razorpay names it never needs.
+    const error = thrownBy(() => serverEnv('MONGODB_URI'));
+    expect(error.message).toContain('MONGODB_URI');
+    expect(error.message).not.toContain('BETTER_AUTH_SECRET');
     expect(error.message).not.toContain('CRON_SECRET');
   });
 
   it('treats an empty value as absent', () => {
-    // A platform UI that saves a cleared field as `''` must behave the same as never setting it;
-    // otherwise the SDK receives an empty credential and fails several frames from the cause.
     vi.stubEnv('GROQ_API_KEY', '');
-
     const error = thrownBy(() => serverEnv('GROQ_API_KEY'));
     expect(error.message).toContain('GROQ_API_KEY');
     expect(error.message).toContain('is not set');
   });
 
-  /**
-   * **A divergence between the three accessors, pinned rather than fixed.**
-   *
-   * `optionalServerEnv()` and `publicEnv()`'s `nonEmpty()` both treat a whitespace-only value as
-   * unset, and both trim what they return. `serverEnv()` does neither: its rule is `z.string().min(1)`,
-   * which `'   '` satisfies, so a cleared-then-spaced field is handed to the SDK verbatim. The
-   * `raw.trim() === ''` branch in its own error message anticipates the case, but that branch is
-   * unreachable for a value `min(1)` accepts — only `''` gets there.
-   *
-   * Asserted as it behaves, not as it arguably should. Changing `env.ts` is outside this task, and
-   * leaving the case untested would make a later fix look like a regression instead of a fix: this
-   * expectation is what a fix should flip, with the reason written next to it.
-   */
-  it('currently accepts a whitespace-only value, unlike the optional and public accessors', () => {
-    vi.stubEnv('GROQ_API_KEY', '   ');
-    vi.stubEnv('WHATSAPP_API_VERSION', '   ');
-
-    expect(serverEnv('GROQ_API_KEY')).toBe('   ');
-    expect(optionalServerEnv('WHATSAPP_API_VERSION')).toBeUndefined();
-  });
-
   it('returns the configured value once it is set', () => {
     setAllServerEnv();
-
     for (const key of SERVER_ENV_KEYS) expect(serverEnv(key)).toBe(SYNTHETIC);
   });
 });
 
 describe('serverEnv on a present but invalid variable', () => {
   it('names the variable and says it is set rather than absent', () => {
-    // `CRON_SECRET` is the one key with a rule beyond presence: at least 16 characters (V21). A
-    // too-short value is a different operator mistake from an absent one, and conflating them
-    // would send someone looking for a variable they had already set.
+    // CRON_SECRET is the one key with a rule beyond presence: at least 16 characters (V21).
     vi.stubEnv('CRON_SECRET', 'short');
 
     const error = thrownBy(() => serverEnv('CRON_SECRET'));
@@ -196,23 +203,8 @@ describe('serverEnv on a present but invalid variable', () => {
 });
 
 /* ========================================================================== */
-/* The optional variable, and the non-throwing probe                           */
+/* The non-throwing probe                                                       */
 /* ========================================================================== */
-
-describe('optionalServerEnv', () => {
-  it('returns undefined when unset or blank, and the trimmed value otherwise', () => {
-    vi.stubEnv('WHATSAPP_API_VERSION', undefined);
-    expect(optionalServerEnv('WHATSAPP_API_VERSION')).toBeUndefined();
-
-    vi.stubEnv('WHATSAPP_API_VERSION', '   ');
-    expect(optionalServerEnv('WHATSAPP_API_VERSION')).toBeUndefined();
-
-    // Absence is a supported configuration: the caller falls back to `WHATSAPP_API_VERSION_PINNED`,
-    // so this accessor reports rather than throws.
-    vi.stubEnv('WHATSAPP_API_VERSION', '  v99.0  ');
-    expect(optionalServerEnv('WHATSAPP_API_VERSION')).toBe('v99.0');
-  });
-});
 
 describe('missingServerEnvKeys', () => {
   it('reports every gap at once, for a startup or health check', () => {
@@ -222,55 +214,41 @@ describe('missingServerEnvKeys', () => {
     setAllServerEnv();
     expect(missingServerEnvKeys()).toStrictEqual([]);
 
-    // Including a key that is set but fails its own rule — "missing" here means "unusable".
     vi.stubEnv('CRON_SECRET', 'short');
     expect(missingServerEnvKeys()).toStrictEqual<ServerEnvKey[]>(['CRON_SECRET']);
   });
 });
 
 /* ========================================================================== */
-/* The public accessor                                                         */
+/* The public accessors                                                        */
 /* ========================================================================== */
 
-const [PUBLIC_URL_VAR, PUBLISHABLE_KEY_VAR, ANON_KEY_VAR] = PUBLIC_ENV_VARS;
-
-describe('publicEnv', () => {
+describe('the public accessors', () => {
   function clearPublic(): void {
     for (const name of PUBLIC_ENV_VARS) vi.stubEnv(name, undefined);
   }
 
-  it('throws naming the missing variable', () => {
+  it('each throw naming their own missing variable', () => {
     clearPublic();
 
-    // `createBrowserClient(undefined, undefined)` throws about a malformed URL from inside the SDK,
-    // in the browser console of a farmer's phone. Naming the variable here is what avoids that.
-    expect(thrownBy(publicEnv).message).toContain(PUBLIC_URL_VAR);
-
-    vi.stubEnv(PUBLIC_URL_VAR, 'https://synthetic.supabase.test');
-    const keyError = thrownBy(publicEnv);
-    expect(keyError.message).toContain(PUBLISHABLE_KEY_VAR);
-    // Both spellings are named, so an operator on either side of the V1 rename knows what to set.
-    expect(keyError.message).toContain(ANON_KEY_VAR);
+    expect(thrownBy(telegramBotUsername).message).toContain('NEXT_PUBLIC_TELEGRAM_BOT_USERNAME');
+    expect(thrownBy(razorpayPublicKeyId).message).toContain('NEXT_PUBLIC_RAZORPAY_KEY_ID');
+    expect(hasPublicEnv()).toBe(false);
   });
 
-  it('accepts either spelling of the public key, publishable first', () => {
+  it('return the configured values, and the probe passes once both are set', () => {
     clearPublic();
-    vi.stubEnv(PUBLIC_URL_VAR, 'https://synthetic.supabase.test');
+    vi.stubEnv('NEXT_PUBLIC_TELEGRAM_BOT_USERNAME', 'jamee_bot');
+    vi.stubEnv('NEXT_PUBLIC_RAZORPAY_KEY_ID', 'rzp_test_synthetic');
 
-    // V1: current docs name it `…PUBLISHABLE_KEY`; older projects issue it under `…ANON_KEY`. A
-    // project created on either side of that rename must work unchanged.
-    vi.stubEnv(ANON_KEY_VAR, 'synthetic-anon-key');
-    expect(publicEnv().supabaseAnonKey).toBe('synthetic-anon-key');
-
-    vi.stubEnv(PUBLISHABLE_KEY_VAR, 'synthetic-publishable-key');
-    expect(publicEnv().supabaseAnonKey).toBe('synthetic-publishable-key');
-
-    expect(publicEnv().supabaseUrl).toBe('https://synthetic.supabase.test');
+    expect(telegramBotUsername()).toBe('jamee_bot');
+    expect(razorpayPublicKeyId()).toBe('rzp_test_synthetic');
     expect(hasPublicEnv()).toBe(true);
   });
 
-  it('probes without throwing', () => {
+  it('reports a gap through the probe when only one is set', () => {
     clearPublic();
+    vi.stubEnv('NEXT_PUBLIC_TELEGRAM_BOT_USERNAME', 'jamee_bot');
     expect(hasPublicEnv()).toBe(false);
   });
 });
@@ -282,13 +260,9 @@ describe('publicEnv', () => {
 /**
  * A marker means "someone left this to be filled in later". A plausible guess that lands in
  * `verified.ts` is indistinguishable from a fact, which is what the V-item discipline exists to
- * prevent — and an unfilled marker is the visible half of that failure.
- *
- * Word-boundary anchored so a legitimate value cannot trip a substring: `x-hub-signature-256`
- * contains no whole word from this list, and neither does any model identifier.
+ * prevent. Word-boundary anchored so a legitimate value cannot trip a substring.
  */
 const PLACEHOLDER_WORDS = /\b(TODO|TBD|FIXME|XXX|CHANGEME|PLACEHOLDER|UNKNOWN|REPLACE|YOUR)\b/i;
-/** `<your-key-here>`, the other common shape. */
 const ANGLE_PLACEHOLDER = /<[^>]*>/;
 const PLACEHOLDER_FRAGMENTS = [/your[-_]/i, /example\.(com|org|net)/i, /\bhere\b/i];
 
@@ -301,13 +275,7 @@ function assertUsableString(value: string, at: string): void {
   }
 }
 
-/**
- * Walk one exported constant, recording every leaf it reaches.
- *
- * Recursive because the module exports nested objects (`GEMINI_GENERATION`, `META_CHALLENGE_PARAMS`,
- * `DAILY_QUOTAS`) and arrays (`ACCEPTED_IMAGE_TYPES`, the status lists). Checking only the top level
- * would leave every one of those unexamined, which is most of the file.
- */
+/** Walk one exported constant, recording every leaf it reaches. */
 function walk(value: unknown, at: string, leaves: string[]): void {
   if (typeof value === 'string') {
     assertUsableString(value, at);
@@ -315,8 +283,7 @@ function walk(value: unknown, at: string, leaves: string[]): void {
     return;
   }
   if (typeof value === 'number') {
-    // `STORAGE_OWNER_PATH_SEGMENT_INDEX` and `GEMINI_GENERATION.temperature` are legitimately 0, so
-    // the claim is "a real, finite, non-negative number", not "truthy".
+    // STORAGE_OWNER_PATH_SEGMENT_INDEX and GEMINI_GENERATION.temperature are legitimately 0.
     expect(Number.isFinite(value), `${at} is not a finite number`).toBe(true);
     expect(value, `${at} is negative`).toBeGreaterThanOrEqual(0);
     leaves.push(at);
@@ -337,8 +304,7 @@ function walk(value: unknown, at: string, leaves: string[]): void {
     for (const [key, nested] of entries) walk(nested, `${at}.${key}`, leaves);
     return;
   }
-  // `null` reaches here only for `VISION_FALLBACK_MODEL`, whose `null` is the V9 withdrawal case
-  // and must stay expressible. Anything else null-ish is unresolved and fails.
+  // `null` reaches here only for VISION_FALLBACK_MODEL, whose null is the V9 withdrawal case.
   expect(
     at,
     `${at} is null or undefined; only VISION_FALLBACK_MODEL may be null`,
@@ -350,22 +316,18 @@ describe('the resolved-value constants in config/verified.ts', () => {
     const leaves: string[] = [];
     const exported = Object.entries(verified).filter(([, value]) => typeof value !== 'function');
 
-    expect(exported.length).toBeGreaterThan(30);
+    expect(exported.length).toBeGreaterThan(20);
     for (const [name, value] of exported) walk(value, name, leaves);
 
-    // Non-vacuity: the walk really did reach into the nested shapes rather than stopping at the
-    // top level. `GEMINI_GENERATION` alone contributes six leaves.
+    // Non-vacuity: the walk really reached into the nested shapes. GEMINI_GENERATION alone
+    // contributes several leaves.
     expect(leaves.length).toBeGreaterThan(exported.length);
     expect(leaves).toContain('GEMINI_GENERATION.thinkingLevel');
     expect(leaves).toContain('ACCEPTED_IMAGE_TYPES[0]');
     expect(leaves).toContain('DAILY_QUOTAS.image');
-    expect(leaves).toContain('WHATSAPP_INBOUND_MAX_BYTES.audio');
   });
 
   it('holds the model identifiers as constants rather than as environment variables', () => {
-    // Requirement 17.2's other half, and the note at the top of `env.ts`: a model id in an env var
-    // is an unversioned, unreviewable change to Jamee's behaviour. So none of these names is a key
-    // the accessor knows about, and reading one requires editing a reviewed file.
     const identifiers = [
       verified.GEMINI_MODEL,
       verified.GROQ_TEXT_MODEL,
@@ -380,21 +342,20 @@ describe('the resolved-value constants in config/verified.ts', () => {
     }
   });
 
-  it('derives the Graph API base from the pinned version', () => {
-    // `graphApiBase` is the module's one exported function, so the walk above skips it. Its default
-    // argument is the V12 pin, and that is the value every WhatsApp call site gets.
-    assertUsableString(verified.graphApiBase(), 'graphApiBase()');
-    expect(verified.graphApiBase()).toContain(verified.WHATSAPP_API_VERSION_PINNED);
-    expect(verified.graphApiBase('v99.0')).toContain('v99.0');
-  });
-
   it('keeps the vision fallback expressible as null without being null today', () => {
     // V9 records both Groq vision candidates as Preview models that "may be discontinued at short
-    // notice", so `null` has to stay assignable — that edit is the whole withdrawal change. Today
-    // it holds a real identifier, which is why the vision chain has two members.
+    // notice", so `null` has to stay assignable. Today it holds a real identifier.
     expect(verified.VISION_FALLBACK_MODEL).not.toBeNull();
     if (verified.VISION_FALLBACK_MODEL !== null) {
       assertUsableString(verified.VISION_FALLBACK_MODEL, 'VISION_FALLBACK_MODEL');
     }
+  });
+
+  it('lowers the voice size cap to 3 MB per Amendment A3', () => {
+    // A3 §3: the upload leg carries the file and must stay under the 4.5 MB Request_Body_Ceiling,
+    // so the voice cap drops from 10 MB to 3 MB while the 120-second duration limit is kept.
+    expect(verified.MAX_AUDIO_BYTES).toBe(3 * 1024 * 1024);
+    expect(verified.MAX_AUDIO_BYTES).toBeLessThan(verified.REQUEST_BODY_CEILING_BYTES);
+    expect(verified.MAX_AUDIO_SECONDS).toBe(120);
   });
 });

@@ -56,7 +56,13 @@ interface CodeSpec {
  */
 export const ERROR_SPECS: Record<ErrorCode, CodeSpec> = {
   AUTH_REQUIRED: { status: 401, retryable: false, requirement: '1.7' },
-  OTP_INVALID: { status: 400, retryable: true, requirement: '1.3' },
+  /**
+   * 401, retryable. Google sign-in did not complete — cancelled, a provider error, or a
+   * callback with nothing exchangeable (Amendment A1, Requirement 1.3). Retryable because the
+   * farmer's next action IS a retry: sign in again. One code for all three causes, because
+   * distinguishing them would only describe Google's internals.
+   */
+  OAUTH_INCOMPLETE: { status: 401, retryable: true, requirement: '1.3' },
   LANGUAGE_UNSUPPORTED: { status: 400, retryable: false, requirement: '9.5' },
 
   /**
@@ -113,11 +119,26 @@ export const ERROR_SPECS: Record<ErrorCode, CodeSpec> = {
   DIAGNOSIS_TIMEOUT: { status: 504, retryable: true, requirement: '3.7' },
 
   /**
-   * The one deliberate exception to Requirement 10.11's "acknowledge with 200": an unsigned
+   * The one deliberate exception to Requirement 10.11's "acknowledge with 200": an unverified
    * request is not an accepted delivery. Body carries no content.
+   *
+   * `WEBHOOK_SIGNATURE_INVALID` is now the PAYMENT route's failure — the Razorpay signature over
+   * the raw body did not verify, or the signing secret is unconfigured (D15, Requirement 22.6).
+   * `WEBHOOK_SECRET_TOKEN_INVALID` is the TELEGRAM route's — the `X-Telegram-Bot-Api-Secret-Token`
+   * header was absent or wrong (D12, Requirement 11.3/11.4). Both are 401: an unconfigured secret
+   * lands in the same branch as a wrong one, so a forgotten variable cannot open the route.
+   * The retired `WEBHOOK_VERIFY_TOKEN_INVALID` (and its 403 GET handshake) went with WhatsApp —
+   * Telegram has no verification challenge.
    */
-  WEBHOOK_SIGNATURE_INVALID: { status: 401, retryable: false, requirement: '11.4' },
-  WEBHOOK_VERIFY_TOKEN_INVALID: { status: 403, retryable: false, requirement: '11.2' },
+  WEBHOOK_SIGNATURE_INVALID: { status: 401, retryable: false, requirement: '11.4, 22.6' },
+  WEBHOOK_SECRET_TOKEN_INVALID: { status: 401, retryable: false, requirement: '11.3, 11.4' },
+
+  /**
+   * 502, retryable. Creating a Payment_Order with the provider failed (Requirement 22.1). The
+   * message never carries the provider's error text (D15) — a provider payload in a farmer-facing
+   * message is a leak, and the action is the same whatever the provider said: try again.
+   */
+  PAYMENT_ORDER_FAILED: { status: 502, retryable: true, requirement: '22.1' },
 
   CONVERSATION_NOT_FOUND: { status: 404, retryable: false, requirement: '7.1' },
   DIAGNOSIS_NOT_FOUND: { status: 404, retryable: false, requirement: '12.3' },

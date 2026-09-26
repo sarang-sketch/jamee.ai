@@ -118,6 +118,19 @@ export interface MessageCatalog {
     appName: string;
     tagline: string;
     signInHeading: string;
+    /**
+     * The Google sign-in button label (Amendment A1: web sign-in is Google OAuth, not phone OTP).
+     * `GoogleSignInButton` reads it. A catalog entry rather than a component literal because the
+     * sign-in screen is the FIRST text a farmer reads, before any preferred language is known.
+     */
+    googleSignIn: string;
+    /**
+     * Requirement 1.3 — the callback returned nothing exchangeable (cancelled, provider error, or
+     * an empty return). Shown on the sign-in screen with a working retry. This is the farmer-facing
+     * rendering of `OAUTH_INCOMPLETE`, kept here as well as in `errors` because the sign-in screen
+     * renders it directly rather than through the API error envelope.
+     */
+    signInDidNotComplete: string;
     phoneLabel: string;
     phoneHint: string;
     sendCode: string;
@@ -202,6 +215,12 @@ export interface MessageCatalog {
     channelLabel: string;
     channelWeb: string;
     channelWhatsapp: string;
+    /**
+     * Requirement 12.1 — the term for an entry that arrived through the Telegram channel, so a
+     * Telegram-originated diagnosis reads as an answer in history rather than a bare word. Added by
+     * Amendment A1 alongside `channelWhatsapp` (which is retained only for not-yet-deleted modules).
+     */
+    channelTelegram: string;
     /** Requirement 12.1 — the term for an entry's creation timestamp, for the same reason. */
     dateLabel: string;
     symptomsHeading: string;
@@ -240,6 +259,10 @@ export interface MessageCatalog {
   /**
    * Replies the WhatsApp adapter sends. Localized from the resolved profile's preferred
    * language; the unresolvable-number case has no profile, so it falls back to `en`.
+   *
+   * RETIRED by Amendment A1 — the channel is Telegram now (see `telegram` below). This block is
+   * kept only because the not-yet-retired WhatsApp modules still read it; task 44 deletes it with
+   * `src/lib/whatsapp.ts` and `src/lib/whatsapp-dispatch.ts`.
    */
   whatsapp: {
     /** Requirement 10.3 — the sender has no Profile. */
@@ -263,6 +286,131 @@ export interface MessageCatalog {
     voiceNoteFormatUnsupported: string;
     /** D11's soft-deadline branch — the row is marked `failed` and 200 is still returned. */
     takingLonger: string;
+  };
+
+  /**
+   * Replies the Telegram adapter sends (Amendment A1). All of it is **pre-translated static
+   * copy** shipped in the repository — no lookup here reaches a model, a network call, or
+   * `process.env` (D5). Replies go out in the resolved Profile's language, and in English where
+   * no Profile was resolved (a `/start` from a sender on no Profile has no language to resolve).
+   *
+   * These are the FOUR Telegram outcomes that are NOT errors (37.4): the linking instructions,
+   * the invalid-link reply, the already-linked-elsewhere reply, and the gated reply are all
+   * successful handling of a well-formed authenticated delivery. They are catalog sentences, each
+   * accompanied by HTTP 200 to Telegram, and their audit trail is `telegram_inbound.status`, not
+   * `usage_logs` — so they live here rather than in the error taxonomy.
+   *
+   * Requirements: 10.3, 21.8, 21.9, 21.10, 21.11, 21.12, 21.13, 21.17, 21.19, 22.14.
+   * Design: D5, D13.
+   */
+  telegram: {
+    /**
+     * Requirement 10.3 / 21.9. Shown to a sender stored on no Profile AND to a `/start` carrying
+     * no token payload — both mean "this Telegram account is not linked yet". Tells the farmer
+     * what to do on the web profile screen to link this account. Names no token, because in this
+     * branch there is none.
+     */
+    linkingInstructions: string;
+    /**
+     * Requirement 21.8. The reply for a `/start` token that is unknown, expired, OR consumed —
+     * **one string serving all three, byte-identical within each language.** Distinguishing them
+     * would turn the bot into a token-validity oracle: a party sending arbitrary `/start` payloads
+     * to a public bot could tell "no such token" from "that token existed and has expired", which
+     * leaks whether a guess was structurally right (D13). The three cases share one message and
+     * one code path that never learns which it is in.
+     */
+    invalidLink: string;
+    /** Requirement 21.10. The token bound THIS Telegram account to a Profile it is already on. */
+    alreadyLinked: string;
+    /**
+     * Requirement 21.11. A new Telegram account replaced the one previously on this Profile. Sent
+     * to the NEW account, naming that it is now the linked one.
+     */
+    replaced: string;
+    /**
+     * Requirement 21.12. The separate message sent to the Telegram_User_Id that was REPLACED,
+     * telling it that it no longer reaches that Jamee account. A distinct string with a distinct
+     * recipient — the replaced account did nothing and is being informed, not answered.
+     */
+    replacedNotice: string;
+    /**
+     * Requirement 21.13. This Telegram account is already linked to a DIFFERENT Jamee account and
+     * must be unlinked there first. Not an error (37.4): it is the correct handling of a
+     * well-formed delivery whose sender resolves to someone else's `telegram_user_id`.
+     */
+    alreadyLinkedElsewhere: string;
+    /**
+     * Requirement 22.14. This Telegram account is linked, but the farmer holds no unexpired
+     * entitlement, so the bot needs a recharge before it does farmer-facing work. Names the price,
+     * the 7-day period, and where in the Web_App to pay. The price is interpolated as `{price}` from
+     * `RECHARGE_PRICE_RUPEES` in `src/lib/config/access.ts` — the copy carries no literal amount,
+     * so a price change is one constant edit and never a translation edit (criterion 22.4).
+     * Amendment A2: also names the bot recharge command as an alternative.
+     */
+    gated: string;
+    /**
+     * Amendment A2 decision 5: the bot recharge command is exempt from the gate, so a farmer
+     * whose window has lapsed can recover from inside Telegram. Replies with a payment link.
+     * Price interpolated as `{price}`.
+     */
+    rechargeCommand: string;
+    /**
+     * A window that was once active but has lapsed — the farmer has recharged before but the
+     * window expired. Same copy as `gated` may use but can note expiry; price as `{price}`.
+     */
+    lapsedWindow: string;
+    /**
+     * Requirement 10.9 — a message type outside text, photo and voice note. Same intent as the
+     * retired whatsapp.unsupportedType, now for the Telegram channel.
+     */
+    unsupportedType: string;
+    /**
+     * D11's soft-deadline branch — the row is marked `failed` and 200 is still returned. Same
+     * intent as the retired whatsapp.takingLonger, now for the Telegram channel.
+     */
+    takingLonger: string;
+    /**
+     * Confirmation sent after a successful recharge, stating the new expiry. Interpolated as
+     * `{expiry}` (a formatted date/time string in the farmer's language).
+     */
+    rechargeConfirmation: string;
+  };
+
+  /**
+   * Web_App static copy for the two access cards on the profile screen (Amendment A1, A2, A3).
+   * All static — no model call, no network call, no `process.env` (D5). The price is interpolated
+   * as `{price}` from `RECHARGE_PRICE_RUPEES` and the current expiry as `{expiry}` from the
+   * farmer's entitlement, both computed by the caller.
+   *
+   * Requirements: 21.20 (the link/unlink card), 22.4 (price from one constant), 22.7/22.18 (the
+   * recharge card shows the active window and offers a further recharge), O22-3/A3 (test mode).
+   */
+  access: {
+    /** The recharge card heading. */
+    rechargeHeading: string;
+    /** The recharge action button, naming the price: e.g. "Recharge for ₹{price}". */
+    rechargeButton: string;
+    /** Shown while the window is active, naming the current expiry: interpolates `{expiry}`. */
+    rechargeActiveUntil: string;
+    /** Shown when no window is active (never recharged, or lapsed). */
+    rechargeInactive: string;
+    /** The optimistic "confirming your payment" state after checkout returns — grants nothing. */
+    rechargeConfirming: string;
+    /**
+     * The test-mode note (A3 resolves O22-3 to test mode for all pilot testers). States that no
+     * real money moves and test cards are used, so a tester is not surprised by a test checkout.
+     */
+    rechargeTestModeNote: string;
+    /** The Telegram link card heading. */
+    linkHeading: string;
+    /** The action that mints a Link_Token and opens the deep link (Requirement 21.20). */
+    linkButton: string;
+    /** The action that unlinks the currently linked Telegram account (Requirement 21.15). */
+    unlinkButton: string;
+    /** Shown when a Telegram account is currently linked. */
+    linkedState: string;
+    /** Shown when no Telegram account is linked yet. */
+    notLinkedState: string;
   };
 
   /** Requirement 15.4/26.2 — severity is conveyed by LABEL TEXT, never by colour alone. */

@@ -32,10 +32,11 @@ import { PUBLIC_ENV_VARS } from '@/lib/env.public';
  *     preferred one.
  *
  * NOTE ON WHAT DOES *NOT* BELONG HERE. Values resolved from third-party documentation —
- * model identifiers, the Meta API version, header names, platform limits — are compile-time
- * constants in `src/lib/config/verified.ts`, not environment variables. A model id in an env
- * var is an unversioned, unreviewable change to Jamee's behaviour; a constant annotated with
- * its V-item is a reviewable one.
+ * model identifiers, header names, platform limits — are compile-time constants in
+ * `src/lib/config/verified.ts`, not environment variables. A model id in an env var is an
+ * unversioned, unreviewable change to Jamee's behaviour; a constant annotated with its V-item is
+ * a reviewable one. There is no Meta API version constant anymore (Telegram publishes one
+ * unversioned surface), so nothing in `verified.ts` replaces the removed Supabase names.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -44,13 +45,20 @@ import { PUBLIC_ENV_VARS } from '@/lib/env.public';
 
 /**
  * The two `NEXT_PUBLIC_` values live in `src/lib/env.public.ts`, which has no `server-only` guard
- * because the browser Supabase client legitimately needs them.
+ * because the browser legitimately needs them (the Telegram deep-link bot username and the
+ * Razorpay checkout key id). *Amendment A3:* there is no public database URL or key anymore — the
+ * two retired Supabase public names are gone, so the only public values are those two.
  *
  * They are re-exported here so a server module has one import for "environment", while the
  * separation that makes Requirement 13.7 mechanical stays intact: a client component importing
  * `env.public` is fine, and a client component importing THIS file is a build error.
  */
-export { publicEnv, hasPublicEnv, PUBLIC_ENV_VARS, type PublicEnv } from '@/lib/env.public';
+export {
+  hasPublicEnv,
+  telegramBotUsername,
+  razorpayPublicKeyId,
+  PUBLIC_ENV_VARS,
+} from '@/lib/env.public';
 
 /* -------------------------------------------------------------------------- */
 /* Server-only variables                                                       */
@@ -59,14 +67,43 @@ export { publicEnv, hasPublicEnv, PUBLIC_ENV_VARS, type PublicEnv } from '@/lib/
 /**
  * Every server secret, with the module that consumes it.
  *
- * `WHATSAPP_API_VERSION` is deliberately OPTIONAL and absent from this schema: it defaults
- * to the V12-pinned constant in `config/verified.ts`. It is an override for the case where
- * Meta deprecates the pinned version faster than a code change can ship, not a value an
- * operator is expected to supply.
+ * Amendment A1 replaced the WhatsApp channel with Telegram and added the Razorpay payment gate.
+ * **Amendment A3 then replaced Supabase entirely with MongoDB:** the four Supabase names
+ * (`SUPABASE_SERVICE_ROLE_KEY`, and the two public Supabase names in `env.public.ts`) are gone,
+ * and `MONGODB_URI` plus the in-app auth library's own secrets take their place. There is no
+ * service-role key because there is no RLS to bypass — tenant isolation is the Data_Access_Layer
+ * (D18), and the only database credential is `MONGODB_URI`, held solely by `src/lib/db/client.ts`.
+ *
+ * No SMS variable was ever here: phone OTP was configured in the Supabase dashboard, so
+ * Requirement 1.10's "no SMS delivery provider" is a `docs/DEPLOYMENT.md` change, not an
+ * `env.ts` one — and Supabase is gone now regardless.
  */
 const serverEnvSchema = z.object({
-  /** Service-role key. RLS-bypassing; `lib/supabase/admin.ts` only. */
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  /**
+   * MongoDB Atlas connection string — the ONLY database credential, and the only holder is
+   * `src/lib/db/client.ts` (D18, D19, V28). Carries credentials; never `NEXT_PUBLIC_`. The
+   * Data_Access_Layer caches one `MongoClient` on `globalThis` within the M0 connection limit
+   * (V32). The URI must include the database name (from Atlas → Connect → Drivers).
+   */
+  MONGODB_URI: z.string().min(1),
+
+  /**
+   * Better Auth session signing/encryption secret (V30, V35). The library reads this exact name
+   * itself. `src/lib/auth/*` only. Long random string.
+   */
+  BETTER_AUTH_SECRET: z.string().min(1),
+
+  /**
+   * Better Auth base URL (V30). Used to build the Google callback; without it the callback may
+   * default to localhost, which breaks a deployed sign-in. `src/lib/auth/*` only.
+   */
+  BETTER_AUTH_URL: z.string().min(1),
+
+  /** Google OAuth client id for the Better Auth Google provider (V30). `src/lib/auth/*` only. */
+  GOOGLE_CLIENT_ID: z.string().min(1),
+
+  /** Google OAuth client secret for the Better Auth Google provider (V30). `src/lib/auth/*` only. */
+  GOOGLE_CLIENT_SECRET: z.string().min(1),
 
   /** Gemini API key. `lib/gemini.ts` only. V6 records that the SDK reads this name itself. */
   GEMINI_API_KEY: z.string().min(1),
@@ -74,17 +111,36 @@ const serverEnvSchema = z.object({
   /** Groq API key — text fallback, vision fallback, and transcription. `lib/groq.ts` only. */
   GROQ_API_KEY: z.string().min(1),
 
-  /** Meta Cloud API bearer token: media download (V14) and send (V15). */
-  WHATSAPP_ACCESS_TOKEN: z.string().min(1),
+  /**
+   * Telegram bot token (V24). The outbound `setWebhook` and `sendMessage` calls, and the
+   * download URL of the `getFile` file retrieval, are all built from it. `lib/telegram.ts` only.
+   */
+  TELEGRAM_BOT_TOKEN: z.string().min(1),
 
-  /** Business phone number id — the path segment of the send endpoint (V15). */
-  WHATSAPP_PHONE_NUMBER_ID: z.string().min(1),
+  /**
+   * The secret string Jamee registered through `setWebhook`, which Telegram presents in the
+   * `X-Telegram-Bot-Api-Secret-Token` header of every delivery (V24, D12). Compared in constant
+   * time before the body is parsed; an absent value is a FAILED verification, not a skipped one,
+   * because this accessor throws and that lands in the same 401 branch. `lib/telegram.ts` only.
+   */
+  TELEGRAM_WEBHOOK_SECRET_TOKEN: z.string().min(1),
 
-  /** Compared against `hub.verify_token` on the webhook GET challenge (Requirement 11.1). */
-  WHATSAPP_VERIFY_TOKEN: z.string().min(1),
+  /**
+   * Razorpay key id — the public identifier the browser checkout also needs (V27). It is
+   * deliberately duplicated as the `NEXT_PUBLIC_RAZORPAY_KEY_ID` public var so the unprefixed
+   * one here is never read from a client component. Order creation, `services/payment.service.ts`.
+   */
+  RAZORPAY_KEY_ID: z.string().min(1),
 
-  /** HMAC-SHA256 key for `X-Hub-Signature-256` over the raw body (Requirement 11.3, V13). */
-  WHATSAPP_APP_SECRET: z.string().min(1),
+  /** Razorpay key secret — signs order creation and never reaches the browser (V27). `services/payment.service.ts`. */
+  RAZORPAY_KEY_SECRET: z.string().min(1),
+
+  /**
+   * HMAC-SHA256 key for the Razorpay webhook signature over the raw body (V27, D15). The
+   * payment webhook route verifies with it before any parse; an absent value is a failed
+   * verification, not a skipped one. `app/api/payment/webhook/route.ts`.
+   */
+  RAZORPAY_WEBHOOK_SECRET: z.string().min(1),
 
   /**
    * Retention-sweep secret (Requirement 18.12).
@@ -93,7 +149,8 @@ const serverEnvSchema = z.object({
    * records that Vercel automatically sends this variable's value as
    * `Authorization: Bearer <CRON_SECRET>` on every cron invocation. A differently named
    * variable could not be used for automatic triggering at all, so there is one secret here
-   * rather than two.
+   * rather than two. (The design's env table names the same secret `RETENTION_SWEEP_SECRET`;
+   * the platform-injected name wins, so it stays `CRON_SECRET` here.)
    */
   CRON_SECRET: z.string().min(16, 'CRON_SECRET must be at least 16 characters (V21)'),
 });
@@ -107,8 +164,11 @@ export const SERVER_ENV_KEYS = Object.keys(serverEnvSchema.shape) as ServerEnvKe
 /**
  * Optional server variables. Absence is a supported configuration, so they are read through
  * a separate accessor that returns `undefined` rather than throwing.
+ *
+ * Empty: there is no optional server variable in this release. The accessor below is kept for
+ * the next optional variable that appears.
  */
-export const OPTIONAL_SERVER_ENV_KEYS = ['WHATSAPP_API_VERSION'] as const;
+export const OPTIONAL_SERVER_ENV_KEYS = [] as const;
 
 /** Every variable name `.env.example` must list — public, required server, and optional. */
 export const ALL_ENV_KEYS: readonly string[] = [
@@ -122,9 +182,9 @@ export const ALL_ENV_KEYS: readonly string[] = [
  * or fails its rule.
  *
  * Per-key rather than whole-object because the failure should name the variable the CURRENT
- * request needed. A whole-object parse in a repository with no WhatsApp credentials
- * configured would fail `/api/diagnose`, which needs none of them, and the error would list
- * four unrelated names.
+ * request needed. A whole-object parse in a repository with only some credentials configured
+ * would fail `/api/diagnose`, which needs none of the Telegram or Razorpay names, and the
+ * error would list several unrelated names.
  *
  * No caching: `process.env` reads are cheap, and a cache would hold a stale value across a
  * hot reload during development.

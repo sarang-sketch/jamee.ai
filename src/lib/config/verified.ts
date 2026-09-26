@@ -271,76 +271,6 @@ export const GEMINI_UNAVAILABLE_STATUS_NAME = 'UNAVAILABLE';
 export const RETRY_AFTER_HEADER = 'retry-after';
 
 /* ========================================================================== */
-/* Meta WhatsApp Business Cloud API                                            */
-/* ========================================================================== */
-
-/**
- * **V12.** Pinned Graph API version.
- *
- * `src/lib/whatsapp.ts` reads the optional `WHATSAPP_API_VERSION` environment variable and
- * falls back to this value — the override is an escape hatch for the case where Meta
- * deprecates this version faster than a code change can ship, not a value an operator is
- * expected to set. The override lives in that server module rather than here so this file
- * stays free of `process.env` and therefore client-importable.
- */
-export const WHATSAPP_API_VERSION_PINNED = 'v26.0';
-
-/** **V12/V14/V15.** Base for the media-metadata, media-binary, and send endpoints. */
-export function graphApiBase(apiVersion: string = WHATSAPP_API_VERSION_PINNED): string {
-  return `https://graph.facebook.com/${apiVersion}`;
-}
-
-/**
- * **V13.** Header name, value prefix, and HMAC algorithm for POST verification.
- *
- * The **byte encoding of the digest is UNRESOLVED (U-V13)** — the docs give the header name,
- * the `sha256=` prefix, SHA-256, and the app-secret key, and say to compare "everything after
- * `sha256=`", but never say hex or base64. `src/lib/whatsapp.ts` therefore accepts EITHER
- * encoding by comparing against both candidate digests in constant time, rather than picking
- * one and rejecting every legitimate delivery if the guess is wrong. Once a real signed
- * delivery confirms the encoding, narrow it here and record the observation in V13.
- */
-export const META_SIGNATURE_HEADER = 'x-hub-signature-256';
-export const META_SIGNATURE_PREFIX = 'sha256=';
-export const META_SIGNATURE_ALGORITHM = 'sha256';
-
-/** **V13.** Query parameter names on the webhook GET challenge (Requirements 11.1, 11.2). */
-export const META_CHALLENGE_PARAMS = {
-  mode: 'hub.mode',
-  challenge: 'hub.challenge',
-  verifyToken: 'hub.verify_token',
-} as const;
-export const META_CHALLENGE_SUBSCRIBE_MODE = 'subscribe';
-
-/**
- * **V15.** `text.body` caps at 4096 characters, so the reply formatter must fit inside it.
- * Jamee truncates on a sentence boundary rather than splitting into several messages: a
- * multi-message reply would arrive out of order often enough to be confusing, and the
- * knowledge-base explanation is 4–6 short sentences by prompt design, so truncation is a
- * guard rather than a routine path.
- */
-export const WHATSAPP_TEXT_BODY_MAX_CHARS = 4096;
-
-/**
- * **V14.** Inbound media caps Meta enforces before Jamee sees the message. Recorded because
- * they are TIGHTER than Jamee's own 10 MB admission ceiling for images (5 MB) and looser for
- * audio (16 MB), so the WhatsApp path cannot simply reuse the web numbers in both directions.
- * V14 also records that an oversized inbound file arrives as error code 131052 rather than as
- * a message at all.
- */
-export const WHATSAPP_INBOUND_MAX_BYTES = {
-  image: 5 * 1024 * 1024,
-  audio: 16 * 1024 * 1024,
-} as const;
-
-/**
- * **V14.** The media URL returned by step 1 is valid for 5 minutes, and the binary fetch in
- * step 2 fails without the `Authorization: Bearer` header. Recorded as a number so the
- * adapter does not cache a media URL across invocations.
- */
-export const WHATSAPP_MEDIA_URL_TTL_SECONDS = 300;
-
-/* ========================================================================== */
 /* Deployment platform                                                         */
 /* ========================================================================== */
 
@@ -407,7 +337,15 @@ export const HAS_PLATFORM_DEADLINE_API = true;
  */
 export const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+/**
+ * Voice recording size cap. **Amendment A3 lowered this from 10 MB to 3 MB.** Under A3 the upload
+ * leg carries the file through the Media_Endpoint and must stay under the 4.5 MB
+ * Request_Body_Ceiling (`REQUEST_BODY_CEILING_BYTES`, V16); 3 MB leaves ~1.5 MB of margin for
+ * multipart framing. A 120-second Opus voice note at a speech bitrate is ~0.36–0.96 MB, so 3 MB
+ * never truncates a legitimate recording while still forbidding an oversized or wrongly-encoded
+ * upload that would breach the ceiling. The 120-second duration limit is unchanged.
+ */
+export const MAX_AUDIO_BYTES = 3 * 1024 * 1024;
 export const MAX_AUDIO_SECONDS = 120;
 
 /** Requirement 8.2 asks for a visible countdown; the design starts it at 100 s. */
