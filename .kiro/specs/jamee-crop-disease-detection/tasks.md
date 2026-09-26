@@ -2,7 +2,7 @@
 
 ## Overview
 
-TypeScript (Next.js App Router, strict mode) with Vitest + fast-check for tests, Supabase for auth/Postgres/storage, and Zod as the single source of contracts. The build order follows the product spec's six phases: foundation → image diagnosis → chat → voice → WhatsApp → production polish.
+TypeScript (Next.js App Router, strict mode) with Vitest + fast-check for tests, and Zod as the single source of contracts. This line originally read "Supabase for auth/Postgres/storage"; **Amendment A3 replaced Supabase entirely with MongoDB Atlas (M0) for records, MongoDB GridFS for files, and an in-app auth library with a MongoDB adapter for Google sign-in — see Phase 8.** The original six-phase build order (foundation → image diagnosis → chat → voice → WhatsApp → production polish) describes how the code got here, not where it is going; the second channel is Telegram (A1) and the backend is MongoDB (A3).
 
 Task 1 resolves the design's "Values to verify before coding" table (V1–V22) and records the findings in `docs/VERIFIED_VALUES.md`. Every later task that touches a third-party surface names the V-items it depends on. **Rule carried through the whole plan: if a V-item cannot be confirmed, the code fails loudly at startup rather than falling back to a guessed value.** No task may substitute an assumed SDK name, model identifier, header name, or platform limit for a resolved one.
 
@@ -14,7 +14,7 @@ Three structural notes on sequencing:
 
 Task 33 sits in the file between tasks 28 and 29 while carrying a higher number than either. That is deliberate: the media-lifecycle amendment added an epic to Phase 6 after work was already in flight, and renumbering tasks 29–32 would have invalidated task references held elsewhere in the spec and in recorded execution history. Its position in the file and its waves in the dependency graph are where the work belongs; only its number is out of sequence. The same reasoning was applied again when the retention epic landed as task 35 between tasks 27 and 28.
 
-**Read this before reading anything above task 36.** Amendment A1 replaced Requirements 1, 10, and 11 and added Requirements 21 and 22, so the second channel is Telegram rather than WhatsApp, web sign-in is Google OAuth rather than phone OTP, identity is the Supabase auth user id rather than the E.164 phone, and the Telegram bot is gated behind a one-time payment. **Phase 7 (tasks 36–48) is the current plan.** Tasks 1–35 are left unchanged as the record of what was built and when; the list at the head of Phase 7 names every one of them that should now be read as history, and no task among them is to be re-run as written. The six-phase build order above describes how the code got here, not where it is going.
+**Read this before reading anything above task 36.** Amendment A1 replaced Requirements 1, 10, and 11 and added Requirements 21 and 22, so the second channel is Telegram rather than WhatsApp, web sign-in is Google OAuth rather than phone OTP, and the Telegram bot is gated behind a payment. **Then Amendment A3 replaced the entire Supabase backend with MongoDB** (Atlas M0 for records, GridFS for files, an in-app auth library with a MongoDB adapter for sessions, and a Data_Access_Layer in place of RLS), and **Amendment A2 turned the one-time unlock into a weekly ₹20 recharge.** **Phase 8 (tasks 50–64) is the current plan; task 64 is the release gate.** Phase 7 (tasks 36–48) is now itself largely history: it built the Telegram/Google/linking/payment layer on Supabase, and Phase 8 rebases that layer onto MongoDB and finishes the A2 recharge — the list at the head of Phase 8 names every Phase 7 task it supersedes and where the work moves. Tasks 1–49 are left unchanged as the record of what was built and when, and no task among them is to be re-run as written. Identity is the Auth_User_Id the in-app auth library assigns (A3), not the Supabase auth user id A1 named or the E.164 phone the original plan used.
 
 ## Tasks
 
@@ -1263,17 +1263,359 @@ Two items in this phase are **BLOCKED on a product-owner decision** and are reco
 Recorded here rather than left inside Phase 7 so that neither reads as work an agent can pick up. Both are excluded from the dependency graph for the same reason the deferred tasks are.
 
 - [ ] 49. BLOCKED — two undecided product questions
-  - [ ] 49.1 BLOCKED on requirements **O22-1** — name the Bot_Unlock_Price
+  - [x] 49.1 BLOCKED on requirements **O22-1** — name the Bot_Unlock_Price
     - The amount is not decided, appears nowhere in the requirements, and is not to be invented in code. `BOT_UNLOCK_PRICE` therefore lands in 37.2 as an explicitly marked placeholder that throws when read
     - Once the product owner names the figure this is a one-line change in `src/lib/config/access.ts` plus the recording in `docs/DEPLOYMENT.md` — 22.4 requires the amount to live in exactly one reviewable constant precisely so that it is
     - Until then: **37.2 completes with the placeholder, and this task cannot complete at all.** The gated reply of 37.3 and the unlock card of 43.5 both render that placeholder, so neither can be signed off, and 48 reports the state rather than routing around it
     - _Requirements: 22.4, 22.14_
 
-  - [ ] 49.2 BLOCKED on requirements **O22-3** — decide test mode or live mode for the pilot
+  - [x] 49.2 BLOCKED on requirements **O22-3** — decide test mode or live mode for the pilot
     - The 5 to 6 pilot testers cannot reach the Telegram channel without a captured payment, and this is undecided: real money in live mode at whatever figure O22-1 settles on, or the provider's test mode with test credentials and test cards, which exercises the whole webhook path without money moving
     - The trade is stated and not resolvable here — live mode is the only way to witness the real checkout a farmer will see, test mode is the only way to run the sequence repeatedly at no cost to a tester
     - Either way `docs/DEPLOYMENT.md` records which mode a given environment is configured for (47.1) and `docs/TESTING_REPORT.md` records which mode the one real checkout ran in (47.3). Neither document can be completed without the decision
     - _Requirements: 17.3, 22.25_
+
+### Phase 8 — Amendment A3: MongoDB replaces Supabase, records and files alike
+
+This phase is **release work, not deferred**, and it is now **the current plan** — the same standing Phase 7 held before it. Amendment A3 is a strict product-owner instruction: MongoDB Atlas (free M0) is the only backend, GridFS holds every uploaded file, an in-app auth library with a MongoDB adapter performs Google sign-in and sessions, and tenant isolation moves out of the database into a server-side Data_Access_Layer. Amendment A2 also lands here where it was not yet built: the entitlement becomes a weekly ₹20 (2000 paise) window renewed by recharge, not a one-time unlock. Jamee is an academic project, so throughout this phase prefer the smallest implementation that satisfies the requirements — the tests stay, production hardening (fixed egress IPs, private networking, paid tiers) does not.
+
+Amendment A3 does **not** renumber any requirement, criterion, or correctness property, and it retires V1, V3, V4, V5, V22, and V23 in place while adding V28–V35. It leaves A1 (Telegram, Google sign-in as a flow, linking) and A2 (the weekly recharge and its arithmetic) in force and changes only what those things are *stored in* and *served from*. Tasks 1–49 stay exactly as written as the historical record; the list below names every Phase 7 task A3 supersedes and where its work moves. **No task in 1–49 is to be re-run as written, and none is renumbered or rewritten.**
+
+- **36.1, 36.2** (resolve V23–V27, the Telegram capabilities doc) stand as done, and A3 adds a *new* resolve step rather than reopening them → **50** resolves V28–V35 and marks V1/V3/V4/V5/V22/V23 retired in place. V24–V27 are untouched by A3.
+- **37.1** (`env.ts`, `env.public.ts`, `.env.example`, `verified.ts`) → 51.1. The Supabase variables were never removed; A3 removes `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY`, and adds `MONGODB_URI` and the auth-library secret + Google client id/secret. This is the "several tests unfinished, env contract still carries Supabase" working-tree state finished on MongoDB.
+- **37.2** (`src/lib/config/access.ts`) stands as done, but A2 resolves O22-1 (₹20) and O22-3 (test mode), so → 51.2 replaces the `BOT_UNLOCK_PRICE` placeholder with the A2 window constants (₹20 / 2000 paise, 7-day period, `nextExpiry` arithmetic). This is where task 49's O22-1/O22-3 work is *resolved*, not carried.
+- **37.3, 37.4, 37.5** (message catalogs, error taxonomy, contract tests) → 51.3, 51.4, 51.5, finishing the working-tree edits (en/hi/mr bot copy and the error taxonomy were edited but incomplete) and adding the recharge copy A2 needs.
+- **38.1–38.8** (the migration edits and the three new SQL migrations `0012`–`0014`) are **rebased onto MongoDB here.** Migrations `0012`–`0014` are now historical (written for Postgres); A3 turns every collection, index, and validator into the one idempotent `npm run db:setup` script → 53. The `profiles` identity, the `('web','telegram')` enums, `telegram_inbound` on `update_id`, `link_tokens`, `payment_orders`/`bot_entitlements` (with the A2 window column), and `webhook_throttle` all move to 53 as collections with `$jsonSchema` validators and unique/partial indexes. `38.7`'s generated-types step has no MongoDB analogue and does not carry.
+- **39.1–39.4** (Google sign-in via Supabase `signInWithOAuth`, the callback code exchange, `ensure-profile.ts`) are **rebased onto the auth library here** → 55. The D8 bootstrap becomes the library's sign-in / user-created hook plus the idempotent upsert through the Data_Access_Layer.
+- **40.1–40.5, 41.1–41.5** (Telegram library, `telegram-inbound`, dispatch, webhook route) → 57. The verification, parsing, `getFile`+download, and dispatch survive; the service-role GridFS upload becomes a Data_Access_Layer write, and the gate becomes an *unexpired-entitlement* check (A2).
+- **42.1–42.5** (linking) → 58. The single-statement consume-and-bind becomes a multi-document transaction (D19, V33).
+- **43.1–43.6** (one-time payment) are **rebased onto the A2 weekly recharge here** → 59. Razorpay order creation in paise from `access.ts`, raw-body signature verification, the claim-plus-extension in one transaction, the bot recharge command exempt from the gate, and the web recharge card showing the current expiry.
+- **44.1, 44.2** (delete WhatsApp and phone-OTP artifacts) → 60, which A3 widens: it also deletes every Supabase client module and dependency, the `supabase/` directory, and the Supabase-only tests.
+- **45.1–45.12** (restate falsified properties, add Properties 32–35) → 61, which restates the properties A3 re-vocabularises (RLS→Data_Access_Layer, Storage→GridFS) and adds the new **Property 36 (recharge extension arithmetic)** A2 requires; Properties 32–35 are re-stated for the window/no-double-extension change.
+- **46.1–46.5** (integration suite on the amended channel) → 62, now on `mongodb-memory-server` in replica-set mode rather than the local Supabase stack.
+- **47.1–47.6** (deployment package, docs, CI guards) → 63, rewritten for Atlas + auth library + `db:setup`, adding `scripts/check-data-access.ts` (D18) and `about-project.md`.
+- **48** (Phase 7 release gate) → **64**, the Phase 8 final checkpoint, which becomes the release gate in its place.
+- **49.1, 49.2** (BLOCKED on O22-1 and O22-3) are **RESOLVED by A2 and A3.** A2 sets the price at ₹20 in test-mode-compatible paise and A3 (point 6) resolves O22-3 to test mode for all pilot testers. Their items are therefore checked off below rather than carried: the `BOT_UNLOCK_PRICE` placeholder is replaced with the real window constants in 51.2, and the deployment/testing records that were blocked are written in 63. Neither remains a product-owner question.
+
+Two items are **BLOCKED on a verification outcome, not a product decision**, and are recorded outside the numbered work at the end of this phase: the age-based orphan backstop still ships behind its flag until V29 confirms the GridFS `uploadDate` query (P8-1), and the retention window on M0 is a number to review early because the ~512 MB budget is tighter than Supabase's and now shared with records (P8-2).
+
+- [ ] 50. Resolve V28–V35 and retire V1, V3, V4, V5, V22, and V23 before any Amendment A3 code is written
+  - [ ] 50.1 Append V28–V35 to `docs/VERIFIED_VALUES.md` and mark V1, V3, V4, V5, V22, and V23 retired in place
+    - Resolve each against the installed package and official docs, recording the exact value, the document consulted, and the date, exactly as task 1.1 did: **V28** the MongoDB Node.js driver — package name and exact version, `MongoClient` construction and options, the `globalThis`-cached reuse across serverless invocations within the M0 connection limit, the duplicate-key error code (`11000`) and where it sits on the thrown error, the `findOneAndUpdate` return shape (pre- vs post-update and under which option), and how a `$jsonSchema` validation failure is reported; **V29** GridFS — `GridFSBucket` upload and download streams, how `metadata` is written and read, whether `bucket.delete(id)` errors on an absent id, the `files` fields available for a query (notably `uploadDate`, `length`, `metadata`), and how a download stream pipes to a route `Response`; **V30** the auth library's Google-provider config, its MongoDB adapter package and how it is pointed at this database, the sign-in / user-created hook for the D8 bootstrap, the server-side session-read call that replaces `src/proxy.ts`'s Supabase check, where the library secret and Google client id/secret are configured, and which callback/redirect URLs to register; **V31** `mongodb-memory-server` — package and version, how to start it as a single-node replica set so multi-document transactions work, its startup cost and any binary download, and how the harness points the Data_Access_Layer at it; **V32** Atlas M0 limits — the ~512 MB cluster-storage allowance, the concurrent-connection cap the cached pool must stay under, and any operation/throughput caps at the 6-farmer scale; **V33** transactions on M0 — confirmation a multi-document transaction runs on the M0 replica set, the session/transaction API on the driver, and the retryable-write / transient-transaction-error semantics; **V34** the Gemini and Groq inline-byte limits for an image and for inline audio, since analysis now sends bytes inline rather than by URL
+    - Retire V1, V3, V4, V5, V22, and V23 **in place, keeping their numbers and their already-resolved findings**, each row naming its successor (V1→V28/V30, V3→V29, V4→D18/V29, V5→D8/V30, V22→V29, V23→V30/V35), so a reader arriving from a `docs/VERIFIED_VALUES.md` citation finds the number and learns it no longer applies
+    - Mark any unresolvable item explicitly as UNRESOLVED — never as an assumed value; the V-item rule holds unchanged (an unconfirmed value fails loudly at startup)
+    - _Requirements: 17.3_
+    - _Design: Amendment A3 — V-items; Values to verify before coding_
+
+  - [ ] 50.2 Resolve V35 (the auth-library choice) by reading the bundled Next.js docs first, and install the pinned packages
+    - Read `node_modules/next/dist/docs` (resolved from `AGENTS.md`'s directory) to establish the installed Next.js major/minor **before** choosing, as AGENTS.md requires; then pick Auth.js (NextAuth v5) or Better Auth by which one's current release supports that version (D18a) and record the decision and the evidence in `docs/VERIFIED_VALUES.md` under V35
+    - Exact-pinned installs, no open ranges: `mongodb` at the version resolved in V28; `mongodb-memory-server` as a **dev dependency** at the version resolved in V31; the chosen auth library and its MongoDB adapter at the versions resolved in V30/V35
+    - Do not install until V28, V30, V31, and V35 are resolved — an unresolved package name or version is a blocker, not a guess
+    - _Requirements: 17.8, 2.1_
+    - _Design: D18a; depends on V28, V30, V31, V35_
+
+- [ ] 51. Finish the shared contracts from the working tree on MongoDB: environment, access constants, catalogs, error taxonomy
+  - [ ] 51.1 Finish `src/lib/env.ts`, `src/lib/env.public.ts`, `src/lib/config/verified.ts`, and `.env.example`
+    - Continue the uncommitted working-tree edit to completion: the env contract still carries Supabase variables, and A3 removes `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` from the `serverEnv`/public schemas and from `.env.example`
+    - Add to `serverEnv`: `MONGODB_URI` and the auth library's secret plus `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (named per the chosen library, V30), each with its consuming module in the comment. Keep `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and `RETENTION_SWEEP_SECRET` (the design's env table names the retention secret `RETENTION_SWEEP_SECRET`)
+    - `NEXT_PUBLIC_TELEGRAM_BOT_USERNAME` and `NEXT_PUBLIC_RAZORPAY_KEY_ID` stay in `env.public.ts` as the only public values; there is no public database URL or key anymore
+    - There is no Meta API version to carry, so no `verified.ts` entry replaces the removed Supabase ones; `verified.ts` holds the resolved model identifiers and platform limits only
+    - `.env.example` lists every current name with a placeholder and no real secret, and neither `BOT_UNLOCK_PRICE` nor `LINK_TOKEN_TTL_MINUTES` appears in it
+    - _Requirements: 1.10, 13.7, 17.2, 22.25_
+    - _Design: Security boundary — Environment variables; depends on V28, V30_
+
+  - [ ] 51.2 Replace the `BOT_UNLOCK_PRICE` placeholder in `src/lib/config/access.ts` with the A2 window constants
+    - O22-1 and O22-3 are resolved (A2, A3 point 6). Replace the `PRICE_UNDECIDED` placeholder that 37.2 shipped with the real values: the price as a single compile-time constant readable from one place — ₹20, expressed in **paise (2000)** because Razorpay takes minor units — and the recharge period as **7 days**, both constants and neither an environment variable
+    - Add `nextExpiry(now, currentExpiry)` computing `max(now, currentExpiry) + 7 days` (A2 decision 3): recharging early loses no paid days, recharging after a lapse starts at payment. Keep `LINK_TOKEN_TTL_MINUTES`
+    - Keep the shape of `src/lib/config/media.ts`; keep every value out of `.env.example` and the env schema so a change is a reviewable diff (22.4)
+    - _Requirements: 21.4, 22.4_
+    - _Design: Amendment A2 decisions 1 and 3; resolves 49.1, 49.2_
+
+  - [ ] 51.3 Finish the farmer-facing copy in `src/lib/messages/{en,hi,mr}.ts`
+    - Complete the uncommitted en/hi/mr bot copy: the linking instructions (sender on no Profile, and `/start` with no payload), the one invalid-link reply serving unknown/expired/consumed identically in each language, the already-linked and replacement replies plus the message to the replaced Telegram_User_Id, and the already-linked-elsewhere reply
+    - The **recharge** copy A2 adds: the gated reply now states an *expired or absent* window, the ₹20 recharge price from `BOT_UNLOCK_PRICE`, and where to recharge (the bot recharge command and the Web_App card); a confirmation after a successful recharge stating the new expiry
+    - All static, pre-translated, no catalog lookup reaching a model call (D5); replies go out in the resolved Profile's language, English where none resolved
+    - _Requirements: 10.3, 21.8, 21.9, 21.10, 21.11, 21.12, 21.13, 21.17, 21.19, 22.14_
+    - _Design: D5, D13; Amendment A2 decision 5_
+
+  - [ ] 51.4 Finish the error taxonomy in `src/lib/errors.ts`
+    - Complete the working-tree edit: `OAUTH_INCOMPLETE` (401, retryable) replacing `OTP_INVALID`; `WEBHOOK_SECRET_TOKEN_INVALID` (Telegram) and `WEBHOOK_SIGNATURE_INVALID` (payment) with `WEBHOOK_VERIFY_TOKEN_INVALID` retired; `PAYMENT_ORDER_FAILED` (502, retryable) whose message never carries provider text; `STORAGE_REF_INVALID`/`STORAGE_REF_FORBIDDEN` keep their stable code names but now mean a Media_Reference (`{fileId,kind}`) and a GridFS `metadata.ownerId` mismatch; `AUDIO_TOO_LONG`/`FILE_TOO_LARGE` state the 3 MB audio limit (A3)
+    - Keep the four Telegram outcomes (linking instructions, invalid-link, already-linked-elsewhere, gated reply) **out** of the taxonomy — they are catalog sentences with HTTP 200 audited by `telegram_inbound.status`, not error envelopes
+    - _Requirements: 1.3, 8.3, 11.3, 11.4, 15.3, 15.4, 22.1, 22.6_
+    - _Design: Error taxonomy_
+
+  - [ ]* 51.5 Finish the unit tests for the amended contracts
+    - Every new server variable throws at first use with its own name; no removed Supabase name survives in `env.ts`, `env.public.ts`, `verified.ts`, or `.env.example`
+    - `BOT_UNLOCK_PRICE` now reads a real ₹20/2000-paise value and no longer throws; `nextExpiry` returns `max(now, currentExpiry) + 7 days` for an early recharge, a lapsed recharge, and a first grant
+    - The three invalid-token cases resolve to one byte-identical string within each of en/hi/mr; every amended taxonomy code yields its status, retryable flag, and a non-empty message in all three languages
+    - _Requirements: 13.7, 15.3, 21.8, 22.4_
+
+- [ ] 52. Build the Data_Access_Layer as the only holder of the driver
+  - [ ] 52.1 Create `src/lib/db/client.ts` — the cached server-only MongoClient
+    - `import 'server-only'` at the top; a `globalThis`-cached `MongoClient` so serverless invocations reuse one pool within the M0 connection limit (D19, V28, V32); the factory throws when `typeof window !== 'undefined'`; `MONGODB_URI` read through `serverEnv`
+    - This module and its siblings under `src/lib/db/**` are the **only** code that imports the `mongodb` driver or touches the raw handle
+    - _Requirements: 13.7_
+    - _Depends on: V28, V32_
+
+  - [ ] 52.2 Create the typed collection handles and `$jsonSchema`-validated accessors
+    - Typed handles for `profiles`, `conversations`, `messages`, `diagnoses`, `usage_logs`, `disease_knowledge`, `link_tokens`, `payment_orders`, `bot_entitlements`, `counters`, `telegram_inbound`, `webhook_throttle`, plus whatever collections the auth adapter needs — types inferred from the existing Zod schemas in `src/lib/schemas.ts`, never hand-declared twice
+    - Every accessor takes the owning Auth_User_Id as a **mandatory** argument and merges `{ ownerId }` into every filter, sets it on every insert, and cannot widen past it on update or delete; there is deliberately **no** unscoped `find(arbitraryFilter)` seam (D18)
+    - The writing accessor sets `updatedAt` (there is no trigger); expose the atomic operations of D19 (`counter_try_increment` / decrement / used as `findOneAndUpdate`, the `telegram_inbound` `insertOne` claim, the `webhook_throttle` upsert, and the two transactional operations for linking and payment as session-bearing helpers)
+    - _Requirements: 13.1, 13.2, 14.1, 14.2, 14.3_
+    - _Design: D18, D19; depends on V28, V33_
+
+  - [ ] 52.3 Create `scripts/check-data-access.ts` as a CI guard
+    - Fail the build if any file outside `src/lib/db/**` imports the `mongodb` driver or the raw database handle — the sibling of `check-secret-scope.ts`, turning "isolation is application-enforced" into a module boundary a static check proves (D18)
+    - _Requirements: 13.7_
+    - _Design: D18; Static architecture check (CI)_
+
+  - [ ]* 52.4 Write unit tests for the owner-id merge and the client isolation
+    - Every accessor merges `{ ownerId }` into filters and sets it on inserts; an update or delete cannot escape the owner scope; there is no accessor that accepts a filter with no owner
+    - The client factory throws when a browser global is present; importing `src/lib/db/client.ts` from a `'use client'` module fails the build
+    - _Requirements: 13.2, 13.7_
+
+- [ ] 53. Create the idempotent `npm run db:setup` — collections, validators, indexes, seed
+  - [ ] 53.1 Create `scripts/db-setup.ts` (run as `npm run db:setup`) creating collections with `$jsonSchema` validators
+    - Create all twelve Jamee collections idempotently (creating an existing collection or index is a no-op). Attach `$jsonSchema` validators pinning the enumerated fields the SQL CHECKs held: `profiles.language` ∈ en/hi/mr; `conversations.channel` and `messages.channel` ∈ web/telegram; `messages.role` ∈ farmer/jamee and `input_kind` ∈ text/voice/image; `disease_knowledge.disease_name` ∈ the five Verified_Conditions, `crop` ∈ tomato/potato, and the healthy-has-no-treatment invariant where `$jsonSchema` can express it; `diagnoses.status` ∈ identified/unknown, `severity`, `channel`, `model_provider`, and the unknown-shape / identified-shape constraints; `usage_logs.operation`/`outcome`/`channel`; `counters` and `webhook_throttle` enumerations; `payment_orders.status` ∈ created/captured/failed/cancelled; `telegram_inbound.message_type` and `status` (incl. `unlinked`, `not_entitled`)
+    - `profiles._id` is the Auth_User_Id; `bot_entitlements._id` is the Auth_User_Id (at-most-one-per-farmer by primary key, D14); `telegram_inbound._id` is the `update_id` (the claim, D19)
+    - _Requirements: 4.1, 4.2, 13.1, 13.3, 13.4, 17.6, 21.16, 22.12_
+    - _Design: Data model and collection setup; D14, D19; depends on V28_
+
+  - [ ] 53.2 Create every index from design A3 in the same script
+    - Unique indexes for every former `UNIQUE`, **partial or sparse where the field is nullable**: `profiles.telegram_user_id` partial (unique when present, any number of unlinked profiles), `disease_knowledge.disease_name`, `link_tokens.token_hash`, `payment_orders.provider_order_id`, `payment_orders.provider_payment_id` partial (the A3-called-out case), `bot_entitlements.provider_payment_id`
+    - Query indexes: `conversations {user_id, updated_at desc}`, `messages {conversation_id, created_at desc}`, `diagnoses {user_id, created_at desc}` and `{conversation_id, created_at desc}`, the partial retention index `{createdAt: 1}` with `partialFilterExpression: { fullImageDeletedAt: null }`, `usage_logs {user_id, created_at desc}` and `{outcome, created_at desc}`, `telegram_inbound {received_at desc}`, `link_tokens {user_id, created_at desc}`, `payment_orders {user_id, created_at desc}`
+    - The compound `counters {user_id, operation, window_kind, window_key}` and `webhook_throttle {route, caller_hash, window_key}` unique indexes that make the atomic upserts safe (D19)
+    - A **TTL index of about 7 days on `telegram_inbound`** (per V24's retention reasoning — the dedup store need not grow without bound)
+    - _Requirements: 11.5, 11.6, 13.9, 14.1, 21.7, 22.11_
+    - _Design: D19; 0002–0013 collection notes; depends on V28_
+
+  - [ ] 53.3 Create the single GridFS bucket and its metadata indexes in the same script
+    - One `GridFSBucket` (its `.files`/`.chunks` collections), files distinguished by `metadata.kind` ∈ crop-image/thumbnail/voice, owned by `metadata.ownerId`, linked by `metadata.sourceRef` (D17)
+    - Indexes `{ 'metadata.ownerId': 1, 'metadata.kind': 1 }` for the owner-check and the retention kind-filter; rely on the built-in `uploadDate` for the age-based backstop. No `video` kind is written
+    - _Requirements: 13.5, 13.6_
+    - _Design: D17; depends on V29_
+
+  - [ ] 53.4 Seed the five verified conditions idempotently in the same script
+    - One document each for Tomato Early Blight, Tomato Late Blight, Tomato Healthy, Potato Early Blight, Potato Late Blight with symptoms, causes, treatment, prevention, `default_severity`, and a verbatim extension-service `source` per row (replace the design's placeholder citations with real ones); Tomato Healthy carries an empty treatment array; upsert on `disease_name` so re-running is a no-op
+    - _Requirements: 4.1, 4.2, 17.6_
+    - _Design: 0010 seed_
+
+  - [ ]* 53.5 Write integration tests for the setup, the validators, and the invariants
+    - `count = 5` on `disease_knowledge`; a `$jsonSchema` violation (bad severity, out-of-KB name, an `unknown` diagnosis carrying a disease name) is rejected by the validator; `db:setup` run twice changes nothing
+    - A partial unique index lets any number of profiles omit `telegram_user_id` but rejects a second identical present value; two `bot_entitlements` for one `user_id` fail (primary key) and two rows carrying one `provider_payment_id` fail (unique index); `counter_try_increment` returns the new count below the limit and null/`11000` at it
+    - _Requirements: 4.1, 6.4, 6.5, 13.3, 13.4, 21.16, 22.11, 22.12_
+
+- [ ] 54. Build the GridFS media store, the Media_Endpoint, and the browser upload/record changes
+  - [ ] 54.1 Create `src/lib/media/*` — GridFS write, read, and delete through the Data_Access_Layer
+    - Write an upload stream setting `metadata.kind`, `metadata.ownerId`, and `metadata.sourceRef`; a download stream that reads bytes for inline model sends and for the serve path; `bucket.delete(id)` normalized so an absent id is "already deleted" not an error (V29); an owner check comparing `metadata.ownerId` to the requesting Farmer
+    - Replace `storageRefSchema`/`thumbPathFor` reasoning with `mediaRefSchema` = `{ fileId, kind }` already added to `src/lib/schemas.ts`; the diagnose request refines `kind === 'crop-image'`, voice refines `kind === 'voice'` — a client cannot submit a thumbnail or fabricate a path (there is no path)
+    - _Requirements: 2.5, 2.6, 2.8, 12.5_
+    - _Design: D17; depends on V29, V34_
+
+  - [ ] 54.2 Create `src/app/api/media/route.ts` — the authenticated upload endpoint and the owner-checked serve
+    - POST (multipart, under the 4.5 MB Request_Body_Ceiling): session check, write the file to GridFS with `metadata.ownerId` set from the **session** (never from client input), return a Media_Reference. GET/serve: stream a file back only after the Data_Access_Layer confirms `metadata.ownerId` equals the requesting Farmer; a mismatch is `STORAGE_REF_FORBIDDEN` (403)
+    - No session ⇒ 401 and no write; `maxDuration = 60`
+    - _Requirements: 1.7, 2.1, 2.5, 2.6, 2.7, 12.5_
+    - _Design: D1 (amended), D18; depends on V29_
+
+  - [ ] 54.3 Update the browser uploader and recorder for the upload-through-endpoint change
+    - `ImageUploader`: keep the select-time admission (jpeg/png/webp, 10 MB, stating both on rejection) and the re-encode toward the ~400 KB Downscale_Target and the thumbnail; POST both the Full_Size_Image and the Thumbnail_Derivative to `/api/media`, then POST only the returned crop-image Media_Reference to `/api/diagnose`; an upload failure produces an upload error and no diagnosis request (15.5); a thumbnail upload failure after a successful full-size upload still sends the diagnosis (2.14)
+    - `VoiceRecorder`: **3 MB** post-stop cap (A3, down from 10 MB) stated alongside the 120 s limit, MIME picked from the provider's accepted containers (V10, V20), upload to `/api/media` as a `voice` file, then POST the Media_Reference and measured duration to `/api/voice`
+    - History thumbnails load through the owner-checked Media_Endpoint, not signed URLs; loading states stay bound to real request state (no timed bars)
+    - _Requirements: 2.1, 2.3, 2.4, 2.7, 2.9, 2.10, 2.11, 2.12, 2.13, 2.14, 8.1, 8.2, 8.3, 12.5, 15.2, 15.5_
+    - _Design: Frontend — Browser upload through the Media_Endpoint, Voice capture; depends on V10, V20, V29_
+
+  - [ ]* 54.4 Write tests for the Media_Endpoint owner check and the client admission
+    - The endpoint sets `ownerId` from the session and refuses to serve another farmer's file with 403; a diagnose request whose Media_Reference names a `thumbnail` or `voice` kind, or a file owned by another farmer, is rejected with the quota untouched
+    - Image admission at the 10 MB boundary; voice admission at the 3 MB and 120 s boundaries stating both limits; a failed upload issues no analysis request; the analysis body carries a Media_Reference and no bytes
+    - _Requirements: 2.3, 2.4, 2.5, 2.6, 8.2, 8.3, 15.5_
+
+- [ ] 55. Replace Supabase auth with the chosen auth library
+  - [ ] 55.1 Create `src/lib/auth/*` — the auth library with Google and the MongoDB adapter
+    - Configure the library chosen in 50.2 with the Google provider and its MongoDB adapter pointed at this database (V30); user and session records live in MongoDB; expose the server-side session-read helper that replaces the Supabase session check
+    - Create `src/app/api/auth/*` route(s) as the library requires
+    - _Requirements: 1.1, 1.2_
+    - _Design: D18a; depends on V30, V35_
+
+  - [ ] 55.2 Rebuild `GoogleSignInButton` / `src/app/page.tsx` and the callback on the auth library
+    - One control, one provider, starting authentication through the library; a live session redirects to `/diagnose`; a callback with no exchangeable authorization establishes **no** session and renders `OAUTH_INCOMPLETE` with a retry (1.3). Replace the Supabase `signInWithOAuth` and callback code-exchange with the library equivalents
+    - _Requirements: 1.1, 1.2, 1.3_
+    - _Design: D8; depends on V30_
+
+  - [ ] 55.3 Rewrite the profile bootstrap as the library's sign-in hook plus the idempotent upsert
+    - The D8 obligation survives: the library's sign-in / user-created hook fires server-side on a first session and the defensive upsert runs on every authenticated request, both through the Data_Access_Layer, writing `(_id = Auth_User_Id, email = Google_Email)` and **no** phone. `email` stays optional so an absent claim is a Profile without an email, not a failed sign-up. The E.164 story stays retired (no `toE164`, no `E164_PHONE`)
+    - _Requirements: 1.4, 1.5, 1.9_
+    - _Design: D8; depends on V30_
+
+  - [ ] 55.4 Replace the Supabase session use in `src/proxy.ts` and re-establish the 401 gate
+    - Replace every Supabase session read — including `src/proxy.ts`'s refresh — with the library's server-side session check; the screen gate redirects unauthenticated diagnosis/chat/voice/history to sign-in, and the API gate returns `AUTH_REQUIRED` (401) invoking no domain service
+    - _Requirements: 1.6, 1.7_
+    - _Design: D8; depends on V30_
+
+  - [ ]* 55.5 Write unit tests for the sign-in control and the bootstrap
+    - The bootstrap writes `_id` and `email`, passes no phone column, is a no-op on a second call, and classifies an RLS-free write failure and an absent email claim distinctly; the control starts Google sign-in once with the configured redirect and renders the did-not-complete message with a working retry
+    - _Requirements: 1.1, 1.3, 1.4_
+
+- [ ] 56. Port every service off the Supabase client onto the Data_Access_Layer
+  - [ ] 56.1 Port the quota, conversation, and usage-log services
+    - `quota.service.ts` onto the D19 `findOneAndUpdate` reserve / guarded decrement / read; `conversation.service.ts` `findOrCreateActive(userId, channel)` onto the owner-scoped accessors with `web` and `telegram` conversations as separate documents; usage-log writes through the layer with `channel` on every row
+    - _Requirements: 7.5, 10.5, 10.8, 14.1, 14.2, 14.3, 14.6, 14.7_
+    - _Design: D10, D19_
+
+  - [ ] 56.2 Port the diagnosis, chat, voice, history, and profile read paths
+    - `diagnosis.service.ts` reads the crop image **bytes directly from GridFS** by the Media_Reference and sends them inline to the model (V34); persists the Diagnosis_Result, the Media_Reference, and `channel` through the layer; the pipeline order (ownership → burst → reserve → read bytes → classify → validate → ground → persist → log) is unchanged. `chat.service.ts` and `voice.service.ts` reuse the one grounding/rephrase implementation and read/write only through the layer; voice reads GridFS bytes inline and deletes the voice file on a durable transcript. History and detail screens and the profile screen query through the owner-scoped accessors, not a browser DB client
+    - `channel` stays a required service parameter; no service takes or consults an entitlement (D14)
+    - _Requirements: 2.8, 3.2, 3.3, 7.1, 7.2, 8.4, 8.6, 8.9, 12.1, 12.2, 12.3, 12.5, 16.1, 16.3, 16.5_
+    - _Design: D7, D14; depends on V29, V34_
+
+  - [ ] 56.3 Port the retention sweep onto GridFS `uploadDate`
+    - `retention.service.ts`: scan 1 document-driven over `diagnoses` where `fullImageDeletedAt is null and createdAt < now − window` (served by the partial index), deleting the `mediaRef.fileId` from GridFS after asserting `metadata.ownerId` matches, then stamping `fullImageDeletedAt`; scan 2 age-driven over the GridFS `files` collection filtered `metadata.kind in (crop-image, voice)` and `uploadDate < now − window`, keeping thumbnails, deleting under each file's own `metadata.ownerId`; both bounded by a batch limit inside the 60 s ceiling; idempotent by construction. The internal route keeps its constant-time `RETENTION_SWEEP_SECRET` gate (GET scheduled, POST manual), 401 on a missing/wrong/absent secret, and consults no session
+    - Scan 2 is the backstop the retired V22 blocked and V29 unblocks via `uploadDate`; it ships behind `RETENTION_ORPHAN_SCAN_ENABLED` until V29 confirms the query (P8-1)
+    - _Requirements: 8.9, 8.10, 18.1, 18.3, 18.4, 18.5, 18.6, 18.7, 18.8, 18.9, 18.10, 18.11, 18.12, 18.13_
+    - _Design: Media lifecycle and retention; depends on V29_
+
+  - [ ]* 56.4 Write tests for the ported services
+    - Diagnosis reads bytes from GridFS inline and persists the Media_Reference and channel; voice deletes its file only after a durable transcript and keeps it on `TRANSCRIPTION_FAILED`/`TRANSCRIPT_EMPTY`; the retention sweep deletes only owner-matched files and refuses a file whose owner metadata is missing (18.8); spend-rule cases (403→zero, inconclusive→one) hold on MongoDB
+    - _Requirements: 2.6, 6.6, 6.7, 8.9, 8.10, 18.8_
+
+- [ ] 57. Build the Telegram library, the claim, the dispatch pipeline, and the webhook route on MongoDB
+  - [ ] 57.1 Port `src/lib/telegram.ts` and `src/lib/db/telegram-inbound.ts`
+    - Secret-token verification, update parsing, `getFile` + file-endpoint download (token in the URL, never logged), and `sendMessage` are the Phase 7 tasks 40/41 content carried onto MongoDB; the media upload writes to GridFS through the Data_Access_Layer with `metadata.ownerId = profiles._id` and `metadata.kind` set, replacing the service-role bucket upload; `voice` admitted, `audio`/`document` unsupported (V26); the `telegram_inbound` claim is `insertOne` with `_id = update_id`, the `11000` duplicate-key error being the duplicate signal (D19)
+    - _Requirements: 10.4, 10.6, 10.9, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 13.6, 15.6_
+    - _Design: D11, D12, D19; depends on V24, V25, V26, V29_
+
+  - [ ] 57.2 Port `src/lib/telegram-dispatch.ts` — the ordered inbound pipeline with the A2 gate
+    - The fixed order (secret-token verify → `update_id` claim → `/start` short-circuit → profile resolution → **unexpired-entitlement** check → unsupported-type reject → find-or-create telegram conversation → dispatch photo/text/voice through the shared services with `channel: 'telegram'` → reply → mark processed) with the unlinked and not-entitled steps kept separate. The gate now means "holds an entitlement whose expiry is in the future" (A2 decision 4), and the **bot recharge command is exempt** like `/start` (A2 decision 5). The conversation is keyed on the resolved `profiles._id`, never `telegram_user_id`
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.8, 10.9, 10.11, 16.1, 16.2, 16.5, 21.17, 21.18, 22.13, 22.14, 22.15, 22.16_
+    - _Design: D7, D14; Telegram adapter — Inbound processing order; Amendment A2 decisions 4 and 5_
+
+  - [ ] 57.3 Create `src/app/api/telegram/route.ts` with the soft deadline and the per-caller throttle
+    - POST only, `maxDuration = 60`, header comparison before the body is read; 401 the sole exception to acknowledge-with-200; the `webhook_throttle` per-caller bound (D16) applied on this route; inline processing then acknowledge, `markProcessed` after the reply is sent, one update per unit of work; on deadline expiry reply "taking longer", mark `failed`, return 200
+    - _Requirements: 10.10, 10.11, 11.2, 11.3, 13.9_
+    - _Design: D11, D12, D16, D19; depends on V18, V24_
+
+  - [ ]* 57.4 Write tests for the pipeline order and the unexpired gate
+    - Secret-token verification (matching passes; absent header, wrong value, flipped byte, unconfigured secret all 401 body-unparsed, constant-time); a redelivered `update_id` reaches no download/reserve/service; a farmer whose window has lapsed gets the recharge/unlock reply for photo/text/voice with zero quota and no `messages`/`diagnoses` row, while `/start` and the recharge command are still served and web requests are unchanged
+    - _Requirements: 11.2, 11.3, 11.4, 11.5, 11.6, 22.13, 22.14, 22.15, 22.16, 22.17_
+
+- [ ] 58. Implement Telegram account linking with the consume-and-bind transaction
+  - [ ] 58.1 Create `src/services/linking.service.ts` and `src/app/api/link/token/route.ts`
+    - Mint from a cryptographically secure source with no part derived from an Auth_User_Id, Google_Email, Telegram_User_Id, or timestamp; store the sha-256, never the plaintext; `expires_at = now() + LINK_TOKEN_TTL_MINUTES`; return the `https://t.me/<bot>?start=<token>` deep link from `NEXT_PUBLIC_TELEGRAM_BOT_USERNAME`. POST mints for the session user only (no body); DELETE unlinks — clear `telegram_user_id`, invalidate outstanding tokens, touch no Conversation/Message/Diagnosis/entitlement; no session ⇒ 401
+    - _Requirements: 1.7, 21.1, 21.2, 21.3, 21.4, 21.5, 21.15, 22.20_
+    - _Design: D13; depends on V33_
+
+  - [ ] 58.2 Implement `consumeAndBind` as one multi-document transaction
+    - Inside a transaction (V33): `findOneAndUpdate` on `link_tokens` filtered `{ tokenHash, consumedAt: null, expiresAt: { $gt: now } }` setting `consumedAt`, whose returned document is the authorization; then the bind write on `profiles`. The four outcomes (bind-and-confirm; same id already stored → already-linked; different id, sender on no profile → replace + notify the replaced id; sender already on another profile → unique-key `11000` aborts the transaction, token left unconsumed, reply unlink-there-first). Unknown/expired/consumed share one reply and one path
+    - _Requirements: 21.6, 21.7, 21.8, 21.10, 21.11, 21.12, 21.13, 21.14, 21.18, 21.19_
+    - _Design: D13, D19; depends on V33_
+
+  - [ ] 58.3 Create `src/components/TelegramLinkCard.tsx` and wire the profile screen
+    - The server shell reads the access state (`GET /api/profile/access`) so this card and the recharge card render from one round trip; show whether the Profile holds a `telegram_user_id` and offer the link or unlink action
+    - _Requirements: 1.8, 21.20, 22.18_
+
+  - [ ]* 58.4 Write unit tests for the named linking cases and the token shape
+    - The already-linked reply and the replacement path (incl. the message to the replaced id); the token is never stored in plaintext, derives from no forbidden input, and an expired token is refused by the statement not a prior read; two concurrent `/start` deliveries of one token bind exactly once
+    - _Requirements: 21.2, 21.7, 21.10, 21.11, 21.12_
+
+- [ ] 59. Implement the weekly recharge payment and the windowed Bot_Entitlement (Amendment A2 on MongoDB)
+  - [ ] 59.1 Create `src/lib/razorpay.ts`
+    - Order creation against the resolved endpoint in **paise** taken from `BOT_UNLOCK_PRICE` (2000), returning only the checkout identifiers; `verifyWebhookSignature(rawBody, header, secret)` with the resolved header/algorithm/encoding and a constant-time comparison; no provider error text crosses into a farmer-facing message
+    - _Requirements: 22.1, 22.5_
+    - _Depends on: V27_
+
+  - [ ] 59.2 Create `src/app/api/payment/order/route.ts` and the order half of `src/services/payment.service.ts`
+    - Amount (from `access.ts`), currency, and owning Auth_User_Id all server-side, none read from the body; no session ⇒ 401 with no order created; insert `payment_orders` as `created` and return checkout identifiers. A farmer whose window has lapsed or who holds any non-`captured` order can always start another — a further Payment_Order is the normal case (A2 supersedes 22.18)
+    - _Requirements: 22.1, 22.2, 22.3, 22.22_
+    - _Design: Amendment A2 decision 5_
+
+  - [ ] 59.3 Create `src/app/api/payment/webhook/route.ts`
+    - Read the body once as text, verify the signature over those exact bytes in constant time, only then parse; a missing header, a failed verification, and an absent secret are **one** 401 branch with nothing parsed or recorded; no session consulted; the per-caller `webhook_throttle` bound on a hash of the platform-reported address, stated as a cost control not authentication; `maxDuration = 60`
+    - _Requirements: 13.9, 22.5, 22.6, 22.24_
+    - _Design: D15, D16, D19_
+
+  - [ ] 59.4 Create `src/services/entitlement.service.ts` and the grant-plus-extend half in one transaction
+    - Derive the paying farmer, amount, and outcome only from the verified payload plus the recorded `payment_orders` row — the grant takes its `user_id` from that row, never the payload. In one transaction (V33): claim `provider_payment_id` via `insertOne` whose `11000` duplicate-key error is the "already granted/handled" signal, and **extend the window** to `nextExpiry(now, currentExpiry)` = `max(now, currentExpiry) + 7 days` in the *same* transaction so a redelivery cannot double-extend (A2 decision 3). A verified failed-payment webhook records nothing and leaves the window untouched. `holdsUnexpiredEntitlement(userId)` — an expiry-in-the-future check — is the only read the adapter gate needs (A2 decision 4); the entitlement is keyed to the Auth_User_Id, never the Telegram_User_Id
+    - _Requirements: 22.7, 22.8, 22.9, 22.10, 22.11, 22.12, 22.13, 22.19, 22.20, 22.21_
+    - _Design: D14, D15, D19; Amendment A2 decisions 3 and 4; depends on V33_
+
+  - [ ] 59.5 Create `src/components/BotUnlockCard.tsx` as the web recharge card, and the bot recharge command
+    - Web card: price from `BOT_UNLOCK_PRICE`, checkout on `NEXT_PUBLIC_RAZORPAY_KEY_ID`, an optimistic "confirming your payment" state granting nothing; **show the current expiry** and offer a recharge action even while active (a further order is normal under A2); render the price from the real constant. Bot recharge command: exempt from the gate (A2 decision 5), replies with a payment link so a lapsed farmer can recover from inside Telegram
+    - _Requirements: 22.4, 22.7, 22.18_
+    - _Design: Amendment A2 decision 5_
+
+  - [ ]* 59.6 Write unit tests for signature verification, the grant, and the extension
+    - Valid signature over the raw body passes; flipped byte, truncated digest, absent header, unconfigured secret, and a re-serialized body all fail, comparison constant-time; two concurrent verified webhooks with one `provider_payment_id` grant/extend exactly once; a browser-reported success grants nothing; the window extends by `max(now, currentExpiry) + 7 days` and a redelivery does not double-extend
+    - _Requirements: 22.5, 22.6, 22.7, 22.10, 22.11_
+
+- [ ] 60. Delete the Supabase, WhatsApp, and phone-OTP modules and the working-tree remnants
+  - This is not deferrable cleanup: `npm run check:shared-implementation` fails on a second implementation, `scripts/check-data-access.ts` fails if a Supabase client survives, typecheck currently fails in ~12 files (mostly WhatsApp and phone-OTP code awaiting deletion), and a half-migration fails the suites.
+  - [ ] 60.1 Remove the WhatsApp and phone-OTP artifacts
+    - The ten WhatsApp-named files listed in task 44.1 and their directory; `SignInForm.tsx`/`.test.tsx`/`.module.css`; the `toE164`/`E164_PHONE`/trigger-regex blocks; then assert no `whatsapp` name/identifier/import/route/comment survives under `src/`, `tests/`, or the setup script, and `profiles.phone` has no reader outside `scripts/db-setup.ts`
+    - _Requirements: 1.1, 1.9, 16.1, 16.2, 16.3_
+
+  - [ ] 60.2 Remove every Supabase client module, dependency, directory, and Supabase-only test
+    - Delete `src/lib/supabase/{client,server,admin}.ts` and every importer's Supabase path, `src/types/database.ts` (the Supabase-generated types), `src/lib/storage.ts`'s Supabase Storage/signed-URL helpers (`thumbPathFor`/`originalPathFor` and the bucket path builders) superseded by `src/lib/media/*`; remove `@supabase/*` from `package.json`; delete the `supabase/` directory (migrations `0001`–`0014`, `config.toml`, `[auth.sms]`) — it becomes historical, applied to nothing; delete Supabase-only tests (RLS-scoped fixtures, the admin-client isolation test, the migration-regex test)
+    - Then assert no `@supabase`, `supabase.`, `createClient`, `SUPABASE_`, or `service_role` reference survives under `src/` or `tests/`, and that the only surviving mentions in the repo are the retired V-item rows and the historical tasks in this plan
+    - _Requirements: 13.7, 16.1, 16.2, 16.3, 17.8_
+    - _Design: Amendment A3 point 2; Security boundary_
+
+- [ ] 61. Restate the property tests for the amended properties and add Property 36
+  - [ ]* 61.1 Restate the properties A3 re-vocabularises and A2 re-scopes
+    - Re-word every property still reading in Postgres/RLS/Storage/signed-URL terms to the MongoDB / Data_Access_Layer / GridFS substrate without changing what it asserts: **Property 5** (ownership before spend — now a `metadata.ownerId` read), **Property 20** (quotas shared across web/telegram — Telegram side drawn from a linked *and unexpired-entitled* farmer, A2), **Property 23** (webhook auth + single processing — secret token + `update_id` `insertOne` claim), **Property 27 / 31** (tenant isolation across collections/GridFS and over deletion — application-enforced by the layer, cross-farmer writes on the access collections fail rather than return zero), **Property 30** (deliverable completeness over the new env and endpoint sets)
+    - _Requirements: 2.5, 2.6, 13.2, 13.4, 13.6, 14.1, 14.2, 14.3, 17.2, 17.4, 18.8_
+    - _Design: Amendment A3; Correctness Properties_
+
+  - [ ]* 61.2 Restate Properties 33–35 for the windowed entitlement and add Property 36
+    - **Property 33** (entitlement gate total over update kinds) and **Property 34** (no entitlement without a verified signature, one payment grants once) re-stated so the entitlement carries a window and the grant is a claim-plus-extend transaction — Property 34 gains the window and a **no-double-extension** claim (A2 inverts its old "no expiry"); **Property 35** (unlink preserves everything) unchanged in intent on the new substrate; **Property 32** (link token binds at most once) over the transactional consume-and-bind
+    - Add **Property 36: recharge extension arithmetic** — over arbitrary sequences of recharges at arbitrary times, the resulting expiry is always `max(now, previous_expiry) + 7 days` per recharge, an early recharge never loses paid days, a lapsed recharge starts at payment, and no redelivery of one payment extends twice
+    - **Validates: Amendment A2 decision 3; Requirements 22.9 (as inverted by A2), 22.11**
+    - _Requirements: 21.5, 21.6, 21.7, 21.8, 22.5, 22.6, 22.7, 22.10, 22.11, 22.13, 22.14, 22.15, 22.16, 22.17_
+
+- [ ] 62. Update the integration suite for MongoDB and run it on `mongodb-memory-server` in replica-set mode
+  - [ ]* 62.1 Point the integration harness at `mongodb-memory-server` in replica-set mode
+    - Start it as a single-node replica set so the link and payment multi-document transactions work (V31, V33); point the Data_Access_Layer at it; mock providers at the adapter seam so the gateway, services, validation, persistence, and owner-scoping are real; retire the Supabase local-stack requirement and the `supabase status -o env` reads. Two farmers created through the Google path with no phone; the release-acceptance history assertion reads `web` and `telegram`
+    - _Requirements: 12.1, 12.2, 17.5_
+    - _Design: Integration tests; depends on V31, V33_
+
+  - [ ]* 62.2 Rewrite the channel, linking, payment, and isolation integration tests on MongoDB
+    - Telegram text/photo/voice/unsupported/duplicate/timeout/rate-limit-fallback plus an unlinked sender and a **lapsed-window** sender; the `update_id` idempotency test; linking across valid/expired/consumed/unknown/no-payload/already-linked-elsewhere and two concurrent deliveries; payment across an abandoned checkout, a replayed webhook, a forged signature, a captured payment opening a lapsed sender, a recharge extending the window, and an unauthenticated flood; tenant isolation attempting cross-farmer reads (zero documents) and cross-farmer writes on the access collections (fail) across all collections and GridFS
+    - _Requirements: 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 13.9, 14.4, 14.5, 21.6, 21.7, 21.8, 22.10, 22.13, 22.17, 22.19, 22.21_
+
+- [ ] 63. Update the deployment package, the documentation, and the CI guards
+  - [ ] 63.1 Rewrite `docs/DEPLOYMENT.md` as the ten A3 steps
+    - Create the Atlas M0 cluster and record `MONGODB_URI`, noting the accepted `0.0.0.0/0` academic trade-off and the M0 limits (V32); choose the auth library by reading `node_modules/next/dist/docs` first (V35, D18a), configure Google + MongoDB adapter, register callback redirects, record the library/Google secrets — no SMS provider; run `npm run db:setup` and assert count = 5, the GridFS bucket, and the indexes/validators across all collections; obtain provider keys and record model identifiers and inline-byte limits (V34); create the Telegram bot (BotFather) and generate the secret token; create the Razorpay account, register the webhook, subscribe to captured/failed events, and record **test mode** (O22-3 resolved by A3); deploy to Vercel with all variables and confirm `maxDuration`; `setWebhook` and confirm a no-secret-token POST returns 401; smoke-test the acceptance sequence pay→link→photo; record the ₹20 price, the retention arithmetic against the shared ~512 MB M0 budget, and that the Payment_Provider adds no fixed/recurring cost
+    - _Requirements: 17.1, 17.3, 22.4, 22.25, 22.26_
+    - _Depends on: V16, V19, V27, V30, V32, V34, V35_
+
+  - [ ] 63.2 Regenerate `docs/API.md`
+    - Generate from `src/lib/schemas.ts` so it cannot drift; add `/api/media` (upload + owner-checked serve), `/api/telegram`, `/api/link/token` (POST+DELETE), `/api/payment/order`, and `/api/payment/webhook`; document the two webhook routes and the multipart Media_Endpoint by their authentication mechanism in place of a request schema; keep the quota-semantics note
+    - _Requirements: 17.2, 17.4_
+
+  - [ ] 63.3 Rewrite `docs/TESTING_REPORT.md`
+    - Record the image/chat/voice/Telegram/linking/payment automated outcomes; Google sign-in on a real device incl. the cancel path; Telegram end to end in the fixed pay→link→photo order (a photo-first tester correctly sees the gated reply); **one real checkout in test mode** (O22-3 resolved), recording that a captured payment opened a previously gated/lapsed sender; the Hindi/Marathi transcription-quality and screen-reader entries unchanged
+    - _Requirements: 1.3, 10.7, 12.2, 17.5, 22.18, 22.19_
+
+  - [ ] 63.4 Complete `.env.example` and `about-project.md`
+    - `.env.example`: `MONGODB_URI`, the auth library secret and Google client id/secret, the Telegram and Razorpay names, `RETENTION_SWEEP_SECRET`, and the two public names — no Supabase names, no `BOT_UNLOCK_PRICE`/`LINK_TOKEN_TTL_MINUTES`. `about-project.md`: MongoDB Atlas + GridFS backend, Google sign-in via the in-app auth library, Telegram gated behind a weekly ₹20 recharge while the web app stays free, and the zero-standing-cost claim (SMS removed; the payment fee is per-transaction out of a farmer's money)
+    - _Requirements: 1.10, 17.1, 17.2, 22.17, 22.26_
+
+  - [ ] 63.5 Update the CI guards for MongoDB
+    - `scripts/check-secret-scope.ts`: replace the Supabase secret names with `MONGODB_URI`, the auth library secret, `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, and keep the Telegram/Razorpay/retention names, asserting they appear only under `src/lib/**` server modules and `src/app/api/**` and never in a `'use client'` file, and that the unprefixed `RAZORPAY_KEY_ID` never appears in a client component; `scripts/check-shared-implementation.ts` unchanged in intent (Telegram adapter, no service→entitlement import, `profiles.phone` reader-free — now outside `scripts/db-setup.ts`); `scripts/check-data-access.ts` (from 52.3) is the new third structural guard; update `scripts/check-deployment.ts` to assert MongoDB collections/indexes/validators and the GridFS bucket instead of Supabase RLS/buckets
+    - _Requirements: 1.9, 3.8, 7.7, 13.7, 16.1, 16.2, 16.3, 16.4, 17.6, 22.17, 22.23_
+    - _Design: Static architecture check (CI); D18_
+
+- [ ] 64. Final checkpoint — Amendment A3 release readiness
+  - Ensure all tests pass, ask the user if questions arise. This checkpoint **replaces task 48 as the release gate.**
+  - Run the gates: `npm run typecheck` (currently failing in ~12 files awaiting the WhatsApp/OTP deletions of task 60 — must be clean here), `npm run lint`, `npm run check:secret-scope`, `npm run check:shared-implementation`, `npm run check:data-access`, `npm run test:unit`, `npm run test:property`, `npm run test:integration`, and `npm run build`.
+  - The integration suite needs `mongodb-memory-server` in replica-set mode (V31); it no longer needs a local Supabase stack. A run that executed zero integration tests is a broken gate, not a pass.
+  - Confirm no `whatsapp`, no `@supabase`/`SUPABASE_`/`service_role`, and no reader of `profiles.phone` outside `scripts/db-setup.ts` survive under `src/` or `tests/`; that no V-item among V28–V35 remains unresolved; that `BOT_UNLOCK_PRICE` now reads the real ₹20/2000-paise value (49.1/49.2 resolved); and that `docs/TESTING_REPORT.md` shows every human-tester entry either completed or explicitly outstanding.
+
+### BLOCKED — awaiting a verification outcome, not implementation work (Phase 8)
+
+Recorded outside the numbered work for the same reason the Phase 7 blocked items were, and excluded from the dependency graph. Neither is a product-owner question — O22-1 and O22-3 are resolved (49.1, 49.2 → 51.2, 63) — both are third-party facts a task cannot assert until it resolves them.
+
+- [ ] P8-1. The age-based orphan backstop (scan 2 of the retention sweep, task 56.3) ships behind `RETENTION_ORPHAN_SCAN_ENABLED` until **V29** confirms the GridFS `files.uploadDate` query and whether `bucket.delete(id)` errors on an absent id. Until then only the document-driven scan runs, which alone satisfies Requirements 18.3 and 18.7 for every file a farmer can surface. This is the A3 successor to the Phase 1 V21/V22 arrangement, and it blocks nothing important because the operation is idempotent and bounded.
+- [ ] P8-2. `MEDIA_RETENTION_DAYS` (default 7) is a number to review early rather than set once, because the Atlas M0 ~512 MB budget is roughly half the retired Supabase 1 GB and is now shared with records (V32). The arithmetic in 63.1 states this plainly; the review is an operational decision at deployment, not a coding task.
 
 ## Notes
 
@@ -1298,6 +1640,16 @@ Notes added with Phase 7 (Amendment A1). The bullets above are left as written, 
 - **Deletions in task 44 are not optional and are not cleanup.** `npm run check:shared-implementation` fails on a second diagnosis or chat implementation, so a tree holding both adapters does not pass the gates; the WhatsApp tests also import a module whose table the migrations no longer create. A half-migration fails loudly, which is the intended behaviour.
 - **Two items are blocked on the product owner, not on engineering.** O22-1 (the Bot_Unlock_Price figure) and O22-3 (test mode versus live money for the pilot) are recorded as tasks 49.1 and 49.2 and are excluded from the graph. `BOT_UNLOCK_PRICE` ships as a placeholder that throws when read, so nothing can quietly charge a guessed amount, and task 48 reports that the release cannot be signed off while it stands.
 - The integration suite in tasks 46 and 48 needs the **live local Supabase stack with its environment exported**. Absent `JAMEE_TEST_DATABASE_URL` the integration project self-skips and the run reports green, so a skipped suite must be read as a broken gate rather than as coverage.
+
+Notes added with Phase 8 (Amendment A3: MongoDB, and A2: weekly recharge). The bullets above are left as written, because they described tasks 1–49 accurately when they ran; where one of them is now false under A3/A2, the correction is here rather than in an edit that would make the record disagree with itself.
+
+- **Phase 8 supersedes Phase 7's substrate, not its intent.** Tasks 1–49 are history. Phase 8 (tasks 50–64) rebases the Telegram/Google/linking/payment layer that Phase 7 built on Supabase onto MongoDB, and finishes the A2 weekly recharge that Phase 7 predates. The list at the head of Phase 8 names every Phase 7 task it supersedes and where the work moves. **Task 64 replaces task 48 as the release gate**, which had itself replaced tasks 23 and 32.
+- **The migration tree is gone under A3.** The note above about "migration numbering diverges by one" and migrations amended in place was true for Phase 7. A3 replaces all 14 SQL migrations `0001`–`0014` with one idempotent `npm run db:setup` script (task 53); `supabase/migrations/` becomes historical, applied to nothing, and is deleted in task 60.2. Task 38.7's generated-types step has no MongoDB analogue.
+- **The two product-owner blocks are resolved, so task 49 is no longer blocked.** A2 sets the price at ₹20 (2000 paise) and a 7-day window (resolving O22-1), and A3 point 6 resolves O22-3 to test mode for all pilot testers. `BOT_UNLOCK_PRICE`'s throwing placeholder is replaced with the real constants in task 51.2, and the deployment/testing records are written in task 63. What remains blocked in Phase 8 (P8-1, P8-2) is blocked on a **verification outcome** (the GridFS `uploadDate` query, V29) and an operational review (the M0 retention window), not on the product owner — both are excluded from the graph for the same reason the deferred tasks are.
+- **The plan now carries 36 correctness properties, not 35.** A3 re-vocabularises several (RLS→Data_Access_Layer, Storage→GridFS) and A2 inverts Property 34's "no expiry"; those are restated in 61.1–61.2 keeping their numbers, and **Property 36 (recharge extension arithmetic)** is new and lands in 61.2.
+- **Tenant isolation is application-enforced under A3.** RLS is gone; the Data_Access_Layer is the only holder of the driver (task 52) and `scripts/check-data-access.ts` (52.3) is the third structural CI guard beside secret-scope and shared-implementation. The isolation properties (27, 31) still hold, now proven by cross-farmer read/write attempts through the layer rather than by RLS.
+- **The integration suite no longer needs Supabase.** Under A3 it runs on `mongodb-memory-server` in **replica-set mode** (needed for the link and payment transactions, V31/V33), so the `JAMEE_TEST_DATABASE_URL`/local-Supabase requirement in the note above is retired by task 62. The "a skipped suite is a broken gate" rule still stands — a run that executed zero integration tests does not count as a pass.
+- **The typecheck is red until task 60 runs.** The working tree currently fails `npm run typecheck` in ~12 files (mostly WhatsApp and phone-OTP code awaiting deletion) and still carries Supabase env variables; task 60 removes those modules and task 51 finishes the env contract, so the type gate is expected to be red mid-phase and clean by task 64.
 
 ## Task Dependency Graph
 
@@ -1358,9 +1710,32 @@ Notes added with Phase 7 (Amendment A1). The bullets above are left as written, 
     { "id": 50, "tasks": ["41.5", "42.5", "43.6", "44.1", "44.2"] },
     { "id": 51, "tasks": ["45.1", "45.2", "45.3", "45.4", "45.5", "45.6", "45.7", "45.8", "45.9", "45.10", "45.11", "45.12"] },
     { "id": 52, "tasks": ["46.1", "46.2", "46.3", "46.4", "46.5"] },
-    { "id": 53, "tasks": ["47.1", "47.2", "47.3", "47.4", "47.5", "47.6"] }
+    { "id": 53, "tasks": ["47.1", "47.2", "47.3", "47.4", "47.5", "47.6"] },
+
+    { "id": 54, "tasks": ["50.1"] },
+    { "id": 55, "tasks": ["50.2"] },
+    { "id": 56, "tasks": ["51.1", "51.2", "51.3", "51.4"] },
+    { "id": 57, "tasks": ["51.5", "52.1"] },
+    { "id": 58, "tasks": ["52.2", "52.3"] },
+    { "id": 59, "tasks": ["52.4", "53.1"] },
+    { "id": 60, "tasks": ["53.2", "53.3", "53.4"] },
+    { "id": 61, "tasks": ["53.5", "54.1", "55.1"] },
+    { "id": 62, "tasks": ["54.2", "55.2"] },
+    { "id": 63, "tasks": ["54.3", "55.3", "55.4"] },
+    { "id": 64, "tasks": ["54.4", "55.5", "56.1"] },
+    { "id": 65, "tasks": ["56.2", "56.3", "58.1", "59.1"] },
+    { "id": 66, "tasks": ["56.4", "58.2", "59.2", "59.3", "59.4"] },
+    { "id": 67, "tasks": ["57.1", "58.3", "59.5"] },
+    { "id": 68, "tasks": ["57.2"] },
+    { "id": 69, "tasks": ["57.3", "58.4", "59.6"] },
+    { "id": 70, "tasks": ["57.4", "60.1", "60.2"] },
+    { "id": 71, "tasks": ["61.1", "61.2"] },
+    { "id": 72, "tasks": ["62.1", "62.2"] },
+    { "id": 73, "tasks": ["63.1", "63.2", "63.3", "63.4", "63.5"] }
   ]
 }
 ```
 
 Waves 39–53 are Phase 7 (Amendment A1). Task 48 is excluded as a checkpoint, and tasks 49.1 and 49.2 are excluded because they are product-owner decisions rather than work — nothing in the graph should schedule them. Two orderings there are obligations rather than conveniences: 38.7 follows every migration edit, because the generated types are what turn a surviving `provider_message_id` or `profiles.phone` read into a compile error; and 41.2 follows 42.3 and 43.4, because the adapter's pipeline calls the consume-and-bind and the entitlement read.
+
+Waves 54–73 are Phase 8 (Amendment A3: MongoDB, and A2: weekly recharge). Task 64 is excluded as a checkpoint, and tasks P8-1 and P8-2 are excluded because they are a verification outcome and an operational review rather than work — nothing in the graph should schedule them. The obligatory orderings follow the same shape A3/A2 impose: 50.1/50.2 precede everything because no MongoDB code may be written against an unresolved V-item; 52 (the Data_Access_Layer) precedes 53–59 because it is the only holder of the driver they all reach through; 53 (`db:setup`) precedes the code that reads its collections and indexes; 55 (auth) precedes 56 because the ported services read the session it establishes; and — the A3 analogue of Phase 7's 41.2-after-42.3/43.4 — 57.2 (the dispatch pipeline) follows 58.2 (consume-and-bind) and 59.4 (the unexpired-entitlement read) because the pipeline calls both, which is why it sits in a wave of its own after them. 60 (the deletions) follows the replacements it depends on being in place (54–59), because `check:shared-implementation` and `check:data-access` fail while both the old and new implementations coexist.
