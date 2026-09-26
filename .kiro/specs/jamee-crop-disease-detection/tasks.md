@@ -794,7 +794,7 @@ Amendment A1 replaces Requirements 1, 10, and 11 in full and adds Requirements 2
 Two items in this phase are **BLOCKED on a product-owner decision** and are recorded as such below, outside the numbered release work: the Bot_Unlock_Price figure (O22-1) and the pilot payment mode (O22-3).
 
 - [ ] 36. Resolve V23–V27 and retire V2 and V12–V15 before any Amendment A1 code is written
-  - [ ] 36.1 Append V23–V27 to `docs/VERIFIED_VALUES.md` and mark V2 and V12–V15 retired in place
+  - [x] 36.1 Append V23–V27 to `docs/VERIFIED_VALUES.md` and mark V2 and V12–V15 retired in place
     - V23 Supabase Google OAuth: the `signInWithOAuth({ provider: 'google' })` call shape and its `redirectTo` option, the callback-route code-exchange helper name, where the Google client id and secret are configured, which redirect URLs must be registered, and which claim carries the Google email onto `auth.users`
     - V24 Telegram Bot API: `setWebhook` including its `secret_token` parameter and any length or character constraint on that token, the exact header name Telegram presents it in, the `Update` field paths for `update_id`, `message.from.id`, `message.text`, `message.photo[]`, `message.voice`, and the `/start` payload, the `sendMessage` request shape and its text length cap, and Telegram's retry behaviour on a non-200
     - V25 Telegram file retrieval: `getFile(file_id)` → `file_path`, the download URL form built from the bot token and that path, the documented validity window of a `file_path`, and the bot-download size ceiling
