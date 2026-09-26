@@ -313,7 +313,7 @@ function harness(
 }
 
 function request(
-  overrides: { language?: Language; channel?: 'web' | 'whatsapp'; conversationId?: string; image?: MediaRef } = {},
+  overrides: { language?: Language; channel?: 'web' | 'whatsapp' | 'telegram'; conversationId?: string; image?: MediaRef } = {},
 ): import('@/lib/schemas').DiagnoseInput {
   return {
     userId: USER,

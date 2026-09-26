@@ -56,6 +56,7 @@ export function HistoryList({ entries, language }: HistoryListProps) {
   const channelNames: Record<Channel, string> = {
     web: ui.channelWeb,
     whatsapp: ui.channelWhatsapp,
+    telegram: ui.channelTelegram,
   };
 
   return (

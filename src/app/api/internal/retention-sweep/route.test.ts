@@ -38,14 +38,13 @@ const REPORT = {
   fullImages: {
     scanned: 2,
     removed: 2,
-    alreadyAbsent: 0,
     stamped: 2,
     alreadyStamped: 0,
     failed: 0,
     limit: 200,
     bounded: false,
   },
-  orphans: { ran: false as const, reason: 'disabled_pending_v22b' as const },
+  orphans: { scanned: 0, removed: 0, refused: 0, failed: 0, limit: 200, bounded: false },
 };
 
 function request(headers: Record<string, string> = {}): Request {

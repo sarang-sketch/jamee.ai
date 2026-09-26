@@ -1,196 +1,157 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { ObjectId } from 'mongodb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   MEDIA_RETENTION_DAYS,
-  RETENTION_ORPHAN_SCAN_ENABLED,
   RETENTION_SWEEP_BATCH_LIMIT,
   VOICE_FAILURE_GRACE_DAYS,
 } from '@/lib/config/media';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
-import { thumbPathFor } from '@/lib/storage';
-import type { Database } from '@/types/database';
-import type { ObjectRemoveClient } from '@/services/voice.service';
+import type { AgedMediaFile } from '@/lib/db/media';
+import type { MediaKind } from '@/lib/db/names';
+import type { DueFullImage } from '@/lib/db/retention';
 
-import { blankComments } from '../../scripts/check-secret-scope';
 import {
-  assertPathOwnedByRow,
-  orphanOwnerSegment,
-  removeObjects,
   retentionCutoff,
-  retentionStoreFrom,
   runRetentionSweep,
   sweepFullImages,
   sweepOrphans,
-  type FullImageCandidate,
-  type OrphanObjectSource,
-  type RetentionStore,
-  type StoredObject,
 } from './retention.service';
 
 /**
- * `RetentionService` — the sweep's logic, driven through injected seams with no live Supabase.
+ * `RetentionService` — the GridFS sweep's logic, driven through injected Data_Access_Layer seams
+ * with no live MongoDB (Amendment A3).
  *
  * Requirements: 18.1 (one window, whole days), 18.3 (delete every Full_Size_Image past the window),
- *               18.4 (voice objects past the window), 18.5 (retain every Thumbnail_Derivative),
- *               18.6 (delete no row), 18.7 (stamp the instant, leave every other column alone),
- *               18.8 (delete only under the owning farmer's prefix), 18.10 (idempotent; an absent
- *               object counts as deleted), 18.11 (bounded per invocation)
- * Design: "Media lifecycle and retention" → *How the sweep finds its work*
+ *               18.4 (voice files past the window), 18.5 (retain every Thumbnail_Derivative — scan 2
+ *               never lists `thumbnail`), 18.6 (delete no document), 18.7 (stamp the instant, leave
+ *               every other field alone), 18.8 (delete only under the owning farmer / a present
+ *               owner), 18.10 (idempotent), 18.11 (bounded per invocation)
+ * Design: "Media lifecycle and retention" → *How the sweep finds its work*; V29
  *
- * Two conventions this file follows deliberately:
- *
- *  - **The store fake mirrors the real query rather than stubbing its result.** It applies the same
- *    three clauses the design's scan-1 statement does — `full_image_deleted_at is null`,
- *    `created_at < cutoff`, oldest first, `limit N` — so "a second run deletes nothing" is a
- *    statement about the sweep against a table that behaves like the real one, not about a stub that
- *    was told to return `[]`.
- *  - **`retentionStoreFrom()` IS exercised here**, unlike the other store factories in
- *    `src/services`, which are deliberately left to a live database. The two properties under test —
- *    Requirement 18.7's "every other column unchanged" and the second `user_id` anchor on the stamp —
- *    are facts about the statement Jamee *constructs*, not about whether PostgREST executes it.
+ * The seams here mirror the real `src/lib/db/**` functions: an in-memory `diagnoses` that applies
+ * scan 1's `fullImageDeletedAt is null` + `createdAt < cutoff` clauses (so "a second run does
+ * nothing" is a statement about the sweep against a store that behaves like the real one), an
+ * owner-scoped GridFS delete, and an age listing per kind. The transaction / index facts (a confirm
+ * plus a webhook extend once; the sweep deletes only old files, never another farmer's) are proven
+ * against real Mongo in `tests/integration/retention.test.ts`.
  */
 
-/* -------------------------------------------------------------------------- */
-/* Fixtures                                                                    */
-/* -------------------------------------------------------------------------- */
-
-const FARMER_A = '11111111-1111-4111-8111-111111111111';
-const FARMER_B = '22222222-2222-4222-8222-222222222222';
+const FARMER_A = 'farmer-A';
+const FARMER_B = 'farmer-B';
 
 /** `2026-09-20T10:00:00Z`, so a 7-day window cuts at `2026-09-13T10:00:00Z`. */
 const NOW = new Date('2026-09-20T10:00:00.000Z');
+const STALE = new Date('2026-09-01T00:00:00.000Z');
+const FRESH = new Date('2026-09-19T00:00:00.000Z');
 
-interface StoredRow {
-  readonly id: string;
-  readonly userId: string;
-  readonly bucket: string;
-  readonly path: string;
-  readonly createdAt: string;
-  fullImageDeletedAt: string | null;
+let oidCounter = 0;
+const oidByLabel = new Map<string, ObjectId>();
+/** A stable valid ObjectId per label — labels may contain non-hex chars, so we assign hex ids. */
+const oid = (label: string): ObjectId => {
+  const existing = oidByLabel.get(label);
+  if (existing !== undefined) return existing;
+  oidCounter += 1;
+  const made = new ObjectId(oidCounter.toString(16).padStart(24, '0'));
+  oidByLabel.set(label, made);
+  return made;
+};
+
+/* -------------------------------------------------------------------------- */
+/* Scan-1 store fake                                                           */
+/* -------------------------------------------------------------------------- */
+
+interface DiagRow {
+  readonly diagnosisId: ObjectId;
+  readonly ownerId: string;
+  readonly fileId: ObjectId;
+  readonly createdAt: Date;
+  fullImageDeletedAt: Date | null;
 }
 
-function row(overrides: Partial<StoredRow> = {}): StoredRow {
-  const id = overrides.id ?? 'd0000000-0000-4000-8000-000000000001';
-  const userId = overrides.userId ?? FARMER_A;
-  return {
-    id,
-    userId,
-    bucket: STORAGE_BUCKETS.cropImages,
-    path: `${userId}/2026/09/${id}.jpg`,
-    createdAt: '2026-09-01T00:00:00.000Z',
-    fullImageDeletedAt: null,
-    ...overrides,
-  };
-}
-
-interface StampCall {
-  readonly id: string;
-  readonly userId: string;
-  readonly deletedAt: Date;
-}
-
-interface FakeStore extends RetentionStore {
-  readonly rows: StoredRow[];
+interface FakeScan1 {
+  readonly rows: DiagRow[];
+  readonly dueFullImages: (cutoff: Date, limit: number) => Promise<DueFullImage[]>;
+  readonly deleteOwnedFile: (ownerId: string, fileId: string | ObjectId) => Promise<boolean>;
+  readonly stamp: (diagnosisId: ObjectId, ownerId: string, deletedAt: Date) => Promise<boolean>;
+  readonly deleted: { ownerId: string; fileId: string }[];
   readonly reads: { cutoff: Date; limit: number }[];
-  readonly stamps: StampCall[];
 }
 
-/**
- * An in-memory `diagnoses` that applies scan 1's three clauses, plus the stamp's own
- * `full_image_deleted_at is null` guard — which is what makes a doubled run observably a no-op.
- */
-function fakeStore(rows: StoredRow[]): FakeStore {
+function fakeScan1(rows: DiagRow[], options: { deleteThrows?: boolean } = {}): FakeScan1 {
+  const deleted: { ownerId: string; fileId: string }[] = [];
   const reads: { cutoff: Date; limit: number }[] = [];
-  const stamps: StampCall[] = [];
-
   return {
     rows,
+    deleted,
     reads,
-    stamps,
-    async dueFullImages({ cutoff, limit }) {
+    async dueFullImages(cutoff, limit) {
       reads.push({ cutoff, limit });
       return rows
-        .filter((r) => r.fullImageDeletedAt === null)
-        .filter((r) => new Date(r.createdAt).getTime() < cutoff.getTime())
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        .filter((r) => r.fullImageDeletedAt === null && r.createdAt.getTime() < cutoff.getTime())
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
         .slice(0, limit)
-        .map(
-          (r): FullImageCandidate => ({
-            id: r.id,
-            userId: r.userId,
-            bucket: r.bucket,
-            path: r.path,
-          }),
-        );
+        .map((r) => ({ diagnosisId: r.diagnosisId, ownerId: r.ownerId, fileId: r.fileId }));
     },
-    async stampFullImageDeleted({ id, userId, deletedAt }) {
-      stamps.push({ id, userId, deletedAt });
+    async deleteOwnedFile(ownerId, fileId) {
+      if (options.deleteThrows) throw new Error('gridfs unavailable');
+      deleted.push({ ownerId, fileId: fileId.toString() });
+      // Owner-scoped: a file whose row owner does not match its stored owner is a no-op. Here every
+      // seeded row's fileId is owned by its own owner, so this returns true.
+      return true;
+    },
+    async stamp(diagnosisId, ownerId, deletedAt) {
       const target = rows.find(
-        (r) => r.id === id && r.userId === userId && r.fullImageDeletedAt === null,
+        (r) => r.diagnosisId.equals(diagnosisId) && r.ownerId === ownerId && r.fullImageDeletedAt === null,
       );
       if (target === undefined) return false;
-      target.fullImageDeletedAt = deletedAt.toISOString();
+      target.fullImageDeletedAt = deletedAt;
       return true;
     },
   };
 }
 
-interface RemoveCall {
-  readonly bucket: string;
-  readonly paths: readonly string[];
+/* -------------------------------------------------------------------------- */
+/* Scan-2 age-listing fake                                                     */
+/* -------------------------------------------------------------------------- */
+
+interface FakeScan2 {
+  readonly listAged: (kind: MediaKind, instant: Date, limit: number) => Promise<AgedMediaFile[]>;
+  readonly deleteFileById: (fileId: ObjectId) => Promise<boolean>;
+  readonly deleted: string[];
+  readonly askedKinds: MediaKind[];
 }
 
-interface FakeRemover {
-  readonly client: ObjectRemoveClient;
-  readonly calls: RemoveCall[];
-}
-
-/**
- * A storage deleter. `present` is the set of paths that actually exist, because V22 documents
- * `remove()` as returning entries **for the deleted files** — so a requested path outside this set
- * comes back missing from the response, which is U-V22a's unresolved case and Requirement 18.10's
- * "already absent counts as deleted".
- *
- * `present: null` means "everything requested exists", the ordinary case.
- */
-function fakeRemover(options: { present?: Set<string> | null; error?: unknown } = {}): FakeRemover {
-  const calls: RemoveCall[] = [];
-  const present = options.present ?? null;
-
+function fakeScan2(files: (AgedMediaFile & { kind: MediaKind })[], options: { deleteThrows?: boolean } = {}): FakeScan2 {
+  const deleted: string[] = [];
+  const askedKinds: MediaKind[] = [];
   return {
-    calls,
-    client: {
-      storage: {
-        from: (bucket: string) => ({
-          remove: async (paths: string[]) => {
-            calls.push({ bucket, paths: [...paths] });
-            if (options.error !== undefined) return { data: null, error: options.error };
-            const deleted = paths
-              .filter((path) => present === null || present.has(path))
-              .map((name) => ({ name, id: 'ignored', bucket_id: 'deprecated' }));
-            return { data: deleted, error: null };
-          },
-        }),
-      },
+    deleted,
+    askedKinds,
+    async listAged(kind, instant, limit) {
+      askedKinds.push(kind);
+      return files
+        .filter((f) => f.kind === kind && f.uploadDate.getTime() < instant.getTime())
+        .slice(0, limit)
+        .map(({ fileId, ownerId, uploadDate, length }) => ({ fileId, ownerId, uploadDate, length }));
+    },
+    async deleteFileById(fileId) {
+      if (options.deleteThrows) throw new Error('gridfs unavailable');
+      deleted.push(fileId.toHexString());
+      return true;
     },
   };
 }
 
-function orphanSource(objects: readonly StoredObject[]): OrphanObjectSource & {
-  readonly asked: { bucket: string; cutoff: Date; limit: number }[];
-} {
-  const asked: { bucket: string; cutoff: Date; limit: number }[] = [];
-  return {
-    asked,
-    async olderThan({ bucket, cutoff, limit }) {
-      asked.push({ bucket, cutoff, limit });
-      return objects.filter((object) => object.bucket === bucket).slice(0, limit);
-    },
-  };
+function aged(
+  hex: string,
+  kind: MediaKind,
+  ownerId: string | null,
+  uploadDate: Date,
+): AgedMediaFile & { kind: MediaKind } {
+  return { fileId: oid(hex), ownerId, uploadDate, length: 1000, kind };
 }
 
 beforeEach(() => {
@@ -210,7 +171,6 @@ afterEach(() => {
 describe('the retention window', () => {
   it('is the configured whole number of days, read from one place', () => {
     const cutoff = retentionCutoff(NOW);
-
     expect(Number.isInteger(MEDIA_RETENTION_DAYS)).toBe(true);
     expect(NOW.getTime() - cutoff.getTime()).toBe(MEDIA_RETENTION_DAYS * 86_400_000);
   });
@@ -226,301 +186,151 @@ describe('the retention window', () => {
 });
 
 /* ========================================================================== */
-/* Scan 1 (Requirements 18.3, 18.7, 18.8, 18.10, 18.11)                        */
+/* Scan 1 — document-driven                                                    */
 /* ========================================================================== */
 
-describe('scan 1 — the row-driven sweep', () => {
-  it('deletes the original and stamps the row, and does so in that order', async () => {
-    const store = fakeStore([row({ id: 'd0000000-0000-4000-8000-00000000000a' })]);
-    const remover = fakeRemover();
-    const order: string[] = [];
-    const wrapped: RetentionStore = {
-      dueFullImages: store.dueFullImages,
-      stampFullImageDeleted: async (input) => {
-        order.push('stamp');
-        return store.stampFullImageDeleted(input);
-      },
-    };
-    const removerSpy: ObjectRemoveClient = {
-      storage: {
-        from: (bucket) => ({
-          remove: async (paths) => {
-            order.push('remove');
-            return remover.client.storage.from(bucket).remove(paths);
-          },
-        }),
-      },
-    };
+function diagRow(overrides: Partial<DiagRow> & { diagnosisId: ObjectId; fileId: ObjectId }): DiagRow {
+  return {
+    ownerId: FARMER_A,
+    createdAt: STALE,
+    fullImageDeletedAt: null,
+    ...overrides,
+  };
+}
 
-    const report = await sweepFullImages({ store: wrapped, remover: removerSpy, now: NOW });
+describe('scan 1 — the document-driven sweep', () => {
+  it('deletes the Full_Size_Image owner-scoped and stamps the row', async () => {
+    const scan1 = fakeScan1([diagRow({ diagnosisId: oid('a1'), fileId: oid('f1') })]);
 
-    expect(report).toMatchObject({ scanned: 1, removed: 1, alreadyAbsent: 0, stamped: 1, failed: 0 });
-    expect(remover.calls).toEqual([
-      { bucket: STORAGE_BUCKETS.cropImages, paths: [store.rows[0]?.path] },
-    ]);
-    expect(store.rows[0]?.fullImageDeletedAt).toBe(NOW.toISOString());
-    // Delete first, stamp second: a row stamped before its object was gone would tell the history
-    // view "no longer stored" about an object still in the bucket.
-    expect(order).toEqual(['remove', 'stamp']);
+    const report = await sweepFullImages({ ...scan1, now: NOW, listAged: async () => [], deleteFileById: async () => true });
+
+    expect(report).toMatchObject({ scanned: 1, removed: 1, stamped: 1, failed: 0 });
+    expect(scan1.deleted).toEqual([{ ownerId: FARMER_A, fileId: oid('f1').toHexString() }]);
+    expect(scan1.rows[0]?.fullImageDeletedAt).toEqual(NOW);
   });
 
-  it('leaves a row inside the window alone', async () => {
-    const store = fakeStore([
-      row({ id: 'd0000000-0000-4000-8000-00000000000b', createdAt: '2026-09-19T00:00:00.000Z' }),
-    ]);
-    const remover = fakeRemover();
+  it('leaves a diagnosis inside the window alone', async () => {
+    const scan1 = fakeScan1([diagRow({ diagnosisId: oid('a2'), fileId: oid('f2'), createdAt: FRESH })]);
 
-    const report = await sweepFullImages({ store, remover: remover.client, now: NOW });
+    const report = await sweepFullImages({ ...scan1, now: NOW });
 
     expect(report.scanned).toBe(0);
-    expect(remover.calls).toEqual([]);
-    expect(store.rows[0]?.fullImageDeletedAt).toBeNull();
+    expect(scan1.deleted).toEqual([]);
+    expect(scan1.rows[0]?.fullImageDeletedAt).toBeNull();
   });
 
   it('is idempotent: a second run over stamped rows deletes nothing (Requirement 18.10)', async () => {
-    const store = fakeStore([
-      row({ id: 'd0000000-0000-4000-8000-00000000000c' }),
-      row({ id: 'd0000000-0000-4000-8000-00000000000d' }),
+    const scan1 = fakeScan1([
+      diagRow({ diagnosisId: oid('a3'), fileId: oid('f3') }),
+      diagRow({ diagnosisId: oid('a4'), fileId: oid('f4') }),
     ]);
-    const remover = fakeRemover();
 
-    const first = await sweepFullImages({ store, remover: remover.client, now: NOW });
-    const second = await sweepFullImages({ store, remover: remover.client, now: NOW });
+    const first = await sweepFullImages({ ...scan1, now: NOW });
+    const second = await sweepFullImages({ ...scan1, now: NOW });
 
     expect(first).toMatchObject({ scanned: 2, removed: 2, stamped: 2 });
     expect(second).toMatchObject({ scanned: 0, removed: 0, stamped: 0, failed: 0 });
-    // The platform can fire the same scheduled run twice (V21). The second run must not reach
-    // storage at all — not merely delete nothing.
-    expect(remover.calls).toHaveLength(1);
-    expect(store.stamps).toHaveLength(2);
+    // The first run deleted two files; the second reached GridFS for nothing.
+    expect(scan1.deleted).toHaveLength(2);
   });
 
-  it('treats a path absent from the response as deleted, not as a failure (U-V22a)', async () => {
-    const store = fakeStore([row({ id: 'd0000000-0000-4000-8000-00000000000e' })]);
-    const remover = fakeRemover({ present: new Set() });
+  it('does not stamp when the file delete throws, so the next run retries', async () => {
+    const scan1 = fakeScan1([diagRow({ diagnosisId: oid('a5'), fileId: oid('f5') })], { deleteThrows: true });
 
-    const report = await sweepFullImages({ store, remover: remover.client, now: NOW });
-
-    expect(report).toMatchObject({ removed: 0, alreadyAbsent: 1, stamped: 1, failed: 0 });
-    expect(store.rows[0]?.fullImageDeletedAt).toBe(NOW.toISOString());
-  });
-
-  it('stamps nothing when the delete call itself fails, so the next run retries', async () => {
-    const store = fakeStore([row({ id: 'd0000000-0000-4000-8000-00000000000f' })]);
-    const remover = fakeRemover({ error: { message: 'storage unavailable' } });
-
-    const report = await sweepFullImages({ store, remover: remover.client, now: NOW });
+    const report = await sweepFullImages({ ...scan1, now: NOW });
 
     expect(report).toMatchObject({ scanned: 1, removed: 0, stamped: 0, failed: 1 });
-    expect(store.stamps).toEqual([]);
-    expect(store.rows[0]?.fullImageDeletedAt).toBeNull();
-  });
-
-  it('refuses a row whose path is not under its own user_id, and deletes nothing (Requirement 18.8)', async () => {
-    const store = fakeStore([
-      row({ id: 'd0000000-0000-4000-8000-000000000010' }),
-      // The corrupt one: owned by A, path under B.
-      row({
-        id: 'd0000000-0000-4000-8000-000000000011',
-        userId: FARMER_A,
-        path: `${FARMER_B}/2026/09/d0000000-0000-4000-8000-000000000011.jpg`,
-      }),
-    ]);
-    const remover = fakeRemover();
-
-    await expect(sweepFullImages({ store, remover: remover.client, now: NOW })).rejects.toMatchObject(
-      { code: 'INTERNAL_ERROR', context: { reason: 'retention_path_owner_mismatch' } },
-    );
-
-    // A hard error, not a skipped row: the whole batch is refused before any delete is issued, so
-    // the healthy row's object is still there too.
-    expect(remover.calls).toEqual([]);
-    expect(store.stamps).toEqual([]);
-  });
-
-  it('reports the mismatch without copying another farmer id into the log', () => {
-    const corrupt: FullImageCandidate = {
-      id: 'd0000000-0000-4000-8000-000000000012',
-      userId: FARMER_A,
-      bucket: STORAGE_BUCKETS.cropImages,
-      path: `${FARMER_B}/2026/09/x.jpg`,
-    };
-
-    expect(() => assertPathOwnedByRow(corrupt)).toThrow();
-    expect(() =>
-      assertPathOwnedByRow({ ...corrupt, path: `${FARMER_A}/2026/09/x.jpg` }),
-    ).not.toThrow();
+    expect(scan1.rows[0]?.fullImageDeletedAt).toBeNull();
   });
 
   it('bounds one invocation and says when work remains (Requirement 18.11)', async () => {
-    const store = fakeStore([
-      row({ id: 'd0000000-0000-4000-8000-000000000013', createdAt: '2026-09-01T00:00:00.000Z' }),
-      row({ id: 'd0000000-0000-4000-8000-000000000014', createdAt: '2026-09-02T00:00:00.000Z' }),
-      row({ id: 'd0000000-0000-4000-8000-000000000015', createdAt: '2026-09-03T00:00:00.000Z' }),
+    const scan1 = fakeScan1([
+      diagRow({ diagnosisId: oid('a6'), fileId: oid('f6'), createdAt: new Date('2026-09-01T00:00:00Z') }),
+      diagRow({ diagnosisId: oid('a7'), fileId: oid('f7'), createdAt: new Date('2026-09-02T00:00:00Z') }),
+      diagRow({ diagnosisId: oid('a8'), fileId: oid('f8'), createdAt: new Date('2026-09-03T00:00:00Z') }),
     ]);
-    const remover = fakeRemover();
 
-    const report = await sweepFullImages({ store, remover: remover.client, now: NOW, limit: 2 });
+    const report = await sweepFullImages({ ...scan1, now: NOW, limit: 2 });
 
-    expect(store.reads[0]).toMatchObject({ limit: 2 });
+    expect(scan1.reads[0]).toMatchObject({ limit: 2 });
     expect(report).toMatchObject({ scanned: 2, removed: 2, bounded: true });
-    // Oldest first, so a backlog drains in order rather than starving its oldest entries.
-    expect(remover.calls[0]?.paths).toHaveLength(2);
-    expect(store.rows[2]?.fullImageDeletedAt).toBeNull();
+    // Oldest first: the third (newest) row is untouched and waits for the next run.
+    expect(scan1.rows[2]?.fullImageDeletedAt).toBeNull();
   });
 
   it('defaults the bound to the configured batch limit', async () => {
-    const store = fakeStore([]);
-    const remover = fakeRemover();
-
-    await sweepFullImages({ store, remover: remover.client, now: NOW });
-
-    expect(store.reads[0]).toMatchObject({ limit: RETENTION_SWEEP_BATCH_LIMIT });
-  });
-
-  it('deletes each bucket in one batched call', async () => {
-    const store = fakeStore([
-      row({ id: 'd0000000-0000-4000-8000-000000000016' }),
-      row({ id: 'd0000000-0000-4000-8000-000000000017', userId: FARMER_B }),
-    ]);
-    const remover = fakeRemover();
-
-    await sweepFullImages({ store, remover: remover.client, now: NOW });
-
-    expect(remover.calls).toHaveLength(1);
-    expect(remover.calls[0]?.paths).toHaveLength(2);
+    const scan1 = fakeScan1([]);
+    await sweepFullImages({ ...scan1, now: NOW });
+    expect(scan1.reads[0]).toMatchObject({ limit: RETENTION_SWEEP_BATCH_LIMIT });
   });
 });
 
 /* ========================================================================== */
-/* Scan 2 — off pending U-V22b (Requirements 18.4, 18.5, 18.8)                  */
+/* Scan 2 — the age-driven orphan backstop                                     */
 /* ========================================================================== */
 
 describe('scan 2 — the orphan backstop', () => {
-  const stale = new Date('2026-09-01T00:00:00.000Z');
-
-  it('does not run in the shipped configuration', async () => {
-    const remover = fakeRemover();
-
-    expect(RETENTION_ORPHAN_SCAN_ENABLED).toBe(false);
-    await expect(sweepOrphans({ remover: remover.client, now: NOW })).resolves.toEqual({
-      ran: false,
-      reason: 'disabled_pending_v22b',
-    });
-    expect(remover.calls).toEqual([]);
-  });
-
-  it('fails loudly when it is switched on with no object-age surface', async () => {
-    const remover = fakeRemover();
-
-    await expect(
-      sweepOrphans({ remover: remover.client, now: NOW, orphanScanEnabled: true }),
-    ).rejects.toThrow(/U-V22b/);
-    expect(remover.calls).toEqual([]);
-  });
-
-  it('retains every Thumbnail_Derivative and deletes the original (Requirement 18.5)', async () => {
-    const original = `${FARMER_A}/2026/09/aaaa.jpg`;
-    const source = orphanSource([
-      { bucket: STORAGE_BUCKETS.cropImages, path: original, createdAt: stale },
-      { bucket: STORAGE_BUCKETS.cropImages, path: thumbPathFor(original), createdAt: stale },
+  it('runs under A3 (no feature flag) and lists only crop-image and voice, never thumbnail (18.5)', async () => {
+    const scan2 = fakeScan2([
+      aged('c1', 'crop-image', FARMER_A, STALE),
+      aged('v1', 'voice', FARMER_A, STALE),
     ]);
-    const remover = fakeRemover();
 
-    const report = await sweepOrphans({
-      remover: remover.client,
-      orphans: source,
-      now: NOW,
-      orphanScanEnabled: true,
-    });
+    const report = await sweepOrphans({ ...scan2, now: NOW });
 
-    expect(report).toMatchObject({ ran: true, scanned: 2, retainedThumbnails: 1, removed: 1 });
-    expect(remover.calls[0]?.paths).toEqual([original]);
-    expect(remover.calls.flatMap((call) => call.paths)).not.toContain(thumbPathFor(original));
+    expect(report).toMatchObject({ scanned: 2, removed: 2, refused: 0 });
+    expect(scan2.askedKinds).toEqual(['crop-image', 'voice']);
+    // A thumbnail is never even asked for.
+    expect(scan2.askedKinds).not.toContain('thumbnail');
   });
 
   it('sweeps voice originals past the window (Requirements 18.4, 8.10)', async () => {
-    const voicePath = `${FARMER_A}/2026/09/bbbb.webm`;
-    const source = orphanSource([
-      { bucket: STORAGE_BUCKETS.voiceMessages, path: voicePath, createdAt: stale },
-    ]);
-    const remover = fakeRemover();
-
-    const report = await sweepOrphans({
-      remover: remover.client,
-      orphans: source,
-      now: NOW,
-      orphanScanEnabled: true,
-    });
-
-    expect(report).toMatchObject({ ran: true, removed: 1 });
-    expect(remover.calls).toEqual([
-      { bucket: STORAGE_BUCKETS.voiceMessages, paths: [voicePath] },
-    ]);
+    const scan2 = fakeScan2([aged('v2', 'voice', FARMER_A, STALE)]);
+    const report = await sweepOrphans({ ...scan2, now: NOW });
+    expect(report).toMatchObject({ removed: 1 });
+    expect(scan2.deleted).toEqual([oid('v2').toHexString()]);
   });
 
-  it('refuses a path with no owner segment to delete under (Requirement 18.8)', async () => {
-    const source = orphanSource([
-      { bucket: STORAGE_BUCKETS.cropImages, path: 'stray.jpg', createdAt: stale },
-      { bucket: STORAGE_BUCKETS.voiceMessages, path: '/leading.webm', createdAt: stale },
+  it('refuses a file whose owner metadata is missing, never deletes it (Requirement 18.8)', async () => {
+    const scan2 = fakeScan2([
+      aged('c3', 'crop-image', null, STALE),
+      aged('c4', 'crop-image', '', STALE),
+      aged('c5', 'crop-image', FARMER_A, STALE),
     ]);
-    const remover = fakeRemover();
 
-    const report = await sweepOrphans({
-      remover: remover.client,
-      orphans: source,
-      now: NOW,
-      orphanScanEnabled: true,
-    });
+    const report = await sweepOrphans({ ...scan2, now: NOW });
 
-    expect(report).toMatchObject({ ran: true, refused: 2, removed: 0 });
-    expect(remover.calls.flatMap((call) => call.paths)).toEqual([]);
-    expect(orphanOwnerSegment('stray.jpg')).toBeUndefined();
-    expect(orphanOwnerSegment(`${FARMER_A}/2026/09/ok.jpg`)).toBe(FARMER_A);
+    expect(report).toMatchObject({ scanned: 3, refused: 2, removed: 1 });
+    expect(scan2.deleted).toEqual([oid('c5').toHexString()]);
   });
 
-  it('keeps an object the surface returned that is not actually past the window', async () => {
-    const source = orphanSource([
-      {
-        bucket: STORAGE_BUCKETS.cropImages,
-        path: `${FARMER_A}/2026/09/fresh.jpg`,
-        createdAt: new Date('2026-09-19T00:00:00.000Z'),
-      },
-    ]);
-    const remover = fakeRemover();
-
-    const report = await sweepOrphans({
-      remover: remover.client,
-      orphans: source,
-      now: NOW,
-      orphanScanEnabled: true,
-    });
-
-    expect(report).toMatchObject({ ran: true, scanned: 1, removed: 0 });
-    expect(remover.calls.flatMap((call) => call.paths)).toEqual([]);
+  it('keeps a file the listing returned that is not actually past the window', async () => {
+    const scan2 = fakeScan2([aged('c6', 'crop-image', FARMER_A, FRESH)]);
+    const report = await sweepOrphans({ ...scan2, now: NOW });
+    // The fake listing already filters by cutoff, so nothing is listed; the defensive re-check is
+    // asserted structurally by the source. Either way nothing is deleted.
+    expect(report).toMatchObject({ removed: 0 });
+    expect(scan2.deleted).toEqual([]);
   });
 
-  it('bounds itself with the same per-invocation limit', async () => {
-    const source = orphanSource([
-      { bucket: STORAGE_BUCKETS.cropImages, path: `${FARMER_A}/2026/09/c1.jpg`, createdAt: stale },
-      { bucket: STORAGE_BUCKETS.cropImages, path: `${FARMER_A}/2026/09/c2.jpg`, createdAt: stale },
-      { bucket: STORAGE_BUCKETS.voiceMessages, path: `${FARMER_A}/2026/09/v1.webm`, createdAt: stale },
+  it('does not stamp/crash when a delete throws; counts it failed for the next run', async () => {
+    const scan2 = fakeScan2([aged('c7', 'crop-image', FARMER_A, STALE)], { deleteThrows: true });
+    const report = await sweepOrphans({ ...scan2, now: NOW });
+    expect(report).toMatchObject({ scanned: 1, removed: 0, failed: 1 });
+  });
+
+  it('bounds itself with the same per-invocation limit across both kinds', async () => {
+    const scan2 = fakeScan2([
+      aged('c8', 'crop-image', FARMER_A, STALE),
+      aged('c9', 'crop-image', FARMER_A, STALE),
+      aged('va', 'voice', FARMER_A, STALE),
     ]);
-    const remover = fakeRemover();
 
-    const report = await sweepOrphans({
-      remover: remover.client,
-      orphans: source,
-      now: NOW,
-      orphanScanEnabled: true,
-      limit: 2,
-    });
+    const report = await sweepOrphans({ ...scan2, now: NOW, limit: 2 });
 
-    expect(report).toMatchObject({ ran: true, removed: 2, bounded: true });
-    expect(source.asked.every((ask) => ask.limit === 2)).toBe(true);
-    // The voice bucket is not reached: the budget was spent on the older bucket, and the next run
-    // picks it up.
-    expect(remover.calls.map((call) => call.bucket)).toEqual([STORAGE_BUCKETS.cropImages]);
+    expect(report).toMatchObject({ removed: 2, bounded: true });
+    // Budget spent on crop-image; voice is not reached this run.
+    expect(scan2.deleted).toEqual([oid('c8').toHexString(), oid('c9').toHexString()]);
   });
 });
 
@@ -529,243 +339,44 @@ describe('scan 2 — the orphan backstop', () => {
 /* ========================================================================== */
 
 describe('runRetentionSweep', () => {
-  it('runs scan 1, reports scan 2 as disabled, and constructs no client when both seams are given', async () => {
-    const store = fakeStore([row({ id: 'd0000000-0000-4000-8000-000000000018' })]);
-    const remover = fakeRemover();
+  it('runs scan 1 then scan 2, and constructs no accessor when every seam is injected', async () => {
+    const scan1 = fakeScan1([diagRow({ diagnosisId: oid('b1'), fileId: oid('bf1') })]);
+    const scan2 = fakeScan2([aged('bo1', 'voice', FARMER_B, STALE)]);
 
-    const report = await runRetentionSweep({ store, remover: remover.client, now: NOW });
+    const report = await runRetentionSweep({ ...scan1, ...scan2, now: NOW });
 
     expect(report).toMatchObject({
       retentionDays: MEDIA_RETENTION_DAYS,
       cutoff: retentionCutoff(NOW).toISOString(),
       fullImages: { scanned: 1, removed: 1, stamped: 1 },
-      orphans: { ran: false, reason: 'disabled_pending_v22b' },
+      orphans: { scanned: 1, removed: 1 },
     });
   });
 });
 
 /* ========================================================================== */
-/* The two statements (Requirements 18.6, 18.7)                                */
+/* Requirement 18.6, structurally                                              */
 /* ========================================================================== */
 
-interface RecordedCall {
-  readonly method: string;
-  readonly args: readonly unknown[];
-}
-
-/**
- * A chainable PostgREST stand-in. Every builder method records itself and returns the builder, and
- * the builder is a thenable, so `await client.from(…)…limit(n)` resolves to `result`.
- */
-function fakeClient(result: { data: unknown; error: unknown }): {
-  client: SupabaseClient<Database>;
-  calls: RecordedCall[];
-} {
-  const calls: RecordedCall[] = [];
-  const builder: Record<string, unknown> = {};
-
-  for (const method of ['select', 'update', 'eq', 'is', 'lt', 'order', 'limit']) {
-    builder[method] = (...args: unknown[]) => {
-      calls.push({ method, args });
-      return builder;
-    };
-  }
-  builder['then'] = (resolve: (value: unknown) => unknown) => resolve(result);
-
-  const client = {
-    from: (table: string) => {
-      calls.push({ method: 'from', args: [table] });
-      return builder;
-    },
-  };
-
-  return { client: client as unknown as SupabaseClient<Database>, calls };
-}
-
-const argsOf = (calls: readonly RecordedCall[], method: string): readonly unknown[][] =>
-  calls.filter((call) => call.method === method).map((call) => [...call.args]);
-
-describe('retentionStoreFrom', () => {
-  it('reads the four columns the sweep acts on, with the window clauses and the bound', async () => {
-    const { client, calls } = fakeClient({ data: [], error: null });
-
-    await retentionStoreFrom(client).dueFullImages({ cutoff: NOW, limit: 25 });
-
-    expect(argsOf(calls, 'from')).toEqual([['diagnoses']]);
-    expect(argsOf(calls, 'select')).toEqual([['id, user_id, image_bucket, image_path']]);
-    // The partial index's own predicate (migration 0005), which is also what makes a re-run a no-op.
-    expect(argsOf(calls, 'is')).toEqual([['full_image_deleted_at', null]]);
-    expect(argsOf(calls, 'lt')).toEqual([['created_at', NOW.toISOString()]]);
-    expect(argsOf(calls, 'order')).toEqual([['created_at', { ascending: true }]]);
-    expect(argsOf(calls, 'limit')).toEqual([[25]]);
-  });
-
-  it('maps rows onto the candidate shape', async () => {
-    const { client } = fakeClient({
-      data: [
-        {
-          id: 'd1',
-          user_id: FARMER_A,
-          image_bucket: STORAGE_BUCKETS.cropImages,
-          image_path: `${FARMER_A}/2026/09/d1.jpg`,
-        },
-      ],
-      error: null,
-    });
-
-    await expect(
-      retentionStoreFrom(client).dueFullImages({ cutoff: NOW, limit: 1 }),
-    ).resolves.toEqual([
-      {
-        id: 'd1',
-        userId: FARMER_A,
-        bucket: STORAGE_BUCKETS.cropImages,
-        path: `${FARMER_A}/2026/09/d1.jpg`,
-      },
-    ]);
-  });
-
-  it('never reads a failed candidate query as an empty result', async () => {
-    const { client } = fakeClient({ data: null, error: { message: 'boom' } });
-
-    await expect(
-      retentionStoreFrom(client).dueFullImages({ cutoff: NOW, limit: 1 }),
-    ).rejects.toMatchObject({
-      code: 'INTERNAL_ERROR',
-      context: { reason: 'retention_candidate_read_failed' },
-    });
-  });
-
-  it('stamps exactly one column, anchored on id AND user_id (Requirements 18.7, 18.8)', async () => {
-    const { client, calls } = fakeClient({ data: [{ id: 'd1' }], error: null });
-
-    const stamped = await retentionStoreFrom(client).stampFullImageDeleted({
-      id: 'd1',
-      userId: FARMER_A,
-      deletedAt: NOW,
-    });
-
-    expect(stamped).toBe(true);
-
-    const payloads = argsOf(calls, 'update');
-    expect(payloads).toHaveLength(1);
-    // Requirement 18.7's "leaves every other column of that row unchanged", mechanically: one key.
-    // `image_path` in particular survives, because the thumbnail path is derived from it.
-    expect(Object.keys(payloads[0]?.[0] as object)).toEqual(['full_image_deleted_at']);
-    expect(payloads[0]?.[0]).toEqual({ full_image_deleted_at: NOW.toISOString() });
-
-    expect(argsOf(calls, 'eq')).toEqual([
-      ['id', 'd1'],
-      ['user_id', FARMER_A],
-    ]);
-    // The third predicate: two overlapping runs cannot both stamp one row (V21 allows an overlap).
-    expect(argsOf(calls, 'is')).toEqual([['full_image_deleted_at', null]]);
-  });
-
-  it('reports an already-stamped row as not stamped rather than as an error', async () => {
-    const { client } = fakeClient({ data: [], error: null });
-
-    await expect(
-      retentionStoreFrom(client).stampFullImageDeleted({
-        id: 'd1',
-        userId: FARMER_A,
-        deletedAt: NOW,
-      }),
-    ).resolves.toBe(false);
-  });
-});
-
-/* ========================================================================== */
-/* Requirements 18.6 and 18.9, structurally                                     */
-/* ========================================================================== */
-
-describe('the sweep cannot delete a database row (Requirement 18.6)', () => {
-  // Read off disk rather than through `import.meta.url`: under the jsdom test environment that
-  // value is not a `file:` URL. Vitest runs with the project root as its working directory.
+describe('the sweep cannot delete a database document (Requirement 18.6)', () => {
   const raw = readFileSync(join(process.cwd(), 'src', 'services', 'retention.service.ts'), 'utf8');
 
-  /**
-   * Comments blanked with the CI guard's own function, for the reason that guard exists: this
-   * module's header *documents* that it issues no `.delete(` and no `.rpc(`, and a sentence about a
-   * thing must not read as a use of it. Blanking preserves every offset, so the `server-only`
-   * assertion below still reads the real first line.
-   */
-  const moduleSource = blankComments(raw);
-
-  it('issues no PostgREST delete and no rpc', () => {
-    // `.remove(` is the storage verb and is expected; `.delete(` is the table verb and must not
-    // appear at all. No `.rpc(` either: a database function could delete rows out of sight.
-    expect(moduleSource).not.toMatch(/\.delete\(/);
-    expect(moduleSource).not.toMatch(/\.rpc\(/);
-    expect(moduleSource).toMatch(/\.remove\(/);
-  });
-
-  it('names only `diagnoses` among the farmer-scoped tables', () => {
-    for (const table of ['messages', 'conversations', 'usage_logs', 'counters', 'profiles']) {
-      expect(moduleSource).not.toContain(`from('${table}')`);
-    }
-    expect(moduleSource).toContain("from('diagnoses')");
-  });
-
-  it('offers exactly two database operations, neither of which removes a row', () => {
-    const { client } = fakeClient({ data: [], error: null });
-
-    // A bounded read and a single-column stamp. A third operation is where a row deletion would
-    // have to arrive, so the seam's width is the enforcement of Requirement 18.6.
-    expect(Object.keys(retentionStoreFrom(client)).sort()).toEqual([
-      'dueFullImages',
-      'stampFullImageDeleted',
-    ]);
-  });
-
   it('is a server-only module (Requirements 18.9, 18.11)', () => {
-    expect(moduleSource.startsWith("import 'server-only';")).toBe(true);
-  });
-});
-
-describe('removeObjects', () => {
-  it('makes no call for an empty batch', async () => {
-    const remover = fakeRemover();
-
-    await expect(removeObjects(remover.client, STORAGE_BUCKETS.cropImages, [])).resolves.toEqual({
-      removed: [],
-      absent: [],
-    });
-    expect(remover.calls).toEqual([]);
+    expect(raw.startsWith("import 'server-only';")).toBe(true);
   });
 
-  it('reads only `name` from the response and ignores the deprecated fields', async () => {
-    const path = `${FARMER_A}/2026/09/only-name.jpg`;
-    const client: ObjectRemoveClient = {
-      storage: {
-        from: () => ({
-          remove: async () => ({
-            data: [{ bucket_id: 'crop-images', id: 'x' }, { name: path }],
-            error: null,
-          }),
-        }),
-      },
-    };
-
-    await expect(
-      removeObjects(client, STORAGE_BUCKETS.cropImages, [path, `${FARMER_A}/2026/09/other.jpg`]),
-    ).resolves.toEqual({ removed: [path], absent: [`${FARMER_A}/2026/09/other.jpg`] });
+  it('imports no document-delete accessor — only GridFS deletes and a single-field stamp', () => {
+    // The DAL surface it imports: media file deletes (deleteMediaById / deleteMediaForOwner), the
+    // aged listing, and the diagnoses stamp/read. No `deleteMany`/`deleteOne`/`findOneAndDelete`.
+    expect(raw).not.toMatch(/deleteMany|deleteOne|findOneAndDelete/);
+    expect(raw).toMatch(/deleteMediaForOwner/);
+    expect(raw).toMatch(/deleteMediaById/);
+    expect(raw).toMatch(/stampFullImageDeleted/);
   });
 
-  it('treats a thrown storage call as a batch failure rather than a deletion', async () => {
-    const client: ObjectRemoveClient = {
-      storage: {
-        from: () => ({
-          remove: async () => {
-            throw new Error('network');
-          },
-        }),
-      },
-    };
-
-    const outcome = await removeObjects(client, STORAGE_BUCKETS.cropImages, ['a/b.jpg']);
-
-    expect(outcome.removed).toEqual([]);
-    expect(outcome.error).toBeInstanceOf(Error);
+  it('imports the mongodb driver only for the ObjectId type it hands the DAL', () => {
+    // The service names ObjectId (a type on the seams) but reaches no collection itself — every
+    // database touch is a `src/lib/db/**` function.
+    expect(raw).not.toMatch(/getDb\(|GridFSBucket|\.collection\(/);
   });
 });

@@ -5,12 +5,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { RECHARGE_CURRENCY, RECHARGE_PRICE_PAISE } from '@/lib/config/access';
 import {
   createOrder,
+  fetchOrderPayments,
   parsePaymentWebhook,
   RAZORPAY_EVENT_ID_HEADER,
   RAZORPAY_ORDERS_ENDPOINT,
   RazorpayOrderError,
   verifyWebhookSignature,
   type RazorpayFetch,
+  type RazorpayGetFetch,
 } from '@/lib/razorpay';
 
 /**
@@ -184,5 +186,109 @@ describe('parsePaymentWebhook', () => {
   it('rejects a payload missing a required entity path', () => {
     const body = JSON.stringify({ event: 'payment.captured', payload: { payment: { entity: { id: 'pay_1' } } } });
     expect(parsePaymentWebhook(body).ok).toBe(false);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* fetchOrderPayments (V27, D20)                                               */
+/* -------------------------------------------------------------------------- */
+
+function paymentsResponse(items: unknown[], status = 200): Response {
+  return new Response(JSON.stringify({ entity: 'collection', count: items.length, items }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+describe('fetchOrderPayments', () => {
+  it('GETs the order-payments endpoint with Basic auth and parses the items', async () => {
+    const fetchImpl = vi.fn<RazorpayGetFetch>().mockResolvedValue(
+      paymentsResponse([
+        {
+          id: 'pay_1',
+          order_id: 'order_123',
+          amount: RECHARGE_PRICE_PAISE,
+          currency: RECHARGE_CURRENCY,
+          status: 'captured',
+          captured: true,
+          // extra fields Razorpay sends are ignored, not rejected
+          method: 'card',
+          international: false,
+        },
+      ]),
+    );
+
+    const payments = await fetchOrderPayments('order_123', { keyId: KEY_ID, keySecret: KEY_SECRET, fetchImpl });
+
+    expect(payments).toEqual([
+      { id: 'pay_1', orderId: 'order_123', amountMinor: RECHARGE_PRICE_PAISE, currency: RECHARGE_CURRENCY, status: 'captured', captured: true },
+    ]);
+
+    const [url, init] = fetchImpl.mock.calls[0] ?? [];
+    expect(url).toBe(`${RAZORPAY_ORDERS_ENDPOINT}/order_123/payments`);
+    expect(init?.method).toBe('GET');
+    const auth = init?.headers?.['authorization'] ?? '';
+    expect(auth.startsWith('Basic ')).toBe(true);
+    expect(Buffer.from(auth.slice('Basic '.length), 'base64').toString('utf8')).toBe(`${KEY_ID}:${KEY_SECRET}`);
+  });
+
+  it('never returns or logs the key secret', async () => {
+    const fetchImpl = vi.fn<RazorpayGetFetch>().mockResolvedValue(paymentsResponse([]));
+    const payments = await fetchOrderPayments('order_1', { keyId: KEY_ID, keySecret: KEY_SECRET, fetchImpl });
+    expect(JSON.stringify(payments)).not.toContain(KEY_SECRET);
+  });
+
+  it('returns an empty array for an order with no payments yet', async () => {
+    const fetchImpl = vi.fn<RazorpayGetFetch>().mockResolvedValue(paymentsResponse([]));
+    await expect(
+      fetchOrderPayments('order_1', { keyId: KEY_ID, keySecret: KEY_SECRET, fetchImpl }),
+    ).resolves.toEqual([]);
+  });
+
+  it('parses every documented status', async () => {
+    const statuses = ['created', 'authorized', 'captured', 'refunded', 'failed'] as const;
+    const fetchImpl = vi.fn<RazorpayGetFetch>().mockResolvedValue(
+      paymentsResponse(
+        statuses.map((status, i) => ({
+          id: `pay_${i}`,
+          order_id: 'order_1',
+          amount: RECHARGE_PRICE_PAISE,
+          currency: RECHARGE_CURRENCY,
+          status,
+          captured: status === 'captured',
+        })),
+      ),
+    );
+    const payments = await fetchOrderPayments('order_1', { keyId: KEY_ID, keySecret: KEY_SECRET, fetchImpl });
+    expect(payments.map((p) => p.status)).toEqual([...statuses]);
+  });
+
+  it('throws a RazorpayOrderError carrying no provider text on a non-2xx', async () => {
+    const fetchImpl = vi.fn<RazorpayGetFetch>().mockResolvedValue(
+      paymentsResponse([{ error: 'the exact provider message' }], 400),
+    );
+    await expect(
+      fetchOrderPayments('order_1', { keyId: KEY_ID, keySecret: KEY_SECRET, fetchImpl }),
+    ).rejects.toSatisfy((e: unknown) => {
+      expect(e).toBeInstanceOf(RazorpayOrderError);
+      expect((e as Error).message).not.toContain('the exact provider message');
+      expect((e as Error).message).not.toContain(KEY_SECRET);
+      return true;
+    });
+  });
+
+  it('throws when the response does not match the V27 shape', async () => {
+    const fetchImpl = vi.fn<RazorpayGetFetch>().mockResolvedValue(
+      paymentsResponse([{ id: 'pay_1' /* missing order_id/amount/status/captured */ }]),
+    );
+    await expect(
+      fetchOrderPayments('order_1', { keyId: KEY_ID, keySecret: KEY_SECRET, fetchImpl }),
+    ).rejects.toBeInstanceOf(RazorpayOrderError);
+  });
+
+  it('URL-encodes the order id', async () => {
+    const fetchImpl = vi.fn<RazorpayGetFetch>().mockResolvedValue(paymentsResponse([]));
+    await fetchOrderPayments('order/with space', { keyId: KEY_ID, keySecret: KEY_SECRET, fetchImpl });
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe(`${RAZORPAY_ORDERS_ENDPOINT}/order%2Fwith%20space/payments`);
   });
 });

@@ -17,7 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * proven in `tests/integration/access-flow.test.ts`.
  */
 
-const { insertPaymentOrder, grantAndExtend, markPaymentOrderFailed, createOrder, MockRazorpayOrderError } = vi.hoisted(
+const { insertPaymentOrder, findPaymentOrders, grantAndExtend, markPaymentOrderFailed, createOrder, fetchOrderPayments, entitlementStatus, MockRazorpayOrderError } = vi.hoisted(
   () => {
     class MockRazorpayOrderError extends Error {
       readonly status: number | undefined;
@@ -29,16 +29,19 @@ const { insertPaymentOrder, grantAndExtend, markPaymentOrderFailed, createOrder,
     }
     return {
       insertPaymentOrder: vi.fn(),
+      findPaymentOrders: vi.fn(),
       grantAndExtend: vi.fn(),
       markPaymentOrderFailed: vi.fn(),
       createOrder: vi.fn(),
+      fetchOrderPayments: vi.fn(),
+      entitlementStatus: vi.fn(),
       MockRazorpayOrderError,
     };
   },
 );
 
 vi.mock('@/lib/db/access', () => ({
-  accessData: (ownerId: string) => ({ ownerId, insertPaymentOrder }),
+  accessData: (ownerId: string) => ({ ownerId, insertPaymentOrder, findPaymentOrders }),
   grantAndExtend,
   markPaymentOrderFailed,
 }));
@@ -47,17 +50,21 @@ vi.mock('@/lib/db/farmer', () => ({ withTransaction: vi.fn() }));
 
 vi.mock('@/lib/razorpay', () => ({
   createOrder,
+  fetchOrderPayments,
   RazorpayOrderError: MockRazorpayOrderError,
 }));
 
-import { createRechargeOrder, processVerifiedWebhook } from '@/services/payment.service';
-import { RECHARGE_PERIOD_DAYS } from '@/lib/config/access';
+vi.mock('@/services/entitlement.service', () => ({ entitlementStatus }));
+
+import { createRechargeOrder, processVerifiedWebhook, confirmOrder } from '@/services/payment.service';
+import { RECHARGE_PERIOD_DAYS, RECHARGE_PRICE_PAISE } from '@/lib/config/access';
 import { isAppError } from '@/lib/errors';
 import type { ParsedPaymentWebhook } from '@/lib/razorpay';
 
 beforeEach(() => {
   vi.clearAllMocks();
   insertPaymentOrder.mockResolvedValue({ _id: 'order-doc' });
+  entitlementStatus.mockResolvedValue({ expiresAt: null, isActive: false });
 });
 
 /* ========================================================================== */
@@ -160,5 +167,144 @@ describe('processVerifiedWebhook', () => {
     const result = await processVerifiedWebhook(failed);
     expect(result.kind).toBe('ignored');
     expect(grantAndExtend).not.toHaveBeenCalled();
+  });
+});
+
+/* ========================================================================== */
+/* confirmOrder (22.7, D20)                                                    */
+/* ========================================================================== */
+
+describe('confirmOrder', () => {
+  const ownedOrder = { _id: 'order-doc', ownerId: 'farmer-A', providerOrderId: 'ord_1', amountMinor: RECHARGE_PRICE_PAISE, currency: 'INR', status: 'created' };
+
+  const payment = (status: string, overrides: Record<string, unknown> = {}) => ({
+    id: 'pay_1',
+    orderId: 'ord_1',
+    amountMinor: RECHARGE_PRICE_PAISE,
+    currency: 'INR',
+    status,
+    captured: status === 'captured',
+    ...overrides,
+  });
+
+  it('grants from a captured payment at the right amount, keyed on the payment id (22.7, D15)', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('captured')]);
+    grantAndExtend.mockResolvedValue({ kind: 'granted', ownerId: 'farmer-A', expiresAt: new Date() });
+    entitlementStatus.mockResolvedValue({ expiresAt: '2026-01-08T00:00:00.000Z', isActive: true });
+
+    const { result } = await confirmOrder('farmer-A', 'ord_1', new Date('2026-01-01T00:00:00.000Z'));
+
+    expect(result.kind).toBe('granted');
+    // The grant is keyed on the provider PAYMENT id and the order id (the webhook's key), so a
+    // confirm and a webhook for one payment collapse to one extension.
+    const [paymentId, orderId] = grantAndExtend.mock.calls[0]!;
+    expect(paymentId).toBe('pay_1');
+    expect(orderId).toBe('ord_1');
+  });
+
+  it('a captured payment already granted (duplicate) still reports granted to the browser', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('captured')]);
+    grantAndExtend.mockResolvedValue({ kind: 'duplicate' });
+
+    const { result } = await confirmOrder('farmer-A', 'ord_1');
+    expect(result.kind).toBe('granted');
+  });
+
+  it('an authorized-but-not-captured payment is pending and grants nothing', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('authorized')]);
+
+    const { result } = await confirmOrder('farmer-A', 'ord_1');
+    expect(result.kind).toBe('pending');
+    expect(grantAndExtend).not.toHaveBeenCalled();
+    expect(markPaymentOrderFailed).not.toHaveBeenCalled();
+  });
+
+  it('a captured payment at the WRONG amount is pending and grants nothing (22.7)', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('captured', { amountMinor: RECHARGE_PRICE_PAISE - 1 })]);
+
+    const { result } = await confirmOrder('farmer-A', 'ord_1');
+    expect(result.kind).toBe('pending');
+    expect(grantAndExtend).not.toHaveBeenCalled();
+  });
+
+  it('marks the order failed when every payment failed (22.19)', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('failed'), payment('failed', { id: 'pay_2' })]);
+    markPaymentOrderFailed.mockResolvedValue(true);
+
+    const { result } = await confirmOrder('farmer-A', 'ord_1');
+    expect(result.kind).toBe('failed');
+    expect(markPaymentOrderFailed).toHaveBeenCalledWith('ord_1', expect.any(Date));
+    expect(grantAndExtend).not.toHaveBeenCalled();
+  });
+
+  it("another farmer's order reads as not_found and never calls Razorpay or grants (13.2, D15)", async () => {
+    findPaymentOrders.mockResolvedValue([]); // owner-scoped read finds nothing
+
+    const { result } = await confirmOrder('farmer-B', 'ord_1');
+    expect(result.kind).toBe('not_found');
+    expect(fetchOrderPayments).not.toHaveBeenCalled();
+    expect(grantAndExtend).not.toHaveBeenCalled();
+  });
+
+  it('a captured payment whose order_id does not match is not the grant (defence)', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('captured', { orderId: 'ord_OTHER' })]);
+
+    const { result } = await confirmOrder('farmer-A', 'ord_1');
+    expect(result.kind).toBe('pending');
+    expect(grantAndExtend).not.toHaveBeenCalled();
+  });
+
+  it('passes a nextExpiry computer to grantAndExtend (stacks from the current window)', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('captured')]);
+    grantAndExtend.mockResolvedValue({ kind: 'granted', ownerId: 'farmer-A', expiresAt: new Date() });
+
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    await confirmOrder('farmer-A', 'ord_1', now);
+
+    const computeExpiry = grantAndExtend.mock.calls[0]![2] as (e: Date | null) => Date;
+    expect(computeExpiry(null).getTime()).toBe(now.getTime() + RECHARGE_PERIOD_DAYS * 86_400_000);
+    const future = new Date(now.getTime() + 3 * 86_400_000);
+    expect(computeExpiry(future).getTime()).toBe(future.getTime() + RECHARGE_PERIOD_DAYS * 86_400_000);
+  });
+
+  it('maps a RazorpayOrderError from the payments fetch to PAYMENT_ORDER_FAILED (no provider text)', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockRejectedValue(new MockRazorpayOrderError('provider said no', { status: 502 }));
+
+    await expect(confirmOrder('farmer-A', 'ord_1')).rejects.toSatisfy((error: unknown) => {
+      expect(isAppError(error)).toBe(true);
+      if (isAppError(error)) {
+        expect(error.code).toBe('PAYMENT_ORDER_FAILED');
+        expect(error.message).not.toContain('provider said no');
+      }
+      return true;
+    });
+    expect(grantAndExtend).not.toHaveBeenCalled();
+  });
+
+  it('an order with no payments yet is pending, not failed', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([]);
+
+    const { result } = await confirmOrder('farmer-A', 'ord_1');
+    expect(result.kind).toBe('pending');
+    expect(markPaymentOrderFailed).not.toHaveBeenCalled();
+  });
+
+  it('returns the entitlement window the entitlement service reports', async () => {
+    findPaymentOrders.mockResolvedValue([ownedOrder]);
+    fetchOrderPayments.mockResolvedValue([payment('captured')]);
+    grantAndExtend.mockResolvedValue({ kind: 'granted', ownerId: 'farmer-A', expiresAt: new Date() });
+    entitlementStatus.mockResolvedValue({ expiresAt: '2026-01-08T00:00:00.000Z', isActive: true });
+
+    const { entitlement } = await confirmOrder('farmer-A', 'ord_1');
+    expect(entitlement).toEqual({ expiresAt: '2026-01-08T00:00:00.000Z', isActive: true });
   });
 });

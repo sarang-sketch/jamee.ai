@@ -52,7 +52,7 @@ export const VERIFIED_CONDITIONS = [
 export const verifiedConditionSchema = z.enum(VERIFIED_CONDITIONS);
 export const severitySchema = z.enum(['none', 'low', 'moderate', 'high']);
 export const languageSchema = z.enum(['en', 'hi', 'mr']);
-export const channelSchema = z.enum(['web', 'whatsapp']);
+export const channelSchema = z.enum(['web', 'whatsapp', 'telegram']);
 
 export type VerifiedCondition = z.infer<typeof verifiedConditionSchema>;
 export type Severity = z.infer<typeof severitySchema>;

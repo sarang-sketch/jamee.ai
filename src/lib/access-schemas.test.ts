@@ -5,6 +5,7 @@ import {
   bindOutcomeKindSchema,
   entitlementStatusSchema,
   linkTokenResponseSchema,
+  paymentConfirmRequestSchema,
   paymentOrderResponseSchema,
   profileAccessSchema,
 } from '@/lib/access-schemas';
@@ -55,6 +56,21 @@ describe('paymentOrderResponseSchema', () => {
   });
   it('rejects a non-positive amount', () => {
     expect(paymentOrderResponseSchema.safeParse({ orderId: 'o', keyId: 'k', amountMinor: 0, currency: 'INR' }).success).toBe(false);
+  });
+});
+
+describe('paymentConfirmRequestSchema', () => {
+  it('accepts a body carrying only the order id (D20, 22.7)', () => {
+    expect(paymentConfirmRequestSchema.safeParse({ orderId: 'ord_1' }).success).toBe(true);
+  });
+  it('rejects an empty or missing order id', () => {
+    expect(paymentConfirmRequestSchema.safeParse({ orderId: '' }).success).toBe(false);
+    expect(paymentConfirmRequestSchema.safeParse({}).success).toBe(false);
+  });
+  it('ignores extra fields — the browser cannot smuggle an amount or a user id through it', () => {
+    const parsed = paymentConfirmRequestSchema.safeParse({ orderId: 'ord_1', amount: 1, userId: 'x' });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data).toEqual({ orderId: 'ord_1' });
   });
 });
 

@@ -1,8 +1,10 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { Buffer } from 'node:buffer';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import type { CapabilityRunner } from '@/lib/ai/capabilities';
-import { DAILY_QUOTAS, STORAGE_BUCKETS } from '@/lib/config/verified';
+import { DAILY_QUOTAS } from '@/lib/config/verified';
+import type { MessageRecord } from '@/lib/db/reads';
 import { AppError, errorResponse, isAppError, toEnvelope } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
@@ -10,15 +12,14 @@ import {
   SUPPORTED_LANGUAGES,
   operationSchema,
   quotaStatusSchema,
+  type MediaRef,
   type Operation,
-  type StorageRef,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import { dayWindowKey } from '@/lib/time';
 import { failureReply } from '@/lib/whatsapp-dispatch';
-import { chatTurn, type ChatTurnDeps, type ChatWriteStore } from '@/services/chat.service';
-import type { Conversation } from '@/services/conversation.service';
+import { chatTurn, type ChatTurnDeps, type ChatWriteStore, type MessageInsert } from '@/services/chat.service';
+import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
 import {
   adminCounterRpc,
@@ -37,7 +38,7 @@ import {
   type CounterRpcResponse,
   type QuotaReservation,
 } from '@/services/quota.service';
-import type { Database, MessageRow, TablesInsert } from '@/types/database';
+import type { TablesInsert } from '@/types/database';
 
 /**
  * Unit tests for `src/services/quota.service.ts` with the RPC layer stubbed.
@@ -843,56 +844,21 @@ const unreachableModels: CapabilityRunner = {
   },
 };
 
-/** Every seam is injected, so a read of the request client means one was missed. */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
-
 /* -------------------------------------------------------------------------- */
-/* Storage                                                                     */
+/* Media reference (Amendment A3 — GridFS, no storage path, no signed URL)     */
 /* -------------------------------------------------------------------------- */
 
-const OTHER_USER = '22222222-2222-4222-8222-222222222222';
-const OBJECT_UUID = '33333333-3333-4333-8333-333333333333';
+const OBJECT_ID_HEX = '3333333333334333833300aa';
 const CONVERSATION = '44444444-4444-4444-8444-444444444444';
 
-function refFor(owner: string): StorageRef {
-  return {
-    bucket: STORAGE_BUCKETS.cropImages,
-    path: `${owner}/2026/09/${OBJECT_UUID}.jpg`,
-  };
-}
-
-interface StorageBehaviour {
-  /** `exists()`'s answer. `false` is an object that is not there. */
-  readonly present?: boolean;
-  /** When true, `createSignedUrl` fails — design step 9's first refundable case. */
-  readonly signingFails?: boolean;
-}
-
-function storageStub(behaviour: StorageBehaviour = {}): StorageClientLike {
-  return {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: behaviour.present ?? true, error: null }),
-        createSignedUrl: (path: string) =>
-          behaviour.signingFails === true
-            ? Promise.resolve({ data: null, error: { message: 'signing unavailable' } })
-            : Promise.resolve({
-                data: { signedUrl: `https://storage.test/${path}?token=synthetic` },
-                error: null,
-              }),
-      }),
-    },
-  };
-}
+/**
+ * The crop image to diagnose, as a Media_Reference (A3, D1 amended) — a `{ fileId, kind }` pair,
+ * not a `{ bucket, path }` storage reference. There is no owner segment: ownership is proven by the
+ * owner-scoped media read (`readMedia`) returning `null` for a stranger's or a missing file, not by
+ * parsing a prefix. So the "foreign" and "not there" cases below are the *same* `readMedia: null`,
+ * exactly as the store makes them indistinguishable (Requirement 2.6).
+ */
+const IMAGE_REF: MediaRef = { fileId: OBJECT_ID_HEX, kind: 'crop-image' };
 
 /* -------------------------------------------------------------------------- */
 /* The knowledge base                                                          */
@@ -931,10 +897,29 @@ interface Audit {
   readonly rows: TablesInsert<'usage_logs'>[];
 }
 
+/**
+ * The owner-checked media read seam (Amendment A3). Defaults to returning bytes — a file this
+ * farmer owns — so the pipeline advances to the reserve. `present: false` returns `null`, which is
+ * both "not this farmer's" and "not there" (Requirement 2.6): the service maps it to
+ * `STORAGE_REF_FORBIDDEN` before the reserve, so nothing is spent. There is no signed-URL step under
+ * A3 — the bytes are the input to the model — so the pre-A3 "signing failed" refundable exit no
+ * longer exists on this path.
+ */
+function readMediaStub(
+  options: { present?: boolean } = {},
+): (userId: string, ref: MediaRef) => Promise<{ bytes: Buffer; mimeType: string } | null> {
+  return () =>
+    Promise.resolve(
+      options.present === false
+        ? null
+        : { bytes: Buffer.from('synthetic-crop-image-bytes'), mimeType: 'image/jpeg' },
+    );
+}
+
 function diagnosisDeps(
   state: Ledger,
   audit: Audit,
-  options: { storage?: StorageClientLike; burst?: () => Promise<void> } = {},
+  options: { present?: boolean; burst?: () => Promise<void> } = {},
 ): DiagnosisDeps {
   const store: DiagnosisStore = {
     insertDiagnosis: () => {
@@ -956,14 +941,17 @@ function diagnosisDeps(
     updated_at: '2026-09-16T00:05:00.000Z',
   };
 
+  const conversations: ConversationStore = {
+    mostRecent: () => Promise.resolve(conversation),
+    create: () => Promise.resolve(conversation),
+  };
+
   return {
-    supabase: unreachableSupabase,
-    storage: options.storage ?? storageStub(),
+    // Amendment A3: no `supabase` client and no `storage` client — the service reads the image
+    // bytes through the owner-scoped Data_Access_Layer seam and sends them to the model inline.
+    readMedia: readMediaStub({ present: options.present ?? true }),
     store,
-    conversations: {
-      mostRecent: () => Promise.resolve(conversation),
-      create: () => Promise.resolve(conversation),
-    },
+    conversations,
     knowledge,
     models: unreachableModels,
     ...(options.burst === undefined ? {} : { burst: options.burst }),
@@ -987,12 +975,15 @@ function chatDeps(
       audit.rows.push(row);
       return Promise.resolve();
     },
+    // Amendment A3: the ownership check and the activity bump are owner-scoped by the layer, so
+    // both take `(conversationId, userId)`.
     ownsConversation: () => Promise.resolve(options.ownsConversation ?? true),
     touchConversation: () => Promise.resolve(true),
   };
 
   return {
-    supabase: unreachableSupabase,
+    // Amendment A3: no `supabase` client — the context read and the writes go through the
+    // owner-scoped Data_Access_Layer, scoped by the `userId` on the input.
     writes,
     store: {
       recentMessages: () => Promise.resolve([]),
@@ -1032,9 +1023,11 @@ interface ExitCase {
 
 const PRE_PROVIDER_EXITS: readonly ExitCase[] = [
   {
-    // Requirement 2.6, in as many words: 403 AND the counter untouched. `assertOwnership` is step 1
-    // and the reserve is step 3, so there is no reservation in existence to refund.
-    name: 'an image reference under another farmer’s prefix',
+    // Requirement 2.6, in as many words: 403 AND the counter untouched. The owner-scoped media read
+    // is step 1 and the reserve is step 3, so there is no reservation in existence to refund. Under
+    // A3 "not this farmer's file" is the owner-scoped read returning `null` — there is no path prefix
+    // to parse — which is indistinguishable from "not there" (the next case).
+    name: 'an image reference this farmer does not own',
     operation: 'image',
     mechanism: 'never_reserved',
     code: 'STORAGE_REF_FORBIDDEN',
@@ -1044,18 +1037,18 @@ const PRE_PROVIDER_EXITS: readonly ExitCase[] = [
       diagnose(
         {
           userId: USER,
-          storageRef: refFor(OTHER_USER),
+          image: IMAGE_REF,
           language: 'en',
           channel: 'web',
           conversationId: CONVERSATION,
         },
-        diagnosisDeps(state, audit),
+        diagnosisDeps(state, audit, { present: false }),
       ),
   },
   {
-    // Same code as a foreign prefix, deliberately: a client cannot tell "not yours" from "not there",
-    // so the response is not an oracle for which objects exist. What matters for the spend rule is
-    // that both land at step 1, so neither reaches the counter.
+    // Same code as an unowned reference, deliberately: a client cannot tell "not yours" from "not
+    // there", so the response is not an oracle for which objects exist. What matters for the spend
+    // rule is that both are the same `readMedia: null` at step 1, so neither reaches the counter.
     name: 'an image object that is not there',
     operation: 'image',
     mechanism: 'never_reserved',
@@ -1066,18 +1059,19 @@ const PRE_PROVIDER_EXITS: readonly ExitCase[] = [
       diagnose(
         {
           userId: USER,
-          storageRef: refFor(USER),
+          image: IMAGE_REF,
           language: 'en',
           channel: 'web',
           conversationId: CONVERSATION,
         },
-        diagnosisDeps(state, audit, { storage: storageStub({ present: false }) }),
+        diagnosisDeps(state, audit, { present: false }),
       ),
   },
   {
     // Requirement 13.8's refusal, which the design's Property 28 places BEFORE the reserve. The row
     // is written by the service rather than by `checkBurst()`, because this is where the request's
-    // channel and start instant are known.
+    // channel and start instant are known. The image bytes are readable (the farmer owns the file),
+    // so the burst check is the exit — not the media read.
     name: 'a burst refusal on the image path',
     operation: 'image',
     mechanism: 'never_reserved',
@@ -1087,7 +1081,7 @@ const PRE_PROVIDER_EXITS: readonly ExitCase[] = [
       diagnose(
         {
           userId: USER,
-          storageRef: refFor(USER),
+          image: IMAGE_REF,
           language: 'en',
           channel: 'web',
           conversationId: CONVERSATION,
@@ -1130,7 +1124,7 @@ const PRE_PROVIDER_EXITS: readonly ExitCase[] = [
       return diagnose(
         {
           userId: USER,
-          storageRef: refFor(USER),
+          image: IMAGE_REF,
           language: 'en',
           channel: 'web',
           conversationId: CONVERSATION,
@@ -1162,26 +1156,13 @@ const PRE_PROVIDER_EXITS: readonly ExitCase[] = [
     },
   },
   {
-    // Design step 9's first refundable case: the last step before the classification call.
-    name: 'a signed-URL issuance failure on the image path',
-    operation: 'image',
-    mechanism: 'reserve_then_refund',
-    code: 'INTERNAL_ERROR',
-    outcome: 'provider_error',
-    run: (state, audit) =>
-      diagnose(
-        {
-          userId: USER,
-          storageRef: refFor(USER),
-          language: 'en',
-          channel: 'web',
-          conversationId: CONVERSATION,
-        },
-        diagnosisDeps(state, audit, { storage: storageStub({ signingFails: true }) }),
-      ),
-  },
-  {
-    // Design step 9's third refundable case, on the path where the read really is pre-provider.
+    // The one post-reserve pre-provider refundable case that survives Amendment A3. On the image
+    // path A3 removed BOTH of the design's first two refundable steps — signed-URL issuance and an
+    // unreadable object — because ownership and the bytes are established at step 1 by the
+    // owner-scoped media read, BEFORE the reserve, so a failure there is `never_reserved` rather than
+    // `reserve_then_refund` (there is no signed URL to mint under A3). The chat path's pre-provider
+    // knowledge-base read is still after the reserve, so it remains the `reserve_then_refund`
+    // mechanism: reserved, then handed back.
     name: 'a knowledge-base read failure on the chat path',
     operation: 'chat',
     mechanism: 'reserve_then_refund',
@@ -1306,7 +1287,7 @@ describe('the at-limit decline, as a service produces it', () => {
     const error = await diagnose(
       {
         userId: USER,
-        storageRef: refFor(USER),
+        image: IMAGE_REF,
         language: 'en',
         channel: 'web',
         conversationId: CONVERSATION,
@@ -1395,20 +1376,30 @@ describe('an out-of-scope chat referral', () => {
   });
 });
 
-/** The `messages` row a store would have returned, for the referral's persistence seam. */
-function messageRowFor(row: TablesInsert<'messages'>, id: string): MessageRow {
+/**
+ * The `MessageRecord` (`WithId<MessageDoc>`) a Data_Access_Layer write would have returned, for the
+ * referral's persistence seam. Amendment A3: `insertTurn` takes string-shaped `ChatTurnInsert` rows
+ * and returns stored documents whose `_id` and `conversationId` are `ObjectId`s. `persistTurn` reads
+ * only `role` and `_id.toHexString()`, so the id fields are modelled as the hex-bearing objects the
+ * service calls `.toHexString()` on — the test does not import the driver (`check:data-access`).
+ */
+function messageRowFor(row: MessageInsert, id: string): MessageRecord {
+  const objectIdOf = (hex: string) => ({
+    toHexString: () => hex,
+    toString: () => hex,
+  });
   return {
-    id,
-    conversation_id: row.conversation_id,
-    user_id: row.user_id,
+    _id: objectIdOf(id),
+    ownerId: row.ownerId,
+    conversationId: objectIdOf(row.conversationId),
     role: row.role,
     content: row.content,
     language: row.language,
     channel: row.channel,
-    input_kind: row.input_kind ?? 'text',
-    transcript_of: row.transcript_of ?? null,
-    created_at: '2026-09-16T01:00:00.000Z',
-  };
+    inputKind: row.inputKind,
+    transcriptOf: null,
+    createdAt: new Date('2026-09-16T01:00:00.000Z'),
+  } as unknown as MessageRecord;
 }
 
 /* ========================================================================== */
@@ -1448,26 +1439,10 @@ describe('a knowledge-base miss on the diagnosis path', () => {
       // An unseeded deployment: the row for a condition the model named is absent.
       knowledge: () => Promise.resolve([]),
       store: {
-        insertDiagnosis: (row) =>
-          Promise.resolve({
-            id: '88888888-8888-4888-8888-888888888888',
-            user_id: row.user_id,
-            conversation_id: row.conversation_id,
-            status: row.status,
-            disease_name: row.disease_name ?? null,
-            knowledge_id: row.knowledge_id ?? null,
-            confidence: row.confidence ?? null,
-            severity: row.severity,
-            explanation: row.explanation,
-            language: row.language,
-            needs_expert: row.needs_expert ?? false,
-            channel: row.channel,
-            image_bucket: row.image_bucket,
-            image_path: row.image_path,
-            full_image_deleted_at: null,
-            model_provider: row.model_provider,
-            created_at: '2026-09-16T01:00:00.000Z',
-          }),
+        // Amendment A3: `insertDiagnosis` takes a `DiagnosisInsert` document and returns the stored
+        // diagnosis id as a hex string (the response and the audit need it), through the
+        // owner-scoped Data_Access_Layer — no Supabase row shape, no image_bucket/image_path.
+        insertDiagnosis: () => Promise.resolve('8888888888884888a8880011'),
         insertUsageLog: (row) => {
           audit.rows.push(row);
           return Promise.resolve();
@@ -1479,7 +1454,7 @@ describe('a knowledge-base miss on the diagnosis path', () => {
     const outcome = await diagnose(
       {
         userId: USER,
-        storageRef: refFor(USER),
+        image: IMAGE_REF,
         language: 'en',
         channel: 'web',
         conversationId: CONVERSATION,

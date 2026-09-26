@@ -1456,7 +1456,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - The bootstrap writes `_id` and `email`, passes no phone column, is a no-op on a second call, and classifies an RLS-free write failure and an absent email claim distinctly; the control starts Google sign-in once with the configured redirect and renders the did-not-complete message with a working retry
     - _Requirements: 1.1, 1.3, 1.4_
 
-- [ ] 56. Port every service off the Supabase client onto the Data_Access_Layer
+- [x] 56. Port every service off the Supabase client onto the Data_Access_Layer
   - [x] 56.1 Port the quota, conversation, and usage-log services
     - `quota.service.ts` onto the D19 `findOneAndUpdate` reserve / guarded decrement / read; `conversation.service.ts` `findOrCreateActive(userId, channel)` onto the owner-scoped accessors with `web` and `telegram` conversations as separate documents; usage-log writes through the layer with `channel` on every row
     - _Requirements: 7.5, 10.5, 10.8, 14.1, 14.2, 14.3, 14.6, 14.7_
@@ -1468,7 +1468,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 2.8, 3.2, 3.3, 7.1, 7.2, 8.4, 8.6, 8.9, 12.1, 12.2, 12.3, 12.5, 16.1, 16.3, 16.5_
     - _Design: D7, D14; depends on V29, V34_
 
-  - [ ] 56.3 Port the retention sweep onto GridFS `uploadDate`
+  - [x] 56.3 Port the retention sweep onto GridFS `uploadDate`
     - `retention.service.ts`: scan 1 document-driven over `diagnoses` where `fullImageDeletedAt is null and createdAt < now − window` (served by the partial index), deleting the `mediaRef.fileId` from GridFS after asserting `metadata.ownerId` matches, then stamping `fullImageDeletedAt`; scan 2 age-driven over the GridFS `files` collection filtered `metadata.kind in (crop-image, voice)` and `uploadDate < now − window`, keeping thumbnails, deleting under each file's own `metadata.ownerId`; both bounded by a batch limit inside the 60 s ceiling; idempotent by construction. The internal route keeps its constant-time `RETENTION_SWEEP_SECRET` gate (GET scheduled, POST manual), 401 on a missing/wrong/absent secret, and consults no session
     - Scan 2 is the backstop the retired V22 blocked and V29 unblocks via `uploadDate`; it ships behind `RETENTION_ORPHAN_SCAN_ENABLED` until V29 confirms the query (P8-1)
     - _Requirements: 8.9, 8.10, 18.1, 18.3, 18.4, 18.5, 18.6, 18.7, 18.8, 18.9, 18.10, 18.11, 18.12, 18.13_
@@ -1478,23 +1478,23 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - Diagnosis reads bytes from GridFS inline and persists the Media_Reference and channel; voice deletes its file only after a durable transcript and keeps it on `TRANSCRIPTION_FAILED`/`TRANSCRIPT_EMPTY`; the retention sweep deletes only owner-matched files and refuses a file whose owner metadata is missing (18.8); spend-rule cases (403→zero, inconclusive→one) hold on MongoDB
     - _Requirements: 2.6, 6.6, 6.7, 8.9, 8.10, 18.8_
 
-- [ ] 57. Build the Telegram library, the claim, the dispatch pipeline, and the webhook route on MongoDB
-  - [ ] 57.1 Port `src/lib/telegram.ts` and `src/lib/db/telegram-inbound.ts`
+- [x] 57. Build the Telegram library, the claim, the dispatch pipeline, and the webhook route on MongoDB
+  - [x] 57.1 Port `src/lib/telegram.ts` and `src/lib/db/telegram-inbound.ts`
     - Secret-token verification, update parsing, `getFile` + file-endpoint download (token in the URL, never logged), and `sendMessage` are the Phase 7 tasks 40/41 content carried onto MongoDB; the media upload writes to GridFS through the Data_Access_Layer with `metadata.ownerId = profiles._id` and `metadata.kind` set, replacing the service-role bucket upload; `voice` admitted, `audio`/`document` unsupported (V26); the `telegram_inbound` claim is `insertOne` with `_id = update_id`, the `11000` duplicate-key error being the duplicate signal (D19)
     - _Requirements: 10.4, 10.6, 10.9, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 13.6, 15.6_
     - _Design: D11, D12, D19; depends on V24, V25, V26, V29_
 
-  - [ ] 57.2 Port `src/lib/telegram-dispatch.ts` — the ordered inbound pipeline with the A2 gate
+  - [x] 57.2 Port `src/lib/telegram-dispatch.ts` — the ordered inbound pipeline with the A2 gate
     - The fixed order (secret-token verify → `update_id` claim → `/start` short-circuit → profile resolution → **unexpired-entitlement** check → unsupported-type reject → find-or-create telegram conversation → dispatch photo/text/voice through the shared services with `channel: 'telegram'` → reply → mark processed) with the unlinked and not-entitled steps kept separate. The gate now means "holds an entitlement whose expiry is in the future" (A2 decision 4), and the **bot recharge command is exempt** like `/start` (A2 decision 5). The conversation is keyed on the resolved `profiles._id`, never `telegram_user_id`
     - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.8, 10.9, 10.11, 16.1, 16.2, 16.5, 21.17, 21.18, 22.13, 22.14, 22.15, 22.16_
     - _Design: D7, D14; Telegram adapter — Inbound processing order; Amendment A2 decisions 4 and 5_
 
-  - [ ] 57.3 Create `src/app/api/telegram/route.ts` with the soft deadline and the per-caller throttle
+  - [x] 57.3 Create `src/app/api/telegram/route.ts` with the soft deadline and the per-caller throttle
     - POST only, `maxDuration = 60`, header comparison before the body is read; 401 the sole exception to acknowledge-with-200; the `webhook_throttle` per-caller bound (D16) applied on this route; inline processing then acknowledge, `markProcessed` after the reply is sent, one update per unit of work; on deadline expiry reply "taking longer", mark `failed`, return 200
     - _Requirements: 10.10, 10.11, 11.2, 11.3, 13.9_
     - _Design: D11, D12, D16, D19; depends on V18, V24_
 
-  - [ ]* 57.4 Write tests for the pipeline order and the unexpired gate
+  - [x]* 57.4 Write tests for the pipeline order and the unexpired gate
     - Secret-token verification (matching passes; absent header, wrong value, flipped byte, unconfigured secret all 401 body-unparsed, constant-time); a redelivered `update_id` reaches no download/reserve/service; a farmer whose window has lapsed gets the recharge/unlock reply for photo/text/voice with zero quota and no `messages`/`diagnoses` row, while `/start` and the recharge command are still served and web requests are unchanged
     - _Requirements: 11.2, 11.3, 11.4, 11.5, 11.6, 22.13, 22.14, 22.15, 22.16, 22.17_
 
@@ -1517,8 +1517,8 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - The already-linked reply and the replacement path (incl. the message to the replaced id); the token is never stored in plaintext, derives from no forbidden input, and an expired token is refused by the statement not a prior read; two concurrent `/start` deliveries of one token bind exactly once
     - _Requirements: 21.2, 21.7, 21.10, 21.11, 21.12_
 
-- [ ] 59. Implement the weekly recharge payment and the windowed Bot_Entitlement (Amendment A2 on MongoDB)
-  - [ ] 59.1 Create `src/lib/razorpay.ts`
+- [x] 59. Implement the weekly recharge payment and the windowed Bot_Entitlement (Amendment A2 on MongoDB)
+  - [x] 59.1 Create `src/lib/razorpay.ts`
     - Order creation against the resolved endpoint in **paise** taken from `BOT_UNLOCK_PRICE` (2000), returning only the checkout identifiers; `verifyWebhookSignature(rawBody, header, secret)` with the resolved header/algorithm/encoding and a constant-time comparison; no provider error text crosses into a farmer-facing message
     - _Requirements: 22.1, 22.5_
     - _Depends on: V27_
@@ -1538,7 +1538,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 22.7, 22.8, 22.9, 22.10, 22.11, 22.12, 22.13, 22.19, 22.20, 22.21_
     - _Design: D14, D15, D19; Amendment A2 decisions 3 and 4; depends on V33_
 
-  - [ ] 59.5 Create `src/components/BotUnlockCard.tsx` as the web recharge card, and the bot recharge command
+  - [x] 59.5 Create `src/components/BotUnlockCard.tsx` as the web recharge card, and the bot recharge command
     - Web card: price from `BOT_UNLOCK_PRICE`, checkout on `NEXT_PUBLIC_RAZORPAY_KEY_ID`, an optimistic "confirming your payment" state granting nothing; **show the current expiry** and offer a recharge action even while active (a further order is normal under A2); render the price from the real constant. Bot recharge command: exempt from the gate (A2 decision 5), replies with a payment link so a lapsed farmer can recover from inside Telegram
     - _Requirements: 22.4, 22.7, 22.18_
     - _Design: Amendment A2 decision 5_

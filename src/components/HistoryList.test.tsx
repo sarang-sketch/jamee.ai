@@ -74,6 +74,19 @@ describe('HistoryList', () => {
     expect(markup).toContain(messages('en').ui.channelWhatsapp);
   });
 
+  /**
+   * Requirement 12.1 as amended by A1: Telegram is the live messaging channel, so a
+   * Telegram-originated diagnosis appears in history on the same footing as a web one and says where
+   * it came from. The `Record<Channel, string>` map is exhaustive, so this also guards that the
+   * widened `channelSchema` has a rendered label rather than an `undefined` next to the photo.
+   */
+  it('labels a Telegram-originated entry with its channel', () => {
+    const markup = render([{ ...ENTRY, channel: 'telegram' }]);
+    expect(markup).toContain(messages('en').ui.channelTelegram);
+    // The web/whatsapp labels are not what a telegram entry shows.
+    expect(markup).not.toContain(messages('en').ui.channelWhatsapp);
+  });
+
   /** Requirement 12.1's "or inconclusive label" — localized, unlike the condition name. */
   it('renders the inconclusive label in place of a condition', () => {
     for (const language of SUPPORTED_LANGUAGES) {

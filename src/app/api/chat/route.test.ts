@@ -40,25 +40,16 @@ import { POST, maxDuration } from './route';
 
 const spies = vi.hoisted(() => ({
   currentUserId: vi.fn(),
-  createServerSupabase: vi.fn(),
   chatTurn: vi.fn(),
 }));
 
 /**
- * The identity resolver the route's wrapper was built over. Mocking the module rather than the
- * wrapper keeps the real guard under test — the route imports the real `authenticatedRoute`, and only
- * the answer to "who is signed in" is stubbed.
- */
-vi.mock('@/lib/supabase/server', () => ({
-  currentUserId: spies.currentUserId,
-  createServerSupabase: spies.createServerSupabase,
-}));
-
-/**
  * Amendment A3 rewire: `authenticatedRoute` resolves identity through `@/lib/auth/session`'s
- * `currentUserId` (Better Auth). The same spy backs both paths so the gate stays stubbed while the
- * real wrapper is under test; `createServerSupabase` above is still the route's RLS client source
- * until the route is ported (task 56).
+ * `currentUserId` (Better Auth), so that is the only seam stubbed here. Mocking the module rather
+ * than the wrapper keeps the real guard under test — the route imports the real `authenticatedRoute`,
+ * and only the answer to "who is signed in" is stubbed. The route builds NO Supabase client of its
+ * own under A3 (it reads and writes through the owner-scoped Data_Access_Layer), so there is no
+ * request-client factory to mock.
  */
 vi.mock('@/lib/auth/session', () => ({
   currentUserId: spies.currentUserId,
@@ -79,9 +70,6 @@ const USER = '11111111-1111-4111-8111-111111111111';
 const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
 const FARMER_MESSAGE_ID = '66666666-6666-4666-8666-666666666666';
 const ANSWER_MESSAGE_ID = '77777777-7777-4777-8777-777777777777';
-
-/** A sentinel, so "the RLS-scoped server client was passed through" is an identity assertion. */
-const SUPABASE = { tag: 'rls-scoped-server-client' };
 
 const QUOTA: QuotaStatus = {
   operation: 'chat',
@@ -126,7 +114,6 @@ async function envelopeOf(response: Response) {
 beforeEach(() => {
   vi.clearAllMocks();
   spies.currentUserId.mockResolvedValue(USER);
-  spies.createServerSupabase.mockResolvedValue(SUPABASE);
   spies.chatTurn.mockRejectedValue(
     new Error('tripwire: chatTurn was reached for a request that must not reach it'),
   );
@@ -137,7 +124,7 @@ beforeEach(() => {
 /* ========================================================================== */
 
 describe('POST /api/chat with no session', () => {
-  it('returns 401 and invokes no service, not even the Supabase client factory', async () => {
+  it('returns 401 and invokes no domain service', async () => {
     spies.currentUserId.mockResolvedValue(null);
 
     const response = await post(validBody());
@@ -146,9 +133,14 @@ describe('POST /api/chat with no session', () => {
     expect(response.status).toBe(401);
     expect(envelope.error.code).toBe('AUTH_REQUIRED');
 
-    /** The clause that matters: no domain service, and no request-scoped client either. */
+    /**
+     * The clause that matters: no domain service is invoked. **Amendment A3:** the route builds no
+     * request-scoped Supabase client at all — identity is resolved by the wrapper through Better
+     * Auth (`@/lib/auth/session`) and every read/write is the owner-scoped Data_Access_Layer — so
+     * "not even the request-scoped client" collapses into "`chatTurn` was never entered", which is
+     * Requirement 1.7's actual claim on this path.
+     */
     expect(spies.chatTurn).not.toHaveBeenCalled();
-    expect(spies.createServerSupabase).not.toHaveBeenCalled();
   });
 });
 
@@ -157,7 +149,7 @@ describe('POST /api/chat with no session', () => {
 /* ========================================================================== */
 
 describe('POST /api/chat with a valid body', () => {
-  it('calls the service once with the session user id, web channel, and the RLS-scoped client', async () => {
+  it('calls the service once with the session user id, web channel, and no Supabase client', async () => {
     spies.chatTurn.mockResolvedValue(RESULT);
 
     const response = await post(validBody());
@@ -174,11 +166,12 @@ describe('POST /api/chat with a valid body', () => {
      *    0003's `input_kind` are populated from the route rather than defaulted downstream.
      *  - `skipQuotaReserve` is ABSENT. Requirement 14.1's nesting rule only ever relaxes the reserve
      *    for a turn nested inside a voice request, and an extra key here would fail this assertion.
-     *  - `deps` is `{ supabase, burst }` and nothing else — no store, no admin client. The
-     *    `usage_logs` audit client is the service's own business (migration 0006 grants
-     *    `authenticated` no insert policy). `burst` is Requirement 13.8's limiter, which the API_Layer
-     *    binds because it is the API_Layer the requirement is written about; the *position* of the
-     *    check (before the reserve) stays the service's.
+     *  - `deps` is `{ burst }` and nothing else. **Amendment A3:** the route builds and passes no
+     *    Supabase client — `chatTurn` reads and writes through the owner-scoped Data_Access_Layer,
+     *    scoped by `userId` (D18), so there is no request-scoped RLS client to hand it, and no store
+     *    or admin client either. `burst` is Requirement 13.8's limiter, which the API_Layer binds
+     *    because it is the API_Layer the requirement is written about; the *position* of the check
+     *    (before the reserve) stays the service's.
      */
     const expectedInput: ChatInput = {
       userId: USER,
@@ -189,8 +182,7 @@ describe('POST /api/chat with a valid body', () => {
       inputKind: 'text',
     };
     const [, deps] = spies.chatTurn.mock.calls[0] ?? [];
-    expect(Object.keys(deps as ChatTurnDeps).sort()).toEqual(['burst', 'supabase']);
-    expect((deps as ChatTurnDeps).supabase).toBe(SUPABASE);
+    expect(Object.keys(deps as ChatTurnDeps).sort()).toEqual(['burst']);
     expect(typeof (deps as ChatTurnDeps).burst).toBe('function');
     expect(spies.chatTurn.mock.calls[0]?.[0]).toEqual(expectedInput);
   });

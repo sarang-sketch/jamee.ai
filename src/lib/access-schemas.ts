@@ -113,6 +113,20 @@ export const paymentOrderResponseSchema = z.object({
 });
 export type PaymentOrderResponse = z.infer<typeof paymentOrderResponseSchema>;
 
+/**
+ * What `POST /api/payment/confirm` takes — the provider order id and nothing else (D20).
+ *
+ * The confirm route exists because Razorpay cannot deliver a webhook to `localhost`: the browser's
+ * checkout success handler posts this so the SERVER can ask Razorpay whether the order settled. The
+ * browser's success report is never trusted as proof of payment (Requirement 22.7); the order id is
+ * only the handle the server-side check keys on, and the paying farmer is derived from the recorded
+ * order and the session, never from this body.
+ */
+export const paymentConfirmRequestSchema = z.object({
+  orderId: z.string().min(1),
+});
+export type PaymentConfirmRequest = z.infer<typeof paymentConfirmRequestSchema>;
+
 /* ========================================================================== */
 /* Entitlement — the farmer's current window                                   */
 /* ========================================================================== */

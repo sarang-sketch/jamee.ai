@@ -163,6 +163,48 @@ export function BotUnlockCard({ entitlement, language, onChanged }: BotUnlockCar
     if (alive.current) setConfirming(false);
   }, [onChanged]);
 
+  /**
+   * Ask the SERVER to confirm the order with Razorpay directly — the webhook-free path (D20, 22.7).
+   *
+   * Razorpay cannot deliver a webhook to `localhost`, so the checkout success handler cannot rely on
+   * a webhook having landed. It posts the order id to `/api/payment/confirm`, whose SERVER checks
+   * Razorpay's Orders API for a captured payment and grants through the same transaction the webhook
+   * uses. The browser's success report is never the proof — the order id only triggers the check.
+   *
+   * When the server reports an active window, the shown expiry is refreshed from the server's own
+   * answer and confirming stops. Otherwise (still pending, or the confirm request failed) the
+   * polling fallback keeps running against `/api/profile/access`, so a real webhook that does land —
+   * or a slightly-later capture — is still observed.
+   */
+  const confirmPayment = useCallback(
+    async (orderId: string): Promise<boolean> => {
+      try {
+        const response = await fetch('/api/payment/confirm', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orderId }),
+          cache: 'no-store',
+        });
+        if (!response.ok) return false;
+        const parsed = profileAccessSchema
+          .pick({ entitlement: true })
+          .safeParse(await response.json());
+        if (!parsed.success) return false;
+        if (parsed.data.entitlement.isActive) {
+          if (!alive.current) return true;
+          setWindow(parsed.data.entitlement);
+          setConfirming(false);
+          onChanged();
+          return true;
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    [onChanged],
+  );
+
   async function onRecharge(): Promise<void> {
     if (pending || confirming) return;
     setPending(true);
@@ -182,10 +224,14 @@ export function BotUnlockCard({ entitlement, language, onChanged }: BotUnlockCar
         order_id: order.orderId,
         amount: order.amountMinor,
         currency: order.currency,
-        // The success handler grants NOTHING — it starts polling for the webhook-written window.
+        // The success handler grants NOTHING — it triggers the server-side confirm (D20, 22.7) and
+        // keeps the polling fallback in case the confirm is still pending or a webhook lands later.
         handler: () => {
           setConfirming(true);
-          void pollForGrant();
+          void (async () => {
+            const confirmed = await confirmPayment(order.orderId);
+            if (!confirmed && alive.current) void pollForGrant();
+          })();
         },
         modal: {
           ondismiss: () => {

@@ -48,7 +48,7 @@ export type Json = string | number | boolean | null | { [key: string]: Json | un
  * of the DATABASE. The unit test in `tests/unit/database-types.test.ts` asserts the two agree.
  */
 type DbLanguage = 'en' | 'hi' | 'mr';
-type DbChannel = 'web' | 'whatsapp';
+type DbChannel = 'web' | 'whatsapp' | 'telegram';
 type DbSeverity = 'none' | 'low' | 'moderate' | 'high';
 type DbCrop = 'tomato' | 'potato';
 type DbOperation = 'image' | 'chat' | 'voice';

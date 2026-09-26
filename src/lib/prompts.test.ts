@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { WHATSAPP_TEXT_BODY_MAX_CHARS } from '@/lib/config/verified';
 import { hasTreatmentContent, type KnowledgeEntry } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
 import {
@@ -27,6 +26,7 @@ import {
   type Language,
   type VisionRaw,
 } from '@/lib/schemas';
+import { TELEGRAM_TEXT_MAX_CHARS } from '@/lib/telegram';
 
 /**
  * Unit tests for `src/lib/prompts.ts`.
@@ -825,8 +825,8 @@ describe('validateRephrased — check 1 failures fall back to the static templat
 /* -------------------------------------------------------------------------- */
 
 describe('REPHRASE_MAX_CHARS', () => {
-  it('leaves an accepted rephrase inside one WhatsApp message (V15)', () => {
-    expect(REPHRASE_MAX_CHARS).toBeLessThan(WHATSAPP_TEXT_BODY_MAX_CHARS);
+  it('leaves an accepted rephrase inside one messaging-channel message (V24)', () => {
+    expect(REPHRASE_MAX_CHARS).toBeLessThan(TELEGRAM_TEXT_MAX_CHARS);
   });
 
   it('is above the longest static template, so the fallback always fits under it', () => {

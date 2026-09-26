@@ -312,3 +312,128 @@ export function parsePaymentWebhook(rawBody: string, headers?: Headers): Payment
     },
   };
 }
+
+/* ========================================================================== */
+/* V27 — the order's payments, for a webhook-free confirmation (D20)           */
+/* ========================================================================== */
+
+/**
+ * **V27, D20.** `GET https://api.razorpay.com/v1/orders/<order id>/payments` with the same HTTP
+ * Basic auth (`key_id:key_secret`) `createOrder` uses, returning the payments made against ONE order.
+ *
+ * ### Why this exists at all
+ *
+ * Razorpay cannot deliver a webhook to `localhost`, so the webhook grant path (`processVerifiedWebhook`)
+ * never fires in local development and any environment behind a private address. The confirmation
+ * path in `payment.service.ts` uses this to ASK Razorpay directly, after the browser's checkout
+ * success handler reports a payment, whether the order actually settled — the browser's own success
+ * report is never trusted as proof (Requirement 22.7); it only triggers this server-side check.
+ *
+ * ### What is read, and what is deliberately not
+ *
+ * Each payment entity carries `id`, `amount` (paise, integer), `currency`, `status` (`created` →
+ * `authorized` → `captured`, or `refunded` / `failed`), `order_id`, and a `captured` boolean. With
+ * Razorpay's default auto-capture, a completed payment moves to `captured` on its own. The parser
+ * reads exactly those fields the confirmation branches on and ignores the rest of the (large,
+ * documentation-drift-prone) payment shape — the same narrowness `parsePaymentWebhook` applies.
+ *
+ * ### The key secret never leaves this module
+ *
+ * Auth is built here from `keyId`/`keySecret` (both defaulting to `serverEnv`, evaluated only when
+ * omitted, exactly like `createOrder`). The secret is never returned, never logged, and never
+ * placed in a thrown error; a non-2xx raises a `RazorpayOrderError` carrying no provider text, which
+ * the service maps like any other order failure.
+ */
+
+/** One payment made against an order, narrowed to the fields the confirmation branches on. */
+export interface OrderPayment {
+  readonly id: string;
+  readonly orderId: string;
+  readonly amountMinor: number;
+  readonly currency: string;
+  readonly status: 'created' | 'authorized' | 'captured' | 'refunded' | 'failed';
+  readonly captured: boolean;
+}
+
+/** `GET`, narrowed to the one shape this function issues — Basic auth, no body. */
+export type RazorpayGetFetch = (
+  input: string,
+  init: {
+    readonly method: string;
+    readonly headers: Readonly<Record<string, string>>;
+  },
+) => Promise<Response>;
+
+export interface FetchOrderPaymentsOptions {
+  /** Defaults to `RAZORPAY_KEY_ID`, evaluated only when omitted. */
+  readonly keyId?: string;
+  /** Defaults to `RAZORPAY_KEY_SECRET`, evaluated only when omitted. Never returned or logged. */
+  readonly keySecret?: string;
+  readonly fetchImpl?: RazorpayGetFetch;
+}
+
+/**
+ * The payments-collection envelope: `{ entity: 'collection', count, items: [...] }` (V27). Only the
+ * per-item fields Jamee branches on are required — a payment entity carries dozens of others.
+ */
+const orderPaymentsSchema = z.object({
+  items: z.array(
+    z.object({
+      id: z.string().min(1),
+      order_id: z.string().min(1),
+      amount: z.number().int(),
+      currency: z.string().min(1),
+      status: z.enum(['created', 'authorized', 'captured', 'refunded', 'failed']),
+      captured: z.boolean(),
+    }),
+  ),
+});
+
+/**
+ * **V27.** Fetch every payment made against `orderId`. A non-2xx or an unreadable/unexpected body
+ * raises a `RazorpayOrderError` (no provider text, no secret); a 2xx with an empty `items` array is
+ * a valid answer — the order simply has no payments yet — and returns `[]`.
+ */
+export async function fetchOrderPayments(
+  orderId: string,
+  options: FetchOrderPaymentsOptions = {},
+): Promise<OrderPayment[]> {
+  const keyId = options.keyId ?? serverEnv('RAZORPAY_KEY_ID');
+  const keySecret = options.keySecret ?? serverEnv('RAZORPAY_KEY_SECRET');
+  const fetchImpl: RazorpayGetFetch = options.fetchImpl ?? ((input, init) => fetch(input, init));
+
+  const authorization = `Basic ${Buffer.from(`${keyId}:${keySecret}`, 'utf8').toString('base64')}`;
+  const endpoint = `${RAZORPAY_ORDERS_ENDPOINT}/${encodeURIComponent(orderId)}/payments`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(endpoint, { method: 'GET', headers: { authorization } });
+  } catch (cause) {
+    throw new RazorpayOrderError('Razorpay order-payments fetch was unreachable', { cause });
+  }
+
+  if (!response.ok) {
+    throw new RazorpayOrderError('Razorpay rejected the order-payments request', { status: response.status });
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (cause) {
+    throw new RazorpayOrderError('Razorpay order-payments response was not readable JSON', { cause });
+  }
+
+  const parsed = orderPaymentsSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new RazorpayOrderError('Razorpay order-payments response did not match the V27 shape');
+  }
+
+  return parsed.data.items.map((item) => ({
+    id: item.id,
+    orderId: item.order_id,
+    amountMinor: item.amount,
+    currency: item.currency,
+    status: item.status,
+    captured: item.captured,
+  }));
+}

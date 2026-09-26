@@ -6,7 +6,6 @@ import {
   type FetchLike,
 } from '@/components/LanguageProvider';
 import { envelopeLanguage } from '@/lib/api/authenticated-route';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
 import { isAppError } from '@/lib/errors';
 import {
   SUPPORTED_LANGUAGES,
@@ -21,8 +20,8 @@ import {
  * the body of every diagnosis, chat and voice request.
  *
  * Requirements: 9.2 (the selected code is included in **every subsequent** diagnosis, chat and
- *               voice request), 2.2 / D1 (the diagnosis body is a storage reference, not media
- *               bytes)
+ *               voice request), 2.2 / D1 amended (the diagnosis body is a Media_Reference, not
+ *               media bytes — Amendment A3)
  *
  * `fetch` is supplied as a recorder rather than stubbed globally: the assertion that matters is
  * what is in the request body, and a recorder observes the real one the helper built. Nothing
@@ -34,17 +33,22 @@ import {
 /* Fixtures — real shapes, not placeholders                                    */
 /* -------------------------------------------------------------------------- */
 
-const OWNER = '3f8b6b1e-9c4a-4d2f-8b3e-6a1c2d3e4f50';
 const CONVERSATION = '7d1a4c2e-5b6f-4a8d-9c3e-2f1b0a9d8c7b';
 
+/**
+ * Media_References under Amendment A3 (D1 amended): a GridFS `{ fileId, kind }` pair, where
+ * `fileId` is a 24-character lowercase-hex ObjectId. The old `{ bucket, path }` storage reference
+ * retired with Supabase Storage — there is no path to fabricate here, only a hex id and a kind,
+ * and `diagnoseRequestSchema`/`voiceRequestSchema` refine which kind each endpoint accepts.
+ */
 const IMAGE_REF = {
-  bucket: STORAGE_BUCKETS.cropImages,
-  path: `${OWNER}/2025/03/9a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d.jpg`,
+  fileId: '9a2b3c4d5e6f4a1b8c2d3e4f',
+  kind: 'crop-image',
 } as const;
 
 const AUDIO_REF = {
-  bucket: STORAGE_BUCKETS.voiceMessages,
-  path: `${OWNER}/2025/03/1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9.webm`,
+  fileId: '1b2c3d4e5f60471882930a1b',
+  kind: 'voice',
 } as const;
 
 interface Recorded {
@@ -151,8 +155,8 @@ describe('jameeRequests', () => {
     }
   });
 
-  /** D1: the body is a reference. A request that carried bytes would breach Requirement 2.7. */
-  it('posts a storage reference and no media bytes', async () => {
+  /** D1 amended: the body is a Media_Reference. A request that carried bytes would breach Requirement 2.7. */
+  it('posts a media reference and no media bytes', async () => {
     const { calls, fetchImpl } = recorder();
     await jameeRequests('en', fetchImpl).diagnose({ image: IMAGE_REF });
 
@@ -184,11 +188,12 @@ describe('jameeRequests', () => {
 
     expect(() =>
       requests.diagnose({
-        // A thumbnail path: the second dot is refused by `storageRefSchema` on purpose, so a
-        // client cannot submit a derivative as the object to diagnose.
+        // A thumbnail Media_Reference: `diagnoseRequestSchema.image` refines `kind === 'crop-image'`,
+        // so a `thumbnail` ref is refused on purpose — a client cannot submit the Thumbnail_Derivative
+        // as the object to diagnose. (Under A3 there is no path to fabricate, only a hex id and a kind.)
         image: {
-          bucket: STORAGE_BUCKETS.cropImages,
-          path: `${OWNER}/2025/03/9a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d.thumb.jpg`,
+          fileId: '9a2b3c4d5e6f4a1b8c2d3e4f',
+          kind: 'thumbnail',
         },
       }),
     ).toThrow();

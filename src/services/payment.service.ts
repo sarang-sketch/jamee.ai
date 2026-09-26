@@ -1,11 +1,17 @@
 import 'server-only';
 
-import { nextExpiry } from '@/lib/config/access';
+import { nextExpiry, RECHARGE_PRICE_PAISE } from '@/lib/config/access';
 import { accessData, grantAndExtend, markPaymentOrderFailed } from '@/lib/db/access';
 import { withTransaction } from '@/lib/db/farmer';
 import { AppError } from '@/lib/errors';
-import { createOrder, RazorpayOrderError, type ParsedPaymentWebhook } from '@/lib/razorpay';
-import type { PaymentOrderResponse } from '@/lib/access-schemas';
+import {
+  createOrder,
+  fetchOrderPayments,
+  RazorpayOrderError,
+  type ParsedPaymentWebhook,
+} from '@/lib/razorpay';
+import type { EntitlementStatus, PaymentOrderResponse } from '@/lib/access-schemas';
+import { entitlementStatus } from '@/services/entitlement.service';
 
 /**
  * The payment service — the order half and the webhook grant half of the weekly recharge.
@@ -126,4 +132,107 @@ export async function processVerifiedWebhook(
     case 'order_not_found':
       return { kind: 'order_not_found' };
   }
+}
+
+/* ========================================================================== */
+/* The webhook-free confirmation half (22.7, D20)                              */
+/* ========================================================================== */
+
+/**
+ * What confirming an order did, for the route's log — the entitlement window is returned separately
+ * so the route answers the browser with the same shape `/api/profile/access` does.
+ *
+ *  - `granted`  — a captured payment for this order was found and the window was extended (or a
+ *    concurrent webhook had already extended it; a duplicate is a success from the caller's view).
+ *  - `failed`   — every payment against the order has failed; the order is marked failed.
+ *  - `pending`  — the order has payments that are not yet captured and not all failed, or no
+ *    payment at all yet; nothing changed and the browser should keep polling.
+ *  - `not_found` — the order is not this farmer's (or does not exist). The caller maps it to a 404.
+ */
+export type ConfirmResult =
+  | { readonly kind: 'granted' }
+  | { readonly kind: 'failed' }
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'not_found' };
+
+/**
+ * Confirm a recharge order WITHOUT a webhook (Requirement 22.7, D20).
+ *
+ * Razorpay cannot deliver a webhook to `localhost`, so this is the path that makes a recharge work
+ * in local development and behind any private address: the browser's checkout success handler calls
+ * the confirm route with the order id, and this asks Razorpay directly whether the order settled.
+ * **The browser's own success report is never trusted as proof** (22.7) — it only triggers this
+ * server-side check, and the grant still derives the paying farmer from the recorded order, not
+ * from anything the browser sent.
+ *
+ * The order is loaded through `accessData(ownerId)`, which merges the owner into the read, so
+ * another farmer's order id (and a non-existent one) both read as absent and return `not_found` —
+ * a farmer cannot confirm, fail, or grant against an order that is not their own.
+ *
+ * When a payment against the order is `captured`, has the matching `order_id`, and its amount equals
+ * `RECHARGE_PRICE_PAISE`, this grants through the SAME `grantAndExtend` transaction the webhook uses,
+ * keyed on the provider PAYMENT id — so a confirm and a webhook for one payment extend the window
+ * exactly once (Property 36). A duplicate (the webhook already granted, or a second confirm) is a
+ * success from the browser's point of view, so it maps to `granted` too. When every payment has
+ * `failed`, the order is marked failed (mirroring the `payment.failed` webhook). Anything else —
+ * an authorized-but-not-captured payment, a captured payment at the wrong amount, or no payment yet
+ * — is `pending`: nothing is changed and the card keeps polling.
+ */
+export async function confirmOrder(
+  ownerId: string,
+  providerOrderId: string,
+  now: Date = new Date(),
+): Promise<{ readonly result: ConfirmResult; readonly entitlement: EntitlementStatus }> {
+  // Owner-scoped read: another farmer's order (and a missing one) both read as absent (D15, 13.2).
+  const orders = await accessData(ownerId).findPaymentOrders({ providerOrderId });
+  const order = orders[0];
+  if (order === undefined) {
+    return { result: { kind: 'not_found' }, entitlement: await entitlementStatus(ownerId, now) };
+  }
+
+  let payments;
+  try {
+    payments = await fetchOrderPayments(providerOrderId);
+  } catch (error) {
+    if (error instanceof RazorpayOrderError) {
+      throw new AppError('PAYMENT_ORDER_FAILED', {
+        cause: error,
+        context: { reason: 'razorpay_order_payments_failed', ownerId, status: error.status },
+      });
+    }
+    throw error;
+  }
+
+  // A captured payment for THIS order at Jamee's exact price is the one that grants (22.7). The
+  // amount is checked server-side against the constant, never trusted from the browser or the order.
+  const captured = payments.find(
+    (payment) =>
+      payment.status === 'captured' &&
+      payment.orderId === providerOrderId &&
+      payment.amountMinor === RECHARGE_PRICE_PAISE,
+  );
+
+  if (captured !== undefined) {
+    const grant = await grantAndExtend(
+      captured.id,
+      providerOrderId,
+      (currentExpiry) => nextExpiry(now, currentExpiry),
+      withTransaction,
+      now,
+    );
+    // `granted` and `duplicate` are both a success for the browser: the window is (or already was)
+    // extended for this payment. `order_not_found` cannot happen — we loaded the order above — but
+    // is mapped to pending defensively rather than asserted.
+    const kind: ConfirmResult['kind'] = grant.kind === 'order_not_found' ? 'pending' : 'granted';
+    return { result: { kind }, entitlement: await entitlementStatus(ownerId, now) };
+  }
+
+  // No capture. If every payment failed, mark the order failed (mirrors the payment.failed webhook,
+  // 22.19). An order with no payments at all is still pending, not failed.
+  if (payments.length > 0 && payments.every((payment) => payment.status === 'failed')) {
+    await markPaymentOrderFailed(providerOrderId, now);
+    return { result: { kind: 'failed' }, entitlement: await entitlementStatus(ownerId, now) };
+  }
+
+  return { result: { kind: 'pending' }, entitlement: await entitlementStatus(ownerId, now) };
 }
