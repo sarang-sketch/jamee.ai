@@ -2283,6 +2283,312 @@
         "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
         "timestamp": 1789643070239
       }
+    ],
+    "36.1 Append V23–V27 to `docs/VERIFIED_VALUES.md` and mark V2 and V12–V15 retired in place": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316718478
+      },
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316750451
+      }
+    ],
+    "36.2 Update `docs/PROVIDER_CAPABILITIES.md` for the channel change": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316718592
+      }
+    ],
+    "37.1 Amend `src/lib/env.ts`, `src/lib/env.public.ts`, and `.env.example`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316718664
+      }
+    ],
+    "37.2 Create `src/lib/config/access.ts` for the two access constants": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316718770
+      }
+    ],
+    "37.3 Add the Amendment A1 farmer-facing copy to `src/lib/messages/{en,hi,mr}.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316718916
+      }
+    ],
+    "37.4 Amend the error taxonomy in `src/lib/errors.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316718991
+      }
+    ],
+    "38.1 Rewrite `0002_profiles.sql` for the Auth_User_Id identity": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719065
+      }
+    ],
+    "38.2 Correct the `channel` check constraints to `('web','telegram')`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719177
+      }
+    ],
+    "38.3 Rename `0008_whatsapp_inbound.sql` to `0008_telegram_inbound.sql` and re-key it on `update_id`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719271
+      }
+    ],
+    "38.4 Add `0012_link_tokens.sql` (the design's `0011`)": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719338
+      }
+    ],
+    "38.5 Add `0013_payment_orders_entitlements.sql` (the design's `0012`)": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719410
+      }
+    ],
+    "38.6 Add `0014_webhook_throttle.sql` (the design's `0013`)": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719479
+      }
+    ],
+    "38.7 Regenerate `src/types/database.ts` from the amended schema": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719548
+      }
+    ],
+    "39.1 Create `src/components/GoogleSignInButton.tsx` and update `src/app/page.tsx`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719617
+      }
+    ],
+    "39.2 Update `src/app/auth/callback/route.ts` for the OAuth code exchange": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719688
+      }
+    ],
+    "39.3 Rewrite `src/app/auth/callback/ensure-profile.ts` to copy the email and no phone": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719752
+      }
+    ],
+    "40.1 Add secret-token verification and update parsing": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719834
+      }
+    ],
+    "40.2 Add `getFile`, the file-endpoint download, and the service-role upload": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719910
+      }
+    ],
+    "40.3 Add `sendMessage`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316719979
+      }
+    ],
+    "41.1 Create `src/lib/db/telegram-inbound.ts` with insert-before-work idempotency": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720047
+      }
+    ],
+    "41.2 Create `src/lib/telegram-dispatch.ts` with the ordered inbound pipeline": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720116
+      }
+    ],
+    "41.3 Create `src/app/api/telegram/route.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720192
+      }
+    ],
+    "41.4 Add the soft deadline and the acknowledgement strategy": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720262
+      }
+    ],
+    "42.1 Create `src/services/linking.service.ts` and the mint path": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720329
+      }
+    ],
+    "42.2 Create `src/app/api/link/token/route.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720398
+      }
+    ],
+    "42.3 Implement `consumeAndBind` as one atomic operation": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720485
+      }
+    ],
+    "42.4 Create `src/components/TelegramLinkCard.tsx` and wire the profile screen": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720606
+      }
+    ],
+    "43.1 Create `src/lib/razorpay.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720681
+      }
+    ],
+    "43.2 Create `src/app/api/payment/order/route.ts` and the order half of `src/services/payment.service.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720751
+      }
+    ],
+    "43.3 Create `src/app/api/payment/webhook/route.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720820
+      }
+    ],
+    "43.4 Create `src/services/entitlement.service.ts` and the grant half of `src/services/payment.service.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720893
+      }
+    ],
+    "43.5 Create `src/components/BotUnlockCard.tsx`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316720961
+      }
+    ],
+    "44.1 Remove the ten WhatsApp-named files": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721026
+      }
+    ],
+    "44.2 Remove the phone-identity and OTP artifacts": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721097
+      }
+    ],
+    "47.1 Rewrite `docs/DEPLOYMENT.md` as the ten ordered steps": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721167
+      }
+    ],
+    "47.2 Regenerate `docs/API.md`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721245
+      }
+    ],
+    "47.3 Rewrite the manual matrix in `docs/TESTING_REPORT.md`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721314
+      }
+    ],
+    "47.4 Update `scripts/check-deployment.ts`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721381
+      }
+    ],
+    "47.5 Update the two CI guards and add the two structural checks Amendment A1 introduces": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721454
+      }
+    ],
+    "47.6 Update `about-project.md`": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721520
+      }
+    ],
+    "48. Final checkpoint — Amendment A1 release readiness": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721597
+      }
+    ],
+    "49.1 BLOCKED on requirements **O22-1** — name the Bot_Unlock_Price": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721666
+      }
+    ],
+    "49.2 BLOCKED on requirements **O22-3** — decide test mode or live mode for the pilot": [
+      {
+        "executionId": "346c7b95-e94d-4586-8392-120904577374",
+        "chatSessionId": "sess_d240d1bb-a990-4c07-b38d-1d9de893515b",
+        "timestamp": 1790316721735
+      }
     ]
   }
 }

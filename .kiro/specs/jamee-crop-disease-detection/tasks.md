@@ -1,4 +1,4 @@
-﻿# Implementation Plan: Jamee Crop Disease Detection
+# Implementation Plan: Jamee Crop Disease Detection
 
 ## Overview
 
@@ -806,7 +806,7 @@ Two items in this phase are **BLOCKED on a product-owner decision** and are reco
     - _Requirements: 10.6, 17.3_
     - _Design: Values to verify before coding_
 
-  - [ ] 36.2 Update `docs/PROVIDER_CAPABILITIES.md` for the channel change
+  - [x] 36.2 Update `docs/PROVIDER_CAPABILITIES.md` for the channel change
     - Replace the WhatsApp acknowledgement section with the Telegram one: D11's inline-then-acknowledge default stands unchanged in shape, and its one retired input — the 24-hour customer-service window — is replaced by Telegram's own retry cadence on a non-200 (V24)
     - Record that the `transcribe` chain no longer has a container hole: a Telegram `voice` note is OGG/Opus, which V10's accepted list includes, so the `audio/aac` and `audio/amr` gap closes with the channel that opened it
     - Leave the capability→provider chains, the V9 vision-fallback flag, and the free-tier arithmetic as they are — no provider changed

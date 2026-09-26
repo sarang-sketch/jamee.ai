@@ -14,7 +14,7 @@ What this file decides, for the tasks that consume it:
 | Capability → provider chain, with the vision fallback behind one config value | tasks 8.1, 8.2, 8.3 |
 | Error signal → `RATE_LIMIT` / `UNAVAILABLE` / `OTHER` | tasks 8.1, 8.2, 8.3 |
 | `maxDuration` export and the per-request soft budget | tasks 2.2, 8.1, 11.3, 22.3 |
-| WhatsApp acknowledgement strategy | task 22.3 |
+| Telegram acknowledgement strategy | task 40 (was 22.3, retired with the WhatsApp channel) |
 | Free-tier headroom and the retention constraint it implies | tasks 28.1, 28.2 (Requirement 17.7) |
 
 ---
@@ -117,6 +117,23 @@ via `used_fallback` and `rejection_reason` (D10). Worth remembering when reading
 and chat continue on Gemini, and a Gemini outage takes text offline while voice transcription still
 works but cannot produce an answer. Neither is a defect; both are stated here so the deployment doc's
 failure-mode section does not have to rediscover them.
+
+**No container hole on `transcribe` — the one the old channel opened closes with it (V26, V10).** An
+inbound voice note now arrives on Telegram, and a Telegram `voice` message is **always OGG/Opus**:
+`message.voice` is a `Voice` object whose `mime_type` is `audio/ogg` (V26). `ogg` is a member of
+V10's accepted container list (`flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm`), so every voice
+note this chain is handed is transcribable. The `audio/aac` and `audio/amr` gap that made
+Requirement 10.6 unsatisfiable was a property of the *previous* channel's inbound audio set — those
+two containers are absent from V10's list and this release adds no transcode step — so the gap
+**closes with the channel that opened it**, not by widening V10's list. The conclusion Amendment A1
+predicted (10.6 satisfiable) holds for a reason worth stating precisely: Telegram *fixes* the
+container to OGG/Opus, it is not that a second transcription provider or a transcode step was added.
+The adapter still checks the reported `mime_type` against V10's list before downloading — a
+documented guarantee is one comparison away from a verified runtime fact, and whether
+`voice.mime_type` is present on every client is UNRESOLVED (U-V26). A file arriving as `audio` or
+`document` rather than `voice` is a different, arbitrary-container case (V26) and is out of this
+chain's scope; it is handled as an unsupported inbound type by the adapter, not by the transcription
+chain.
 
 ---
 
@@ -340,7 +357,16 @@ Node.js runtime — which is also what `waitUntil()` and `getDeadline()` require
 
 ---
 
-## 4. WhatsApp acknowledgement strategy
+## 4. Telegram acknowledgement strategy
+
+> Amended by Amendment A1 (2026-09-23): this section was *WhatsApp acknowledgement strategy*. The
+> channel is now Telegram, so V13 and V15 are retired and V24 supplies their replacement. **D11's
+> decision is unchanged in shape** — the `update_id` is claimed before anything billable, the reply
+> is sent, `markProcessed` runs after the reply, the unit of work is one update, and processing is
+> inline followed by acknowledgement. The reasoning below is re-argued on Telegram's facts, and one
+> input to the old argument disappears entirely: Telegram has **no 24-hour customer-service window
+> and no template requirement**, so a late or deferred reply is a latency problem and not an
+> undeliverable message. Its replacement input is Telegram's own retry cadence on a non-200 (V24).
 
 ### What V18 resolved
 
@@ -352,25 +378,28 @@ referenced for the same purpose.
 This is the branch D11 was written to hedge against. D11's first stated reason for processing inline
 was that a serverless function "cannot be relied on to keep working after the response is sent unless
 a supported continuation primitive exists — VERIFY (V18)". V18 came back YES, so that reason no longer
-holds and the decision genuinely has to be re-argued rather than inherited.
+holds and the decision genuinely has to be re-argued rather than inherited. V18 is unchanged by the
+channel switch — the primitive and its caveat are platform facts, not WhatsApp facts.
 
 ### Recommendation: keep D11 — process inline, then acknowledge
 
 Re-argued on the resolved facts, inline processing still wins for this release. Four reasons, in
 order of weight.
 
-**1. The problem a fast 200 solves is already solved somewhere better.** Meta retries non-200
-deliveries immediately and then with decreasing frequency **over 36 hours**, dropping unacknowledged
-events after that (V13). That is the pressure for acknowledging fast. But migration `0008` makes
-`provider_message_id` the **primary key** of `whatsapp_inbound`, so the unique violation *is* the
-duplicate signal and a redelivery is dropped before any service call or reply. The cost of a slow 200
-is therefore a wasted redelivery, not duplicated work or a duplicated reply. Correctness does not
-depend on acknowledgement latency — which is exactly what D11 claimed, and V13 confirms the retry
-behaviour it was reasoning about.
+**1. The problem a fast 200 solves is already solved somewhere better.** Telegram **redelivers the
+same `update_id`** on any non-2xx response or timeout, with increasing back-off, until a 2xx is
+returned or the update ages out (V24). That is the pressure for acknowledging fast. But migration
+`0008_telegram_inbound` makes `update_id` the **primary key** of `telegram_inbound`, so the unique
+violation *is* the duplicate signal and a redelivery is dropped before any service call or reply. The
+cost of a slow 200 is therefore a wasted redelivery, not duplicated work or a duplicated reply.
+Correctness does not depend on acknowledgement latency — which is exactly what D11 claimed, and V24
+confirms the retry behaviour it now reasons about. (The precise age-out bound is UNRESOLVED —
+U-V24 — but the acknowledgement decision does not depend on it: the `update_id` claim makes any
+number of redeliveries harmless.)
 
 **2. The work fits.** One `vision-classify` call, one `text-generate` call, and a couple of Supabase
 round trips. Section 3 allocates that at 39.5 s planned inside a 45 s budget under a 60 s ceiling,
-for a single message. There is no capacity argument for deferring.
+for a single update. There is no capacity argument for deferring.
 
 **3. `waitUntil` converts a visible failure into a silent one.** V18 records the caveat directly: with
 request cancellation enabled, **any work not wrapped in `waitUntil` or `after` is lost, and a
@@ -379,12 +408,13 @@ when processing fails late:
 
 - *Inline (D11):* the soft deadline fires inside the invocation. The farmer gets an explicit "taking
   longer than usual, please send it again in a moment". The row is marked **`failed`**, not
-  `processed` — D11 is deliberate about this, and it keeps the audit honest. The farmer's next send is
-  a new `provider_message_id`, so it processes normally.
+  `processed` — D11 is deliberate about this, and it keeps the audit honest. A non-2xx (or the
+  failed row's own retry) means Telegram redelivers the same `update_id`; the farmer's next fresh
+  send carries a new `update_id`, so either way it processes normally.
 - *Deferred (`waitUntil`):* the 200 is already sent. If the context is reclaimed, the farmer receives
-  nothing — no answer, no error, no explanation — and Meta will not redeliver, because Jamee already
-  acknowledged. The `whatsapp_inbound` row is stranded mid-flight with no code path left running to
-  mark it. The failure exists only as an absence.
+  nothing — no answer, no error, no explanation — and Telegram will not redeliver, because Jamee
+  already returned 2xx. The `telegram_inbound` row is stranded mid-flight with no code path left
+  running to mark it. The failure exists only as an absence.
 
 Jamee's farmer-facing contract is honest interface states (Requirement 15, D5's static messages). A
 mode whose failure signature is silence is the wrong trade for a plan whose worst case is a slower
@@ -412,10 +442,10 @@ already take `channel` as a parameter and are already idempotency-guarded. Concr
 
 | Aspect | Inline (recommended) | Deferred via `waitUntil` |
 | --- | --- | --- |
-| 200 sent | after processing, or after the soft-deadline branch | immediately after the `whatsapp_inbound` insert |
+| 200 sent | after processing, or after the soft-deadline branch | immediately after the `telegram_inbound` insert |
 | Soft deadline | still required, drives the "taking longer" reply | still required, now *inside* the continuation, and its reply is the only remaining signal |
 | Late-failure signal to the farmer | explicit message | none unless the continuation itself sends one |
-| Late-failure signal to operators | HTTP response + `usage_logs` + row status | `usage_logs` and the `whatsapp_inbound` status transition **only** — the response is long gone |
+| Late-failure signal to operators | HTTP response + `usage_logs` + row status | `usage_logs` and the `telegram_inbound` status transition **only** — the response is long gone |
 | New requirement introduced | none | a stranded-row check: rows left `received` past a threshold need a sweep, or late failures accumulate unnoticed |
 | Failure mode | slow reply | silent non-reply |
 
@@ -423,35 +453,33 @@ So the trigger for reversing is not "`waitUntil` exists" — it does. It is eith
 that inline processing overruns the budget in practice, or an operator-visible backlog surface that
 makes a silent continuation failure loud. Neither exists yet.
 
-### One gap in D11's reasoning, carried forward to task 22.3
+### The batching hazard the old channel carried does not arise here
 
-D11 argues from "the observed work is one classification call plus one rephrase call plus two Supabase
-round trips ... for a single message". **V13 records that Meta may batch up to 1000 updates in one
-delivery.** A batched delivery of N inbound messages multiplies the inline work by N inside one
-invocation, and D11's arithmetic does not cover that.
+Under the retired WhatsApp channel this subsection recorded a real hazard: Meta could batch up to
+1000 updates in one delivery (V13), and a handler that inserted idempotency rows for all N entries
+and then ran out of budget mid-batch would silently discard the unprocessed tail, because the
+acknowledged batch is never redelivered. **Telegram removes that hazard by construction:** it
+delivers **one `Update` per webhook POST** and redelivers *that* `update_id` on a non-2xx (V24), so
+the unit of work is one update, exactly as D11 states. There is no batch to partially process and no
+tail to strand.
 
-This is a real hazard because of how the idempotency guard interacts with it: once the
-`whatsapp_inbound` row is inserted, a redelivery of that message is dropped. So a handler that inserts
-rows for all N entries and then runs out of budget on entry 3 has **silently discarded entries 4..N** —
-Meta will not redeliver them, because they were acknowledged, and the guard will drop them if it
-does. The `status` column added in migration `0008` is what prevents this, and it has to be used
-deliberately:
+The `status` column of `telegram_inbound` still earns its place, for the single-update in-flight
+failure rather than for batching:
 
-- Insert each entry's row as **`received`**, and transition it to `processed` only after its work
-  completes — never at insert time.
-- Process entries while the shared deadline allows, checking remaining budget before each one.
-- Entries still `received` when the budget runs out are a **recoverable backlog**, not a silent drop:
-  the row exists, its state is honest, and it is visible to an operator.
-- The farmer-facing behaviour for an unprocessed entry is D11's existing soft-deadline message.
+- Insert the row as **`received`**, and transition it to `processed` only after the reply is sent —
+  never at insert time. This is D11's `markProcessed`-after-reply ordering.
+- A row left `received` (the invocation died after the claim and before completion) is an **honest,
+  recoverable state**, not a silent drop: the row exists and is visible to an operator, and Telegram
+  will redeliver the same `update_id` until a 2xx lands.
+- The farmer-facing behaviour when the soft deadline fires before completion is D11's existing
+  "taking longer than usual" message, after which the row is marked `failed`.
 
-Task 22.3 should implement the received-then-processed transition regardless of which acknowledgement
-strategy is chosen, because the hazard is a property of batching plus idempotency and is present in
-both. Note that a delivery containing 1000 updates for a 6-farmer pilot is implausible; the reason to
-handle it is that the failure is silent, not that it is likely.
+Because there is no batch, "process entries while the deadline allows" collapses to the single
+budget check Section 3 already describes for one request; no per-entry loop is needed on this channel.
 
 ### Deadline source on this path
 
-Use `getDeadline()` (V18) for the WhatsApp soft deadline too, with the section 3 constant as the
+Use `getDeadline()` (V18) for the Telegram soft deadline too, with the section 3 constant as the
 fallback when it is unavailable. Same constant, same arithmetic as the gateway — D11 specifies "a
 fraction of the configured ceiling, same constant as the gateway budget", and there is no reason for
 the two to drift.
