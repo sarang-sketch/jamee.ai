@@ -18,7 +18,7 @@
     "check:secret-scope": "node --experimental-strip-types scripts/check-secret-scope.ts",
     "check:shared-implementation": "node --experimental-strip-types scripts/check-shared-implementation.ts",
     "check:data-access": "node --experimental-strip-types scripts/check-data-access.ts",
-    "db:setup": "node --experimental-strip-types scripts/db-setup.ts"
+    "db:setup": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/db-setup.ts"
   },
   "dependencies": {
     "@better-auth/mongo-adapter": "1.7.6",
