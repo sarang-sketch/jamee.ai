@@ -833,7 +833,7 @@ async function auditSoftDeadline(
   const operation = operationForContent(message.content);
   if (operation === null) return;
 
-  const writer = deps.usage ?? usageLogWriterFrom(supabase());
+  const writer = deps.usage ?? usageLogWriterFrom();
 
   await writeUsageLog(writer, {
     userId: profile.userId,

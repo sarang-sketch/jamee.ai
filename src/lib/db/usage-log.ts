@@ -1,7 +1,9 @@
 import 'server-only';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { ObjectId } from 'mongodb';
 
+import type { UsageLogDoc } from '@/lib/db/collections';
+import { farmerData } from '@/lib/db/farmer';
 import { PROMPT_VERSION } from '@/lib/prompts';
 import type {
   Channel,
@@ -9,7 +11,7 @@ import type {
   UsageOutcome,
   UsageRejectionReason,
 } from '@/lib/schemas';
-import type { Database, TablesInsert } from '@/types/database';
+import type { TablesInsert } from '@/types/database';
 
 /**
  * The one audit vocabulary. Every `usage_logs` row in Jamee is shaped here.
@@ -325,29 +327,60 @@ export async function writeUsageLog(
 }
 
 /**
- * Bind the write to a Supabase client.
+ * The Data_Access_Layer-backed audit writer.
  *
- * **The client must be the service role.** Migration 0006 grants `authenticated` a select policy and
- * nothing else — that absence *is* "append-only" — so the row is unwritable with a farmer session.
- * Granting insert would let a client fabricate audit rows, including a `quota_spent = false` row for
- * a call that really spent one, which would corrupt the exact claim this table exists to make
- * checkable.
+ * *Amended by Amendment A3:* this was `usageLogWriterFrom(client: SupabaseClient)`, an
+ * `INSERT` on the service-role client whose absence-of-a-write-policy on `usage_logs` was the
+ * "append-only" enforcement (migration 0006). Under A3 there is no RLS and no service-role client:
+ * `usage_logs` is reachable only through the owner-scoped `FarmerData.insertUsageLog` (D18), which
+ * merges the owning Auth_User_Id from the bound id and stamps `createdAt`. So this takes no client
+ * — the layer is the boundary — and it maps the wire-shaped `usageLogRow()` output to the layer's
+ * `UsageLogDoc`, resolving `farmerData(row.user_id)` from the row's own non-null `user_id` anchor.
  *
- * `scripts/check-secret-scope.ts` cannot see the tenant anchor here, because `row` is a parameter
- * rather than a literal. The anchor is nonetheless required: `TablesInsert<'usage_logs'>` types
- * `user_id` as a non-nullable `string`, so the typecheck proves every row carries one. The site is
- * listed in that script's `OPAQUE_PAYLOAD_ALLOWANCES` with that reason.
+ * "Append-only" still holds, now more strongly: a farmer session has no path to a `usage_logs`
+ * write at all, because the only writer is this owner-scoped accessor and nothing hands a farmer
+ * session the driver. The `user_id` anchor stays required — `TablesInsert<'usage_logs'>` types it
+ * as a non-nullable `string`, so the typecheck proves every row carries one, and it is what
+ * `farmerData` is bound to.
+ *
+ * A `conversation_id` / `diagnosis_id` on the wire row is a document id as a hex string; it is
+ * converted to an `ObjectId` for the document, and left `null` when absent or unparseable rather
+ * than crashing an audit write that never fails a farmer's request (see `writeUsageLog`).
  */
-export function usageLogWriterFrom(client: SupabaseClient<Database>): UsageLogWriter {
+export function usageLogWriterFrom(): UsageLogWriter {
   return {
     async insertUsageLog(row) {
-      const { error } = await client.from('usage_logs').insert(row);
-      // Thrown rather than returned, because `writeUsageLog` above is the layer that decides an
-      // audit failure never fails a farmer's request. A seam that swallowed it here would take that
-      // decision away from the one place that documents it.
-      if (error !== null) {
-        throw new Error(`usage_logs insert failed: ${error.message}`, { cause: error });
-      }
+      await farmerData(row.user_id).insertUsageLog(usageLogDocFrom(row));
     },
+  };
+}
+
+/** A hex string to an `ObjectId`, or `null` when absent or not a valid id. Never throws. */
+function toObjectId(value: string | null | undefined): ObjectId | null {
+  if (value == null) return null;
+  return ObjectId.isValid(value) ? new ObjectId(value) : null;
+}
+
+/**
+ * Map the wire-shaped audit row `usageLogRow()` builds to the Data_Access_Layer's `UsageLogDoc`
+ * (minus the fields the accessor stamps). One place the snake_case → camelCase translation lives,
+ * so `usageLogRow()` can stay the single builder every call site already uses while the actual
+ * write goes through the layer.
+ */
+function usageLogDocFrom(
+  row: TablesInsert<'usage_logs'>,
+): Omit<UsageLogDoc, '_id' | 'ownerId' | 'createdAt'> {
+  return {
+    operation: row.operation,
+    channel: row.channel,
+    modelProvider: row.model_provider ?? null,
+    outcome: row.outcome,
+    usedFallback: row.used_fallback ?? false,
+    rejectionReason: row.rejection_reason ?? null,
+    quotaSpent: row.quota_spent ?? false,
+    latencyMs: row.latency_ms ?? null,
+    promptVersion: row.prompt_version ?? null,
+    conversationId: toObjectId(row.conversation_id),
+    diagnosisId: toObjectId(row.diagnosis_id),
   };
 }

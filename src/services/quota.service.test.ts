@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { CapabilityRunner } from '@/lib/ai/capabilities';
 import { DAILY_QUOTAS, STORAGE_BUCKETS } from '@/lib/config/verified';
@@ -412,9 +412,37 @@ describe('status', () => {
 });
 
 /* ========================================================================== */
-/* The admin adapter — where a transport failure stops looking like at-limit    */
+/* The admin adapter — DAL-backed, and the classifier that keeps a transport    */
+/* failure from looking like at-limit                                           */
 /* ========================================================================== */
 
+/**
+ * Under Amendment A3 `adminCounterRpc()` forwards to the Data_Access_Layer's owner-scoped counter
+ * helpers (`farmerData(userId).counterTryIncrement / counterDecrement / counterUsed`). The layer is
+ * mocked here so this file stays a unit test: it opens no connection and reads no `MONGODB_URI`.
+ *
+ * The mock is hoisted (a real `vi.mock` factory runs before the module graph loads), so the shared
+ * spies come from `vi.hoisted`. Only `adminCounterRpc()` with NO argument reaches `farmerData`;
+ * every other test in this file injects its own `CounterRpc` and never touches the layer, so the
+ * mock is inert for them.
+ */
+const dalMock = vi.hoisted(() => ({
+  counterTryIncrement: vi.fn<(...args: unknown[]) => Promise<number | null>>(),
+  counterDecrement: vi.fn<(...args: unknown[]) => Promise<number | null>>(),
+  counterUsed: vi.fn<(...args: unknown[]) => Promise<number>>(),
+}));
+
+vi.mock('@/lib/db/farmer', () => ({
+  farmerData: (ownerId: string) => ({
+    ownerId,
+    counterTryIncrement: dalMock.counterTryIncrement,
+    counterDecrement: dalMock.counterDecrement,
+    counterUsed: dalMock.counterUsed,
+  }),
+  pruneMinuteCounters: vi.fn(async () => 0),
+}));
+
+/** A legacy PostgREST-shaped client, the compatibility seam a restatement-pending test still uses. */
 interface FakeCall {
   readonly fn: string;
   readonly args: unknown;
@@ -432,29 +460,54 @@ function fakeSupabase(
   };
 }
 
-describe('adminCounterRpc', () => {
-  it('calls the 0007 function with its documented p_ argument names', async () => {
-    const calls: FakeCall[] = [];
-    const rpc = adminCounterRpc(fakeSupabase({ data: 5, error: null }, calls));
+describe('adminCounterRpc — the Data_Access_Layer path (A3)', () => {
+  it('forwards a reserve to the owner-scoped counter helper with the day key and limit', async () => {
+    dalMock.counterTryIncrement.mockReset().mockResolvedValue(5);
+    const rpc = adminCounterRpc();
 
     await reserve(USER, 'chat', { rpc, now: EARLY_IST });
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual({
-      fn: 'counter_try_increment',
-      args: {
-        p_user: USER,
-        p_operation: 'chat',
-        p_window_kind: 'day',
-        p_window_key: '2026-09-16',
-        p_limit: 50,
-      },
-    });
+    // The owner is bound by `farmerData(USER)`; the accessor is called with operation, window kind,
+    // the Asia/Kolkata day key, and the limit — no channel component (Requirement 14.2).
+    expect(dalMock.counterTryIncrement).toHaveBeenCalledTimes(1);
+    expect(dalMock.counterTryIncrement).toHaveBeenCalledWith('chat', 'day', '2026-09-16', 50);
   });
 
-  it('does not read a failed call as at-limit', async () => {
-    // A PostgREST failure also arrives with `data: null`. Treating it as the at-limit signal would
-    // decline a farmer nowhere near their limit, quoting a limit they have not reached.
+  it('reads the layer\'s null as at-limit rather than as an error', async () => {
+    // The layer returns `null` when the conditional upsert matched nothing at the boundary (or the
+    // duplicate-key race was caught inside it) — the one signal `reserve` reads as declined.
+    dalMock.counterTryIncrement.mockReset().mockResolvedValue(null);
+    const rpc = adminCounterRpc();
+
+    const outcome = await reserve(USER, 'image', { rpc, now: EARLY_IST });
+    expect(outcome.outcome).toBe('at_limit');
+  });
+
+  it('lets a real database failure propagate rather than reading it as at-limit', async () => {
+    // Any OTHER failure throws out of the layer, so it can never arrive looking like the null the
+    // at-limit branch reads — a farmer nowhere near their limit is not declined.
+    dalMock.counterTryIncrement.mockReset().mockRejectedValue(new Error('replica set unreachable'));
+    const rpc = adminCounterRpc();
+
+    await expect(reserve(USER, 'image', { rpc, now: EARLY_IST })).rejects.toThrow(
+      'replica set unreachable',
+    );
+  });
+
+  it('reads an absent counter row as zero', async () => {
+    dalMock.counterUsed.mockReset().mockResolvedValue(0);
+    const rpc = adminCounterRpc();
+
+    expect(await status(USER, 'image', { rpc, now: EARLY_IST })).toMatchObject({ used: 0 });
+    expect(dalMock.counterUsed).toHaveBeenCalledWith('image', 'day', '2026-09-16');
+  });
+});
+
+describe('adminCounterRpc — the legacy PostgREST-shaped compatibility seam', () => {
+  it('classifies a call carrying an error as INTERNAL_ERROR, never as at-limit', async () => {
+    // A PostgREST-shaped `{ data: null, error }` also arrives with `data: null`. Treating it as the
+    // at-limit signal would decline a farmer nowhere near their limit. This seam is kept only so a
+    // restatement-pending property test compiles; the classifier it exercises is preserved.
     const rpc = adminCounterRpc(fakeSupabase({ data: null, error: { message: 'boom' } }));
 
     await expect(reserve(USER, 'image', { rpc, now: EARLY_IST })).rejects.toMatchObject({
@@ -463,10 +516,18 @@ describe('adminCounterRpc', () => {
     });
   });
 
-  it('reads an absent counter row as zero', async () => {
-    const rpc = adminCounterRpc(fakeSupabase({ data: null, error: null }));
+  it('forwards the documented p_ argument names when a legacy client is injected', async () => {
+    const calls: FakeCall[] = [];
+    const rpc = adminCounterRpc(fakeSupabase({ data: 5, error: null }, calls));
 
-    expect(await status(USER, 'image', { rpc, now: EARLY_IST })).toMatchObject({ used: 0 });
+    await reserve(USER, 'chat', { rpc, now: EARLY_IST });
+
+    expect(calls).toEqual([
+      {
+        fn: 'counter_try_increment',
+        args: { p_user: USER, p_operation: 'chat', p_window_kind: 'day', p_window_key: '2026-09-16', p_limit: 50 },
+      },
+    ]);
   });
 });
 

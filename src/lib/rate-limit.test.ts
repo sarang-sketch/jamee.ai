@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { BURST_QUOTAS } from '@/lib/config/verified';
 import { ERROR_SPECS, isAppError } from '@/lib/errors';
@@ -16,6 +16,20 @@ import {
 import type { Operation } from '@/lib/schemas';
 import { minuteWindowKey } from '@/lib/time';
 import { coveredBy, ownsRequest, reserve, type CounterRpc } from '@/services/quota.service';
+
+/**
+ * The Data_Access_Layer is mocked so this stays a unit test (no connection, no `MONGODB_URI`).
+ * Only `pruneMinuteWindows()` with NO client reaches `pruneMinuteCounters`; the burst-check tests
+ * inject their own `CounterRpc` and never touch the layer, so the mock is inert for them.
+ */
+const dalMock = vi.hoisted(() => ({
+  pruneMinuteCounters: vi.fn<(...args: unknown[]) => Promise<number>>(),
+}));
+
+vi.mock('@/lib/db/farmer', () => ({
+  farmerData: (ownerId: string) => ({ ownerId }),
+  pruneMinuteCounters: dalMock.pruneMinuteCounters,
+}));
 
 /**
  * Unit tests for `src/lib/rate-limit.ts`, with the counter functions stubbed at the seam
@@ -432,8 +446,31 @@ describe('noBurstCheck', () => {
 /* The prune                                                                   */
 /* ========================================================================== */
 
-describe('pruneMinuteWindows', () => {
-  it('calls the migration 0007 function with the age cutoff and reports the row count', async () => {
+describe('pruneMinuteWindows — the Data_Access_Layer path (A3)', () => {
+  it('deletes minute rows older than the cutoff and reports the count', async () => {
+    dalMock.pruneMinuteCounters.mockReset().mockResolvedValue(7);
+
+    const before = Date.now();
+    await expect(pruneMinuteWindows()).resolves.toBe(7);
+
+    // One call, with a cutoff `BURST_PRUNE_OLDER_THAN_MINUTES` in the past. The accessor itself
+    // constrains the delete to `windowKind: 'minute'`, so a day row is never touched.
+    expect(dalMock.pruneMinuteCounters).toHaveBeenCalledTimes(1);
+    const cutoff = dalMock.pruneMinuteCounters.mock.calls[0]?.[0] as Date;
+    const expected = before - BURST_PRUNE_OLDER_THAN_MINUTES * 60_000;
+    expect(Math.abs(cutoff.getTime() - expected)).toBeLessThan(2_000);
+  });
+
+  it('reports a layer failure as an internal error rather than as zero rows', async () => {
+    dalMock.pruneMinuteCounters.mockReset().mockRejectedValue(new Error('replica set unreachable'));
+
+    const failed = await refusal(pruneMinuteWindows());
+    expect(failed).toEqual({ code: 'INTERNAL_ERROR', status: 500 });
+  });
+});
+
+describe('pruneMinuteWindows — the legacy PostgREST-shaped compatibility seam', () => {
+  it('calls the injected client with the age cutoff and reports the row count', async () => {
     const prune = pruneStub({ deleted: 7 });
 
     await expect(pruneMinuteWindows({ client: prune.client })).resolves.toBe(7);

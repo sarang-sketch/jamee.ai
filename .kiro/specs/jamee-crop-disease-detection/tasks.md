@@ -1406,7 +1406,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 4.1, 6.4, 6.5, 13.3, 13.4, 21.16, 22.11, 22.12_
 
 - [ ] 54. Build the GridFS media store, the Media_Endpoint, and the browser upload/record changes
-  - [ ] 54.1 Create `src/lib/media/*` — GridFS write, read, and delete through the Data_Access_Layer
+  - [x] 54.1 Create `src/lib/media/*` — GridFS write, read, and delete through the Data_Access_Layer
     - Write an upload stream setting `metadata.kind`, `metadata.ownerId`, and `metadata.sourceRef`; a download stream that reads bytes for inline model sends and for the serve path; `bucket.delete(id)` normalized so an absent id is "already deleted" not an error (V29); an owner check comparing `metadata.ownerId` to the requesting Farmer
     - Replace `storageRefSchema`/`thumbPathFor` reasoning with `mediaRefSchema` = `{ fileId, kind }` already added to `src/lib/schemas.ts`; the diagnose request refines `kind === 'crop-image'`, voice refines `kind === 'voice'` — a client cannot submit a thumbnail or fabricate a path (there is no path)
     - _Requirements: 2.5, 2.6, 2.8, 12.5_
@@ -1430,34 +1430,34 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - Image admission at the 10 MB boundary; voice admission at the 3 MB and 120 s boundaries stating both limits; a failed upload issues no analysis request; the analysis body carries a Media_Reference and no bytes
     - _Requirements: 2.3, 2.4, 2.5, 2.6, 8.2, 8.3, 15.5_
 
-- [ ] 55. Replace Supabase auth with the chosen auth library
-  - [ ] 55.1 Create `src/lib/auth/*` — the auth library with Google and the MongoDB adapter
+- [x] 55. Replace Supabase auth with the chosen auth library
+  - [x] 55.1 Create `src/lib/auth/*` — the auth library with Google and the MongoDB adapter
     - Configure the library chosen in 50.2 with the Google provider and its MongoDB adapter pointed at this database (V30); user and session records live in MongoDB; expose the server-side session-read helper that replaces the Supabase session check
     - Create `src/app/api/auth/*` route(s) as the library requires
     - _Requirements: 1.1, 1.2_
     - _Design: D18a; depends on V30, V35_
 
-  - [ ] 55.2 Rebuild `GoogleSignInButton` / `src/app/page.tsx` and the callback on the auth library
+  - [x] 55.2 Rebuild `GoogleSignInButton` / `src/app/page.tsx` and the callback on the auth library
     - One control, one provider, starting authentication through the library; a live session redirects to `/diagnose`; a callback with no exchangeable authorization establishes **no** session and renders `OAUTH_INCOMPLETE` with a retry (1.3). Replace the Supabase `signInWithOAuth` and callback code-exchange with the library equivalents
     - _Requirements: 1.1, 1.2, 1.3_
     - _Design: D8; depends on V30_
 
-  - [ ] 55.3 Rewrite the profile bootstrap as the library's sign-in hook plus the idempotent upsert
+  - [x] 55.3 Rewrite the profile bootstrap as the library's sign-in hook plus the idempotent upsert
     - The D8 obligation survives: the library's sign-in / user-created hook fires server-side on a first session and the defensive upsert runs on every authenticated request, both through the Data_Access_Layer, writing `(_id = Auth_User_Id, email = Google_Email)` and **no** phone. `email` stays optional so an absent claim is a Profile without an email, not a failed sign-up. The E.164 story stays retired (no `toE164`, no `E164_PHONE`)
     - _Requirements: 1.4, 1.5, 1.9_
     - _Design: D8; depends on V30_
 
-  - [ ] 55.4 Replace the Supabase session use in `src/proxy.ts` and re-establish the 401 gate
+  - [x] 55.4 Replace the Supabase session use in `src/proxy.ts` and re-establish the 401 gate
     - Replace every Supabase session read — including `src/proxy.ts`'s refresh — with the library's server-side session check; the screen gate redirects unauthenticated diagnosis/chat/voice/history to sign-in, and the API gate returns `AUTH_REQUIRED` (401) invoking no domain service
     - _Requirements: 1.6, 1.7_
     - _Design: D8; depends on V30_
 
-  - [ ]* 55.5 Write unit tests for the sign-in control and the bootstrap
+  - [x]* 55.5 Write unit tests for the sign-in control and the bootstrap
     - The bootstrap writes `_id` and `email`, passes no phone column, is a no-op on a second call, and classifies an RLS-free write failure and an absent email claim distinctly; the control starts Google sign-in once with the configured redirect and renders the did-not-complete message with a working retry
     - _Requirements: 1.1, 1.3, 1.4_
 
 - [ ] 56. Port every service off the Supabase client onto the Data_Access_Layer
-  - [ ] 56.1 Port the quota, conversation, and usage-log services
+  - [x] 56.1 Port the quota, conversation, and usage-log services
     - `quota.service.ts` onto the D19 `findOneAndUpdate` reserve / guarded decrement / read; `conversation.service.ts` `findOrCreateActive(userId, channel)` onto the owner-scoped accessors with `web` and `telegram` conversations as separate documents; usage-log writes through the layer with `channel` on every row
     - _Requirements: 7.5, 10.5, 10.8, 14.1, 14.2, 14.3, 14.6, 14.7_
     - _Design: D10, D19_

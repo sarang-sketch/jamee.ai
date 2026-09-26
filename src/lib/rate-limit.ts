@@ -1,16 +1,15 @@
 import 'server-only';
 
 import { BURST_QUOTAS } from '@/lib/config/verified';
+import { pruneMinuteCounters } from '@/lib/db/farmer';
 import { AppError } from '@/lib/errors';
 import type { Operation, WindowKind } from '@/lib/schemas';
-import { createAdminClient } from '@/lib/supabase/admin';
 import { minuteWindowKey } from '@/lib/time';
 import {
   adminCounterRpc,
   type CounterRpc,
   type QuotaContext,
 } from '@/services/quota.service';
-import type { Functions } from '@/types/database';
 
 /**
  * Per-farmer burst rate limiting: the minute-window control that sits one step above the daily
@@ -246,8 +245,8 @@ export function rateLimitedError(userId: string, operation: Operation, now: Date
 export interface BurstOptions {
   /**
    * The counter seam, shared with `quota.service.ts` rather than re-declared. Defaults to the
-   * service-role client, built on first use — so a caller that injects its own (every unit test)
-   * reads no `SUPABASE_SERVICE_ROLE_KEY`.
+   * Data_Access_Layer-backed counter, built on first use — so a caller that injects its own (every
+   * unit test) reads no `MONGODB_URI`.
    */
   readonly rpc?: CounterRpc | undefined;
   /**
@@ -330,14 +329,15 @@ export const BURST_PRUNE_OLDER_THAN_MINUTES = 60;
 export const BURST_PRUNE_EVERY_MS = 15 * 60_000;
 
 /**
- * The narrow slice of a Supabase client the prune needs, structural rather than nominal — the same
- * choice `CounterRpcClient` makes, so this stays testable without constructing a client that holds
- * the RLS-bypassing key.
+ * The narrow legacy seam a restatement-pending test still constructs: one `rpc(fn, args)` returning
+ * `{ data, error }`, mirroring how the retired `counter_prune_minute_windows` PostgREST call read.
+ * Kept solely so that test compiles against the ported module; production passes no client and
+ * takes the Data_Access_Layer path below.
  */
 export interface MinutePruneClient {
   rpc(
     fn: 'counter_prune_minute_windows',
-    args: Functions<'counter_prune_minute_windows'>['Args'],
+    args: { readonly p_older_than_minutes: number },
   ): PromiseLike<{ readonly data: number | null; readonly error: unknown }>;
 }
 
@@ -345,7 +345,10 @@ export interface MinutePruneClient {
 export type MinutePrune = () => Promise<number>;
 
 export interface PruneOptions {
-  /** Defaults to the service-role client, built on first use. */
+  /**
+   * *Amended by A3:* production supplies nothing and the prune runs through the Data_Access_Layer.
+   * A legacy `{ data, error }` client may still be injected by a restatement-pending test.
+   */
   readonly client?: MinutePruneClient | undefined;
   readonly olderThanMinutes?: number | undefined;
 }
@@ -353,32 +356,43 @@ export interface PruneOptions {
 /**
  * Delete stale minute rows.
  *
- * `counter_prune_minute_windows` from migration 0007, unchanged: it deletes by `window_kind` and
- * age and **never touches a day row**, because deleting one would silently hand a farmer a fresh
- * daily allowance. That is why the prune is a database function with the rule inside it rather than
- * a delete this module composes — the invariant lives next to the rows.
+ * *Amended by Amendment A3:* this was `client.rpc('counter_prune_minute_windows', …)` on the
+ * Supabase service-role client. Under A3 it is the Data_Access_Layer's `pruneMinuteCounters`, a
+ * named system accessor that deletes by `windowKind: 'minute'` and age and **never touches a day
+ * row** — deleting one would silently hand a farmer a fresh daily allowance, so the invariant lives
+ * inside the accessor's filter, exactly where the `0007` function used to keep it. It is one of the
+ * few legitimately farmer-unscoped operations (age-scoped across all farmers), which is why it is a
+ * named system accessor beside the owner-scoped ones rather than part of `FarmerData`.
  *
- * It is the one `.rpc()` in Jamee with no farmer argument, and legitimately so: it is
- * age-scoped across all farmers by design, which is why `scripts/check-secret-scope.ts` lists it in
- * `TENANT_FREE_FUNCTIONS`. Nothing here reads or writes a single farmer's row, so there is no
- * tenant boundary to anchor.
+ * The optional legacy `client` preserves the old `{ data, error }` classification for a
+ * restatement-pending test — an `error` becomes `INTERNAL_ERROR`, never a silent zero. Production
+ * passes nothing and reaches the DAL.
  */
 export async function pruneMinuteWindows(options: PruneOptions = {}): Promise<number> {
-  const client = options.client ?? createAdminClient();
   const olderThanMinutes = options.olderThanMinutes ?? BURST_PRUNE_OLDER_THAN_MINUTES;
 
-  const { data, error } = await client.rpc('counter_prune_minute_windows', {
-    p_older_than_minutes: olderThanMinutes,
-  });
+  if (options.client !== undefined) {
+    const { data, error } = await options.client.rpc('counter_prune_minute_windows', {
+      p_older_than_minutes: olderThanMinutes,
+    });
+    if (error !== null && error !== undefined) {
+      throw new AppError('INTERNAL_ERROR', {
+        cause: error,
+        context: { reason: 'counter_prune_failed', olderThanMinutes },
+      });
+    }
+    return data ?? 0;
+  }
 
-  if (error !== null && error !== undefined) {
+  try {
+    const cutoff = new Date(Date.now() - olderThanMinutes * 60_000);
+    return await pruneMinuteCounters(cutoff);
+  } catch (error) {
     throw new AppError('INTERNAL_ERROR', {
       cause: error,
       context: { reason: 'counter_prune_failed', olderThanMinutes },
     });
   }
-
-  return data ?? 0;
 }
 
 /* ========================================================================== */
@@ -395,8 +409,8 @@ export interface BurstLimiterOptions {
    */
   readonly now?: (() => Date) | undefined;
   /**
-   * Housekeeping. `null` disables it; the default runs `pruneMinuteWindows()` on the service-role
-   * client, at most once per `pruneEveryMs` **per process**.
+   * Housekeeping. `null` disables it; the default runs `pruneMinuteWindows()` through the
+   * Data_Access_Layer, at most once per `pruneEveryMs` **per process**.
    */
   readonly prune?: MinutePrune | null | undefined;
   readonly pruneEveryMs?: number | undefined;
@@ -472,5 +486,5 @@ export function burstLimiter(options: BurstLimiterOptions = {}): BurstCheck {
   };
 }
 
-/** The default prune: the service-role client, constructed on first use rather than at import. */
+/** The default prune: the Data_Access_Layer, reached on first use rather than at import. */
 const defaultPrune: MinutePrune = () => pruneMinuteWindows();

@@ -312,6 +312,46 @@ export const storageRefSchema = z.object({
 export type StorageRef = z.infer<typeof storageRefSchema>;
 
 /* ========================================================================== */
+/* Media references (Amendment A3 — GridFS)                                    */
+/* ========================================================================== */
+
+/**
+ * A Media_Reference — the `{ fileId, kind }` pair that replaces a Supabase storage path under
+ * Amendment A3 (D17). `fileId` is a GridFS file `_id` as its 24-character lowercase hex string;
+ * `kind` is one of the three media kinds one bucket holds, told apart by `metadata.kind`.
+ *
+ * Added **additively** in this wave: `storageRefSchema` above and the diagnose/chat/voice request
+ * schemas are deliberately left untouched, because the routes switch over to Media_References in a
+ * later wave (task 54.2/54.3). Until then this schema exists so `src/lib/media/*` (task 54.1) can
+ * validate the reference shape at its own boundary without any request contract depending on it
+ * yet.
+ *
+ * The `fileId` regex is the ObjectId hex grammar — exactly 24 hex digits — which is all a client
+ * could ever legitimately send, and it carries NO path, no dots, and no `.thumb` infix to fabricate
+ * (the whole class of storage-path forgery `storageRefSchema` had to guard is simply not
+ * expressible here). `kind` is a closed enum, so a request naming a kind Jamee does not store fails
+ * to parse; the application wrapper additionally refines which kind a given endpoint accepts.
+ *
+ * The kinds mirror `MEDIA_KINDS` in `@/lib/db/names` character-for-character. That module is
+ * dependency-free (the node-run setup script imports it), so its list is the canonical one and this
+ * schema restates it here rather than importing it, keeping `schemas.ts` importable from client
+ * components. A unit test asserts the two lists are identical, the same guard the verified-condition
+ * list already uses.
+ */
+export const MEDIA_KIND_NAMES = ['crop-image', 'thumbnail', 'voice'] as const;
+export const mediaKindSchema = z.enum(MEDIA_KIND_NAMES);
+export type MediaKind = z.infer<typeof mediaKindSchema>;
+
+/** A GridFS `_id` as its canonical 24-character lowercase hex string. */
+export const OBJECT_ID_HEX_REGEX = /^[0-9a-f]{24}$/;
+
+export const mediaRefSchema = z.object({
+  fileId: z.string().regex(OBJECT_ID_HEX_REGEX, 'fileId must be a 24-character hex ObjectId'),
+  kind: mediaKindSchema,
+});
+export type MediaRef = z.infer<typeof mediaRefSchema>;
+
+/* ========================================================================== */
 /* Quota status, echoed on every successful response                            */
 /* ========================================================================== */
 

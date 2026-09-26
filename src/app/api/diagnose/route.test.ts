@@ -59,6 +59,17 @@ vi.mock('@/lib/supabase/server', () => ({
 }));
 
 /**
+ * Amendment A3 rewire: `authenticatedRoute` now resolves identity through
+ * `@/lib/auth/session`'s `currentUserId` (Better Auth), not the Supabase one. The same spy backs
+ * both module paths so the guard's answer to "who is signed in" stays stubbed while the real
+ * `authenticatedRoute` remains under test. `createServerSupabase` above is still what the route
+ * itself uses for the RLS-scoped client until that route is ported (task 56).
+ */
+vi.mock('@/lib/auth/session', () => ({
+  currentUserId: spies.currentUserId,
+}));
+
+/**
  * The service, as a tripwire by default. Every test that expects a refusal leaves this rejecting,
  * so a route that reached the service would fail twice: once on the recorded call and once on the
  * status, because the throw would have become a 500.

@@ -416,6 +416,26 @@ export async function webhookThrottleTryIncrement(
   }
 }
 
+/**
+ * Delete `minute`-window counter rows whose last write is older than `olderThan` — the burst
+ * limiter's periodic housekeeping (Requirement 13.8, task 24.1's prune). System-scoped by nature:
+ * it is age-scoped across all farmers, exactly like the retired `counter_prune_minute_windows`
+ * database function, and it NEVER touches a `day` row (deleting one would hand a farmer a fresh
+ * daily allowance — the invariant migration 0007 kept inside the function, now kept inside this
+ * filter). Returns how many rows were removed, so a caller can log what housekeeping achieved.
+ *
+ * Not part of `FarmerData` because it has no farmer and must not be reachable from a farmer-scoped
+ * path — it is a named system accessor beside the others, so an unscoped delete is a deliberate,
+ * greppable exception rather than an accident.
+ */
+export async function pruneMinuteCounters(olderThan: Date): Promise<number> {
+  const result = await counters().deleteMany({
+    windowKind: 'minute',
+    updatedAt: { $lt: olderThan },
+  });
+  return result.deletedCount ?? 0;
+}
+
 /* ========================================================================== */
 /* Transactions (D19, V33)                                                     */
 /* ========================================================================== */

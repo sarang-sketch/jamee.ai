@@ -4,7 +4,7 @@ import type { NextRequest } from 'next/server';
 
 import { AppError, withErrorHandling } from '@/lib/errors';
 import { languageSchema, type Language } from '@/lib/schemas';
-import { currentUserId } from '@/lib/supabase/server';
+import { currentUserId } from '@/lib/auth/session';
 
 /**
  * The API half of the auth gate: one wrapper every protected route handler is built from.
@@ -14,7 +14,7 @@ import { currentUserId } from '@/lib/supabase/server';
  *               a client-supplied identifier, decides whose rows a request can reach), 15.3 /
  *               15.6 (the refusal leaves through the single error envelope)
  * Design: "Security boundary" — defence in depth; "Error taxonomy" — `AUTH_REQUIRED` → 401
- * Depends on: V1 — `getUser()` as the server-confirmed identity call
+ * Depends on: V30 — Better Auth's `getSession` as the server-confirmed identity call
  *
  * ### Why a wrapper and not a convention
  *
@@ -54,8 +54,9 @@ const SERVER_CONFIRMED: unique symbol = Symbol('jamee.server-confirmed-session')
 
 export interface FarmerSession {
   /**
-   * The `auth.users` id of the signed-in farmer, from `getUser()` — V1's server-confirmed call.
-   * This is the value every RLS predicate and every service-role `user_id` filter is keyed on.
+   * The Auth_User_Id of the signed-in farmer, from Better Auth's server-confirmed session (V30).
+   * This is the owner id every `farmerData(...)` accessor is bound to and every owner-scoped
+   * filter is keyed on (D18).
    */
   readonly userId: string;
 
@@ -187,9 +188,11 @@ export function buildAuthenticatedRoute(resolveUserId: UserIdResolver): Authenti
 /**
  * The wrapper every protected route handler uses.
  *
- * `currentUserId()` is `getUser()` underneath (V1's server-confirmed call), so the identity is
- * confirmed against the Auth service rather than decoded from a cookie the caller supplied. A
- * forged or edited cookie resolves to `null` here and gets the 401.
+ * `currentUserId()` reads the session through Better Auth (`getAuth().api.getSession`, the
+ * server-confirmed call — V30), so the identity is validated against the session store rather than
+ * decoded from a cookie the caller supplied. A forged or edited session cookie resolves to `null`
+ * here and gets the 401. Behaviour is unchanged from the Supabase wiring: the resolver stays
+ * injectable via `buildAuthenticatedRoute`, and the `AUTH_REQUIRED` → 401 refusal is identical.
  */
 export const authenticatedRoute: AuthenticatedRouteWrapper =
   buildAuthenticatedRoute(currentUserId);

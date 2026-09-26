@@ -1,10 +1,10 @@
 import 'server-only';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
-
+import type { ConversationDoc } from '@/lib/db/collections';
+import { farmerData } from '@/lib/db/farmer';
 import { AppError } from '@/lib/errors';
 import type { Channel } from '@/lib/schemas';
-import type { ConversationRow, Database } from '@/types/database';
+import type { ConversationRow } from '@/types/database';
 
 /**
  * Conversation find-or-create. One function, one decision: which thread does this farmer's next
@@ -89,83 +89,86 @@ export interface ConversationStore {
 }
 
 /**
- * Adapt a Supabase client — RLS-scoped or service-role — into a store.
+ * Adapt the Data_Access_Layer into a store.
  *
- * A PostgREST `error` is **not** an empty result and is never treated as one. Empty means the
- * farmer has no thread on this channel yet, which leads to a create; an error means Jamee could not
- * find out, and creating a second thread because a read failed is exactly the split history
- * Requirement 10.8 cannot tolerate. So an error throws, the cause is logged server-side, and the
- * farmer sees `INTERNAL_ERROR`.
+ * *Amended by Amendment A3:* this was `conversationStoreFrom(client: SupabaseClient)`, a pair of
+ * PostgREST queries on an RLS-scoped or service-role client. Under A3 there is no RLS and no
+ * service-role client — `conversations` is reachable only through the owner-scoped `FarmerData`
+ * accessors (D18), which merge the owning Auth_User_Id into every filter and stamp it on every
+ * insert. So the store is built from `farmerData(userId)` per call rather than from a client, and
+ * the two predicates that were load-bearing under RLS are now structural: `ownerId` is merged by
+ * the layer (it cannot be forgotten), and `channel` is the one filter this store adds to keep the
+ * web thread and the Telegram thread from bleeding into each other.
+ *
+ * The optional `_legacyClient` parameter is accepted and ignored purely so the call sites that
+ * still pass `deps.supabase` (the diagnosis service and the Telegram/WhatsApp adapter, ported in a
+ * later wave) keep compiling through this port — it selects no behaviour. Production callers pass
+ * nothing.
+ *
+ * A driver error is **not** an empty result and is never treated as one: the layer throws on a real
+ * failure, so an error propagates and is surfaced as `INTERNAL_ERROR` rather than being read as
+ * "no thread yet" — the split-history outcome Requirement 10.8 cannot tolerate.
  */
-export function conversationStoreFrom(client: SupabaseClient<Database>): ConversationStore {
+export function conversationStoreFrom(_legacyClient?: unknown): ConversationStore {
+  void _legacyClient; // accepted for call-site compatibility during the port; selects no behaviour.
   return {
     async mostRecent(userId, channel) {
-      const { data, error } = await client
-        .from('conversations')
-        .select('*')
-        // Both predicates are load-bearing. `user_id` is the tenant boundary — the only boundary,
-        // on the service-role client (admin.ts). `channel` is what keeps the web thread and the
-        // WhatsApp thread from bleeding into each other.
-        .eq('user_id', userId)
-        .eq('channel', channel)
-        // Served by `conversations_user_recent_idx`. The `id` key breaks a timestamp tie so the
-        // order is total and two callers reading the same rows agree on the winner.
-        .order('updated_at', { ascending: false })
-        .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      // `findConversations` merges `{ ownerId: userId }` and sorts by `updatedAt` descending. The
+      // `channel` filter is what this store adds. The result is already newest-first; a total order
+      // (breaking a timestamp tie by id) is applied here so two concurrent callers agree on one
+      // winner, the same guarantee the old `.order('id')` gave.
+      const rows = await farmerData(userId).findConversations({ channel });
+      if (rows.length === 0) return null;
 
-      if (error !== null) {
-        throw new AppError('INTERNAL_ERROR', {
-          cause: error,
-          context: { reason: 'conversation_read_failed', userId, channel },
-        });
-      }
-      return data;
+      const winner = rows.reduce((best, row) => {
+        if (row.updatedAt.getTime() !== best.updatedAt.getTime()) {
+          return row.updatedAt.getTime() > best.updatedAt.getTime() ? row : best;
+        }
+        // Tie on updatedAt: the larger id wins, so the order is total.
+        return row._id.toString() > best._id.toString() ? row : best;
+      });
+      return toConversation(winner);
     },
 
     async create(userId, channel) {
-      const { data, error } = await client
-        .from('conversations')
-        .insert({
-          user_id: userId,
-          // Requirement 16.5: the channel supplied to the service is recorded on the row.
-          channel,
-          // `title` is left null on purpose. Nothing in the requirements renders a conversation
-          // title, and a title derived from the first message is a property of that message, so
-          // inventing one here would put a farmer-visible string in the one module that has no
-          // access to the message catalogs.
-        })
-        .select('*')
-        .single();
-
-      if (error !== null || data === null) {
-        throw new AppError('INTERNAL_ERROR', {
-          cause: error,
-          context: { reason: 'conversation_create_failed', userId, channel },
-        });
-      }
-      return data;
+      // Requirement 16.5: the channel supplied to the service is recorded on the row. `title` is
+      // left absent on purpose — nothing renders a conversation title, and inventing one here would
+      // put a farmer-visible string in the one module with no access to the message catalogs. The
+      // layer stamps `ownerId`, `createdAt`, and `updatedAt`.
+      const created = await farmerData(userId).insertConversation({ channel });
+      return toConversation(created);
     },
   };
 }
 
 /**
- * The default store: the farmer's own session, through RLS.
- *
- * `createServerSupabase()` is imported **lazily** because it reads the App Router cookie store,
- * which exists only inside a request. A static import would make this module unloadable outside a
- * request scope — including in a unit test — for a dependency the WhatsApp adapter never uses.
+ * Map a stored conversation document to the `Conversation` (Supabase-row-shaped) view its consumers
+ * still read — `id` as the `_id` hex string, `user_id` as `ownerId`, and the timestamps as ISO
+ * strings. Kept until the consumers migrate to the document shape in a later wave; one place the
+ * translation lives.
  */
-async function serverStore(): Promise<ConversationStore> {
-  const { createServerSupabase } = await import('@/lib/supabase/server');
-  return conversationStoreFrom(await createServerSupabase());
+function toConversation(doc: ConversationDoc & { _id: unknown }): Conversation {
+  const id = (doc._id as { toString(): string }).toString();
+  return {
+    id,
+    user_id: doc.ownerId,
+    channel: doc.channel,
+    title: doc.title ?? null,
+    created_at: doc.createdAt.toISOString(),
+    updated_at: doc.updatedAt.toISOString(),
+  };
 }
 
-export const rlsScopedConversationStore: ConversationStore = {
-  mostRecent: async (userId, channel) => (await serverStore()).mostRecent(userId, channel),
-  create: async (userId, channel) => (await serverStore()).create(userId, channel),
-};
+/**
+ * The default store: the farmer's own data through the Data_Access_Layer.
+ *
+ * *Amended by A3:* this was an RLS-scoped store built from the App Router session's Supabase client,
+ * imported lazily so the module stayed loadable outside a request. Under A3 the store binds to
+ * `farmerData(userId)` per call and reads the cookies through nothing — the owner id the caller
+ * passes is the whole scope — so there is no lazy client import to make and this is simply
+ * `conversationStoreFrom()`.
+ */
+export const rlsScopedConversationStore: ConversationStore = conversationStoreFrom();
 
 /* ========================================================================== */
 /* find-or-create                                                              */

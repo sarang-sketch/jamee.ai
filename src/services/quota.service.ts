@@ -1,11 +1,10 @@
 import 'server-only';
 
 import { DAILY_QUOTAS } from '@/lib/config/verified';
+import { farmerData } from '@/lib/db/farmer';
 import { AppError } from '@/lib/errors';
 import type { Operation, QuotaStatus, WindowKind } from '@/lib/schemas';
-import { createAdminClient } from '@/lib/supabase/admin';
 import { dayWindowKey, nextResetAtIso } from '@/lib/time';
-import type { Functions } from '@/types/database';
 
 /**
  * The daily quota reserve, refund, and read — the only module that spends a unit.
@@ -66,12 +65,14 @@ import type { Functions } from '@/types/database';
  * WHY `server-only` AND THE SERVICE-ROLE CLIENT
  * =============================================================================
  *
- * `counters` grants `authenticated` no insert, update, or delete policy — that absence *is* the
- * enforcement (migration 0007). The only writes possible are through the three `security definer`
- * functions, and those are invoked with the service role. So this module is server-only, and the
- * rule from `src/lib/supabase/admin.ts` applies to every call it makes: **every service-role
- * query carries an explicit `user_id`.** Here that is structural — `p_user` is a required
- * argument of all three functions, and there is no code path that omits it.
+ * *Amended by Amendment A3.* Under Supabase, `counters` granted `authenticated` no write policy and
+ * the only writes were through `security definer` functions invoked with the service role. Under
+ * A3 there is no RLS and no service-role client: `counters` is reachable only through the
+ * Data_Access_Layer's owner-scoped accessors (D18), which merge the owning Auth_User_Id into the
+ * counter key by construction. So this module is server-only, it holds no database handle of its
+ * own, and the old rule "every service-role query carries an explicit `user_id`" is now structural
+ * — `farmerData(userId)` binds the owner, and there is no code path that reaches a counter row
+ * without one.
  */
 
 /* ========================================================================== */
@@ -80,8 +81,8 @@ import type { Functions } from '@/types/database';
 
 /**
  * Requirement 14.1's three numbers live in `src/lib/config/verified.ts` and are read from there,
- * never copied. There is no second copy in the database either: `counter_try_increment` takes the
- * limit as a parameter rather than reading a table, so `DAILY_QUOTAS` is the single declaration
+ * never copied. There is no second copy in the database either: the conditional reserve takes the
+ * limit as an argument rather than reading a table, so `DAILY_QUOTAS` is the single declaration
  * site for 20 / 50 / 20 across the whole system.
  */
 export function limitFor(operation: Operation): number {
@@ -107,62 +108,69 @@ interface CounterKey {
 }
 
 /**
- * The three counter functions of migration `0007`, as this module uses them.
+ * The three counter operations, as this module uses them.
  *
- * A three-method seam rather than a slice of the Supabase client, for one reason that is worth
- * the extra interface: **it is the boundary where a transport failure stops looking like an
- * at-limit answer.** `counter_try_increment` signals "already at the limit" by returning SQL
- * NULL, and a failed PostgREST call also arrives with `data: null`. Reading the second as the
- * first would decline a farmer who is nowhere near their limit — silently, and with a message
- * quoting a limit they have not reached. `adminCounterRpc()` below checks `error` first and
- * throws, so by the time a `null` reaches `reserve()` it means exactly one thing.
+ * A three-method seam rather than the Data_Access_Layer's `FarmerData` bundle directly, for one
+ * reason that survived the A3 port unchanged: **it is the boundary where a transport failure stops
+ * looking like an at-limit answer.** `counterTryIncrement` signals "already at the limit" by
+ * returning `null` (the conditional upsert matched nothing at the boundary, or it raced and the
+ * duplicate-key error `11000` was caught inside the layer). Any OTHER database failure throws out
+ * of the layer rather than arriving as a `null`, so by the time a `null` reaches `reserve()` it
+ * means exactly one thing — declined, not "the database was unreachable".
  *
- * Unit tests stub this interface. Real atomicity is task 10.2, against a real Postgres.
+ * Unit tests stub this interface. Real atomicity is a MongoDB fact proven by the integration suite
+ * against `mongodb-memory-server` (V31, V33), not by a stub here.
  */
 export interface CounterRpc {
-  /** `counter_try_increment`. The new count, or `null` when already at `limit`. */
+  /** The conditional reserve (D19). The new count, or `null` when already at `limit`. */
   tryIncrement(args: CounterKey & { readonly limit: number }): Promise<number | null>;
-  /** `counter_decrement`. The new count, or `null` when no row matched (already zero). */
+  /** The guarded refund. The new count, or `null` when no row matched (already zero). */
   decrement(args: CounterKey): Promise<number | null>;
-  /** `counter_used`. Zero for an absent row — the SQL coalesces, so there is no null case. */
+  /** The read. Zero for an absent row — the layer coalesces, so there is no null case. */
   used(args: CounterKey): Promise<number>;
 }
 
-type CounterFunctionName = 'counter_try_increment' | 'counter_decrement' | 'counter_used';
-
 /**
- * The narrow slice of a Supabase client `adminCounterRpc()` needs.
+ * Bind the seam to the Data_Access_Layer.
  *
- * Structural rather than nominal, following `StorageClientLike` in `src/lib/storage.ts`: the
- * service-role client satisfies it without this type naming it, which keeps the adapter testable
- * without constructing a client that holds the RLS-bypassing key.
- */
-export interface CounterRpcClient {
-  rpc(
-    fn: 'counter_try_increment',
-    args: Functions<'counter_try_increment'>['Args'],
-  ): PromiseLike<CounterRpcResponse>;
-  rpc(
-    fn: 'counter_decrement',
-    args: Functions<'counter_decrement'>['Args'],
-  ): PromiseLike<CounterRpcResponse>;
-  rpc(
-    fn: 'counter_used',
-    args: Functions<'counter_used'>['Args'],
-  ): PromiseLike<CounterRpcResponse>;
-}
-
-/**
- * All three functions return one nullable integer, so one response shape covers them. `error` is
- * `unknown` rather than `PostgrestError` so the seam does not pin a provider error type — the only
- * thing this module does with it is decide that it is not an at-limit answer, and log it.
+ * *Amended by Amendment A3:* this was `adminCounterRpc(client = createAdminClient())`, a slice of a
+ * Supabase service-role client calling the three `0007` `security definer` functions. Under A3 the
+ * atomic counter operations are D19's `findOneAndUpdate` conditional upsert / guarded decrement /
+ * read, and they live on the owner-scoped `FarmerData` bundle in `src/lib/db/farmer.ts` — the only
+ * holder of the driver (D18). So each method resolves `farmerData(args.userId)` and forwards to its
+ * counter helper. The exported name is kept — every service and the burst limiter build their
+ * default RPC through `adminCounterRpc()` — and it now takes NO argument in production, because
+ * there is no separate service-role client to inject: the layer *is* the access boundary, and its
+ * accessor merges the owner into the counter key by construction.
+ *
+ * A caller that injects its own `CounterRpc` (every unit test, via `QuotaOptions.rpc`) bypasses this
+ * entirely, so a test reads no `MONGODB_URI` and opens no connection.
+ *
+ * ### The optional `legacyClient` parameter
+ *
+ * A property test still exercises the "a transport failure must not read as at-limit" classifier
+ * through the OLD PostgREST-shaped seam (`{ data, error }`). That property is preserved verbatim
+ * under A3 — a database failure throws out of the Data_Access_Layer rather than arriving as a
+ * `null` — and rewriting those property tests belongs to a later restatement task, not this port.
+ * So `adminCounterRpc` accepts an OPTIONAL legacy client for exactly that: when one is supplied its
+ * `{ data, error }` is checked `error`-first and a non-null error becomes `INTERNAL_ERROR`, the same
+ * classification the DAL now gives by throwing. Production passes nothing and takes the DAL path.
  */
 export interface CounterRpcResponse {
   readonly data: number | null;
   readonly error: unknown;
 }
 
-function rpcFailure(fn: CounterFunctionName, cause: unknown, key: CounterKey): AppError {
+/**
+ * The narrow legacy seam a restatement-pending property test still constructs: one `rpc(fn, args)`
+ * returning `{ data, error }`. Kept solely so those tests compile against the ported module; nothing
+ * in production constructs one.
+ */
+export interface CounterRpcClient {
+  rpc(fn: string, args: unknown): PromiseLike<CounterRpcResponse>;
+}
+
+function legacyRpcFailure(fn: string, cause: unknown, key: CounterKey): AppError {
   return new AppError('INTERNAL_ERROR', {
     cause,
     context: {
@@ -176,54 +184,42 @@ function rpcFailure(fn: CounterFunctionName, cause: unknown, key: CounterKey): A
   });
 }
 
-/** `true` for anything PostgREST would put in `error`. `null` and `undefined` are "no error". */
-function isRpcError(error: unknown): boolean {
-  return error !== null && error !== undefined;
-}
+export function adminCounterRpc(legacyClient?: CounterRpcClient): CounterRpc {
+  if (legacyClient !== undefined) {
+    const call = async (fn: string, key: CounterKey, extra: Record<string, unknown> = {}): Promise<number | null> => {
+      const { data, error } = await legacyClient.rpc(fn, {
+        p_user: key.userId,
+        p_operation: key.operation,
+        p_window_kind: key.windowKind,
+        p_window_key: key.windowKey,
+        ...extra,
+      });
+      if (error !== null && error !== undefined) throw legacyRpcFailure(fn, error, key);
+      return data;
+    };
+    return {
+      tryIncrement: (args) => call('counter_try_increment', args, { p_limit: args.limit }),
+      decrement: (args) => call('counter_decrement', args),
+      async used(args) {
+        return (await call('counter_used', args)) ?? 0;
+      },
+    };
+  }
 
-/**
- * Bind the seam to the service-role client.
- *
- * The client is constructed lazily by the default parameter, so a caller that injects its own
- * `CounterRpc` (every unit test) never reads `SUPABASE_SERVICE_ROLE_KEY` at all.
- */
-export function adminCounterRpc(client: CounterRpcClient = createAdminClient()): CounterRpc {
   return {
-    async tryIncrement(args) {
-      const { data, error } = await client.rpc('counter_try_increment', {
-        p_user: args.userId,
-        p_operation: args.operation,
-        p_window_kind: args.windowKind,
-        p_window_key: args.windowKey,
-        p_limit: args.limit,
-      });
-      if (isRpcError(error)) throw rpcFailure('counter_try_increment', error, args);
-      return data;
+    tryIncrement(args) {
+      return farmerData(args.userId).counterTryIncrement(
+        args.operation,
+        args.windowKind,
+        args.windowKey,
+        args.limit,
+      );
     },
-
-    async decrement(args) {
-      const { data, error } = await client.rpc('counter_decrement', {
-        p_user: args.userId,
-        p_operation: args.operation,
-        p_window_kind: args.windowKind,
-        p_window_key: args.windowKey,
-      });
-      if (isRpcError(error)) throw rpcFailure('counter_decrement', error, args);
-      return data;
+    decrement(args) {
+      return farmerData(args.userId).counterDecrement(args.operation, args.windowKind, args.windowKey);
     },
-
-    async used(args) {
-      const { data, error } = await client.rpc('counter_used', {
-        p_user: args.userId,
-        p_operation: args.operation,
-        p_window_kind: args.windowKind,
-        p_window_key: args.windowKey,
-      });
-      if (isRpcError(error)) throw rpcFailure('counter_used', error, args);
-      // `coalesce(..., 0)` in the SQL means an absent row reads as 0; the `?? 0` covers the
-      // PostgREST response type only, and is why a farmer's first request of the day needs no
-      // special case anywhere above this line.
-      return data ?? 0;
+    used(args) {
+      return farmerData(args.userId).counterUsed(args.operation, args.windowKind, args.windowKey);
     },
   };
 }
@@ -233,7 +229,7 @@ export function adminCounterRpc(client: CounterRpcClient = createAdminClient()):
 /* ========================================================================== */
 
 export interface QuotaOptions {
-  /** The RPC seam. Defaults to the service-role client, built on first use. */
+  /** The RPC seam. Defaults to the Data_Access_Layer-backed counter, built on first use. */
   readonly rpc?: CounterRpc | undefined;
   /**
    * The instant the window key and the reset instant are derived from. Defaults to now.
