@@ -2,13 +2,13 @@
 
 ## Overview
 
-Jamee is a Next.js App Router application (TypeScript strict mode) deployed on Vercel, backed by Supabase for auth, Postgres, and private object storage. It reaches farmers through two channels — the browser and Telegram — and both channels are thin transports in front of the same three domain services: `DiagnosisService`, `ChatService`, `VoiceService` (Requirement 16). The browser channel is free to every signed-in farmer; the Telegram channel answers only a farmer who has linked a Telegram account and holds a one-time `Bot_Entitlement` (Requirements 21, 22).
+Jamee is a Next.js App Router application (TypeScript strict mode) deployed on Vercel, backed by MongoDB Atlas (free M0 tier) for records, MongoDB GridFS for uploaded files, and an in-app authentication library with a MongoDB adapter for Google sign-in and sessions (*Amendment A3*; the earlier Supabase backing for auth, Postgres, and object storage is superseded). It reaches farmers through two channels — the browser and Telegram — and both channels are thin transports in front of the same three domain services: `DiagnosisService`, `ChatService`, `VoiceService` (Requirement 16). The browser channel is free to every signed-in farmer; the Telegram channel answers only a farmer who has linked a Telegram account and holds a one-time `Bot_Entitlement` (Requirements 21, 22).
 
 Three design commitments shape everything below:
 
-1. **No model training, no invented agronomy.** A general multimodal model only *classifies* an image into one of five verified conditions or `unknown`. Every symptom, cause, treatment, and prevention sentence a farmer reads is rephrased from a `disease_knowledge` row (Requirements 4.3–4.5). Nothing outside the knowledge base becomes agricultural advice.
-2. **The verified-condition enum is the safety gate.** It lives in one place, is shared by the TypeScript types, the Zod schemas, and a Postgres check constraint. A model naming anything else fails validation and collapses into a single `Inconclusive_Result` shape (Requirements 5.6, 6.1, 6.4).
-3. **The browser never sends bytes to the API.** Images and audio go browser → Supabase Storage directly; route handlers receive only a storage reference (Requirements 2.1, 8.1). This keeps request bodies far under the platform body limit (Requirement 2.7).
+1. **No model training, no invented agronomy.** A general multimodal model only *classifies* an image into one of five verified conditions or `unknown`. Every symptom, cause, treatment, and prevention sentence a farmer reads is rephrased from a `disease_knowledge` document (Requirements 4.3–4.5). Nothing outside the knowledge base becomes agricultural advice.
+2. **The verified-condition enum is the safety gate.** It lives in one place, is shared by the TypeScript types, the Zod schemas, and — under *Amendment A3* — a MongoDB `$jsonSchema` collection validator in place of the former Postgres check constraint. A model naming anything else fails validation and collapses into a single `Inconclusive_Result` shape (Requirements 5.6, 6.1, 6.4).
+3. **The browser never sends analysis bytes to the API.** *Amended by Amendment A3.* Under Supabase the browser uploaded straight to Storage and the API received only a reference. There is no browser-reachable object store anymore, so the browser now uploads a re-encoded file to an authenticated Jamee endpoint (the Media_Endpoint) that writes it to GridFS and returns a Media_Reference; the diagnosis and voice *analysis* requests still carry only that reference in a small JSON body (Requirements 2.1, 8.1), so the analysis request is still ~200 bytes regardless of media size (Requirement 2.7). The one change is that the *upload* leg now carries the file, which is why it must stay under the 4.5 MB Request_Body_Ceiling — see **D1**.
 
 This design covers Phases 1–6, plus Requirements 21 and 22, which the Telegram channel turned out to require. Requirements 19 and 20 (video frames, expert calling) are deferred and appear only in the forward-compatibility note.
 
@@ -20,7 +20,7 @@ The document is careful never to conflate these, because they have different own
 | --- | --- | --- | --- |
 | **Jamee application quotas** | 20 image / 50 chat / 20 voice per farmer per Asia/Kolkata day (Requirement 14.1) | Jamee's own `counters` table | Fixed by requirements, authoritative in this design |
 | **Documented platform limits** | Vercel serverless request body ceiling (spec states 4.5 MB), function `maxDuration` (spec states 60 s) | Vercel | Treated as design inputs from the requirements; exact current values **VERIFY AT IMPLEMENTATION** |
-| **Provider free-tier rate limits** | Gemini requests/minute and requests/day, Groq requests/minute and tokens/day, Supabase storage and egress allowances | Google / Groq / Supabase | Unknown at design time, **VERIFY AT IMPLEMENTATION**; Jamee's quotas are set below them by design, not by measurement |
+| **Provider free-tier rate limits** | Gemini requests/minute and requests/day, Groq requests/minute and tokens/day, Atlas M0 cluster-storage and connection allowances (*Amendment A3*, replacing Supabase storage/egress) | Google / Groq / MongoDB Atlas | Unknown at design time, **VERIFY AT IMPLEMENTATION** (V32); Jamee's quotas are set below them by design, not by measurement |
 
 Jamee's application quotas are the only limit this codebase enforces. Provider limits are handled reactively through the fallback path (Requirement 14.4), never by hardcoding a provider's numbers.
 
@@ -39,17 +39,40 @@ Jamee's application quotas are the only limit this codebase enforces. Provider l
 
 ---
 
+## Amendment A3 — MongoDB replaces Supabase, records and files alike
+
+> Status: APPROVED AND IN FORCE. This amendment tracks requirements Amendment A3 and is a strict instruction from the product owner, not a tension this design resolves by argument — the reasoning below explains *how* the substitution is made cohesive, never *whether* to make it. It **supersedes** the data-platform substance of this document rather than extending it, so a reader who implemented against the Supabase design should treat the following as replaced and re-read the sections named. Where Amendment A1 is still in force, it stays in force: the Telegram channel, Google sign-in as a user-facing flow, account linking, the weekly ₹20 recharge and its window arithmetic, Gemini/Groq, the three languages, and the daily quotas all stand exactly as A1 amended them. A3 changes what those things are *stored in* and *served from*, not what they do.
+>
+> **What A3 replaces, and where to re-read:**
+>
+> 1. **Supabase is gone in full — auth, Postgres, and Storage all at once.** The Overview's "backed by Supabase for auth, Postgres, and private object storage" becomes MongoDB Atlas (free M0 tier) for records, MongoDB GridFS for files, and an in-app authentication library with a MongoDB adapter for sessions. There is no separate object store and no browser-held database credential. Re-read: *Overview*, *Architecture* (layers, system diagram, both sequence diagrams), *Data model* (now *Data model and collection setup*), *Security boundary*, *Media lifecycle and retention*, *Telegram adapter*, *Testing strategy*, and *Deployment*.
+> 2. **Records become collections, one for one, and the 14 SQL migrations become one idempotent `npm run db:setup` script.** The tables of migrations `0002`–`0013` become MongoDB collections; every former `UNIQUE` becomes a unique index (partial or sparse where the field is nullable), and every former `CHECK` on an enumerated field becomes MongoDB `$jsonSchema` collection validation where practical. The five verified conditions are seeded by the same script. The `supabase/migrations/` tree becomes historical.
+> 3. **Files live in GridFS in one bucket, distinguished by `metadata.kind`.** The private buckets `crop-images` and `voice-messages` are replaced by a single GridFS bucket whose files carry `metadata.kind` of `crop-image`, `thumbnail`, or `voice`, `metadata.ownerId` (the Auth_User_Id), and a link to their source. The choice of one bucket over two is argued in **D17**. The browser uploads a re-encoded file to an authenticated Media_Endpoint, which writes it to GridFS and returns a Media_Reference; the diagnosis and voice requests still carry only that reference in a JSON body, so the *analysis* request never carries bytes even though the *upload* leg now does (**D1** is amended for exactly this). A Media_Endpoint streams a file back only to its owner. Server-side analysis reads bytes from GridFS directly and sends them inline to Gemini and Groq (inline-byte limits are **V34**).
+> 4. **RLS is gone, and tenant isolation moves into a Data_Access_Layer** (**D18**). MongoDB has no row-level security, so a single server-side module holds the database handle and injects the owning Auth_User_Id into every filter, insert, update, and delete. This is **application-enforced**, and A3 records that as an accepted academic weakening of a formerly database-enforced guarantee. A CI check on the existing `scripts/check-*` pattern fails the build if any module outside the data layer imports the `mongodb` driver or the raw handle.
+> 5. **The public/anon key confusion disappears.** There is no browser database key and no service-role key, so the Supabase anon-vs-service-role reasoning that ran through the *Security boundary* is retired outright rather than restated. `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are removed from the environment; the server-only `MONGODB_URI` and the auth library's secret and Google client id/secret (named per the chosen library) are added. Telegram, Razorpay, Gemini, Groq, and `RETENTION_SWEEP_SECRET` are unchanged.
+> 6. **Every Postgres single-statement atomicity guarantee is mapped to MongoDB, not weakened** (**D19**). The quota counter, the `telegram_inbound` claim, the payment grant, and the webhook throttle each map to a conditional `findOneAndUpdate`-with-upsert or an `insertOne` whose duplicate-key error (code `11000`) is the "already done" signal, with no read-then-write. The link-token consume-and-bind and the payment grant each span two documents and use a multi-document transaction. Atlas M0 is a three-node replica set, so transactions are available — recorded as **V33**.
+> 7. **The authentication library is chosen at implementation, and which one is a V-item.** A3 names no library. The design chooses between Auth.js (NextAuth v5) and Better Auth on the single criterion of which one supports the Next.js version installed in this repo (**D18a**, **V35**), reading `node_modules/next/dist/docs` first as `AGENTS.md` requires. Either way it runs inside the Web_App with the Google provider and a MongoDB adapter, its user and session records live in MongoDB, and Requirement 1's user-facing behaviour is unchanged. The D8 profile bootstrap becomes the library's sign-in / user-created hook plus the idempotent server-side upsert, and the E.164 story stays retired.
+> 8. **What A3 does not change.** The three shared services and their one-code-path parity (**D7**), the two-stage validation (**D2**), the single inconclusive shape (**D3**), the quota *semantics* (**D10** and the reserve/finalize/refund rule), the error-envelope shape, the media *lifecycle* (re-encode before upload, a derivative for list views, delete what nothing reads), and the whole prompting and grounding design are untouched in substance. Only their storage substrate and their isolation mechanism change. One thing the retention design gains: GridFS files carry an `uploadDate`, so the age-based orphan backstop that the retired V22 (U-V22b) left blocked under Supabase is now possible (see *Media lifecycle and retention*).
+>
+> **Decisions.** **D1** is amended in place — the upload leg now carries bytes through the Media_Endpoint, while the analysis request still carries only a Media_Reference. **D17** (one GridFS bucket), **D18** (the Data_Access_Layer), **D18a** (auth-library choice), and **D19** (atomicity mapping) are new and appear at the end of *Design decisions that resolve requirement tensions*. D2–D16 keep their numbers; **D8**, **D11**, **D14**, **D15**, and **D16** are amended in place where they named a Postgres statement, a trigger, RLS, or the service role. Each such amendment is a substrate change rather than a change of intent — every atomicity and ordering property those decisions rested on is preserved by **D19**, and where the argument for a decision was *the database makes this one statement*, the argument survives with the statement re-expressed in MongoDB.
+>
+> **V-items.** **V1**, **V3**, **V4**, **V5**, **V22**, and **V23** are retired in place — their numbers and findings kept, each pointing to its successor — because they named Supabase surfaces that no longer exist. New V-items **V28**–**V35** are added and every one is marked VERIFY, because resolving them is task work rather than a design assertion: the MongoDB Node.js driver (V28), GridFS (V29), the auth library and its MongoDB adapter (V30), `mongodb-memory-server` in replica-set mode (V31), Atlas M0's own limits (V32), transactions on M0 (V33), the Gemini/Groq inline-byte limits (V34), and the auth library's Next.js compatibility (V35).
+>
+> **Correctness Properties are amended by a separate run** and are deliberately untouched here. Where a property below still reads in Postgres/RLS/Storage vocabulary after this run, that is expected and is the other run's work — not a contradiction this amendment failed to resolve. The one place this matters for a reader is Property 3, whose 10 MB voice figure this amendment lowers to 3 MB everywhere *outside* the property set; the property itself is left to that run.
+
+---
+
 ## Values to verify before coding
 
 Every item below depends on a third-party detail that changes over time. **No value in this table is asserted as fact anywhere else in this design.** The first implementation task resolves this table and records the findings in the API/deployment documentation.
 
 | # | Value | Where it is used | Doc to check |
 | --- | --- | --- | --- |
-| V1 | Supabase JS client package name and version; browser vs. server client factory names; App Router cookie/session wiring | `src/lib/supabase/*` | Supabase JavaScript client and Next.js server-side auth guides |
+| V1 | **RETIRED by Amendment A3.** Was: Supabase JS client package/version and the browser-vs-server client factory wiring. There is no Supabase client and no browser database client anymore — server-only MongoDB access is **V28**, and the auth library's session wiring is **V30**/**V35** | — | — |
 | V2 | **RETIRED by Amendment A1.** Was: phone/SMS OTP enablement and which SMS provider to configure. Jamee registers no SMS provider at all. Superseded by **V23** | — | — |
-| V3 | Signed URL creation call, its expiry argument, and units (seconds vs. ms) | Requirements 2.8, 12.5 | Supabase Storage signed URL reference |
-| V4 | Storage RLS policy helper for path segments (the function that extracts the first folder of an object name) and the bucket-privacy setting name | Requirements 13.5, 13.6 | Supabase Storage access control docs |
-| V5 | Whether a trigger on `auth.users` is the supported profile-bootstrap pattern, and the required `security definer` / `search_path` form | Requirement 1.4 | Supabase auth + Postgres function security docs |
+| V3 | **RETIRED by Amendment A3.** Was: the Supabase signed-URL creation call and its expiry units. There are no signed URLs — files are streamed to their owner through the authenticated Media_Endpoint, and server-side analysis reads GridFS bytes directly (**V29**) | — | — |
+| V4 | **RETIRED by Amendment A3.** Was: the Supabase Storage RLS path-segment helper and the bucket-privacy setting. There is no storage RLS and no bucket privacy setting — ownership is `metadata.ownerId` on each GridFS file, checked by the Data_Access_Layer (**D18**, **V29**) | — | — |
+| V5 | **RETIRED by Amendment A3.** Was: whether an `auth.users` trigger is the supported profile-bootstrap pattern and its `security definer`/`search_path` form. There is no Postgres and no trigger — the bootstrap is now the auth library's sign-in / user-created hook plus an idempotent server-side upsert through the Data_Access_Layer (**D8**, **V30**) | — | — |
 | V6 | Google Gemini SDK package name, client initialization, and the **current multimodal model identifier** | `src/lib/gemini.ts` | Google Gemini API models documentation |
 | V7 | Gemini structured/JSON output configuration: parameter names for response MIME type, response schema, temperature, max output tokens | `src/lib/prompts.ts`, `gemini.ts` | Gemini structured output documentation |
 | V8 | Groq SDK package name, client initialization, and the **current text model identifier** for the fallback | `src/lib/groq.ts` | Groq models documentation |
@@ -66,12 +89,20 @@ Every item below depends on a third-party detail that changes over time. **No va
 | V19 | Free-tier allowances: Gemini RPM/RPD, Groq RPM/TPD, Supabase database size / storage / egress, Vercel invocation and duration allowances | Requirement 17.7 sizing note | Each provider's pricing/limits page |
 | V20 | MediaRecorder MIME support on target Android browsers (which container/codec actually records) and whether it matches V10's accepted list | `src/components/VoiceRecorder.tsx` | MDN MediaRecorder compatibility data |
 | V21 | Whether the deployment platform offers a **scheduled invocation** primitive on the target plan, its minimum interval, and how it authenticates the call it makes | Retention sweep trigger (Requirement 18.3, 18.4) | Deployment platform scheduled-jobs documentation |
-| V22 | Storage object **deletion and age query** surface: the batch delete call and its path semantics, whether deleting an absent object errors, and whether `storage.objects` exposes a creation timestamp usable for age filtering | `src/lib/storage.ts`, `src/services/retention.service.ts` (Requirements 8.9, 18.3, 18.4, 18.10) | Supabase Storage delete reference and storage schema docs |
-| V23 | Supabase Google OAuth: the `signInWithOAuth({ provider: 'google' })` call shape and its `redirectTo` option, the callback-route code-exchange helper name, where the Google client id and secret are configured, which redirect URLs must be registered, and which claim carries the Google email onto `auth.users` | `src/lib/supabase/*`, `src/app/auth/callback/route.ts` (Requirements 1.1–1.4) | Supabase social login (Google) and server-side auth docs |
+| V22 | **RETIRED by Amendment A3.** Was: the Supabase Storage batch-delete call, its path semantics, whether deleting an absent object errors, and whether `storage.objects` exposes a usable creation timestamp (the last part, U-V22b, blocked the age-based orphan backstop). GridFS answers all of this: `GridFSBucket.delete(id)`, and every file carries `uploadDate`, so the backstop is now possible — superseded by **V29** | — | — |
+| V23 | **RETIRED by Amendment A3.** Was: Supabase's `signInWithOAuth({ provider: 'google' })` call shape, its code-exchange helper, and where the Google client id/secret live. Google sign-in now runs through the chosen in-app auth library; its Google-provider and MongoDB-adapter wiring, and where the client id/secret are configured, are **V30**, and the library choice itself is **V35** | — | — |
 | V24 | Telegram Bot API **method and update shapes**: `setWebhook` including its `secret_token` parameter and any length/character constraints on that token; the exact header name Telegram presents it in; the `Update` field paths for `update_id`, `message.from.id`, `message.text`, `message.photo[]`, `message.voice`, and the `/start` payload; `sendMessage` request shape and its text length cap; and Telegram's **retry behaviour on a non-200 response**, which D11's acknowledgement reasoning depends on | `src/lib/telegram.ts`, `src/app/api/telegram/route.ts` (Requirements 10.1–10.11, 11.1–11.8) | Telegram Bot API reference |
 | V25 | Telegram **file retrieval**: `getFile(file_id)` → `file_path`, the download URL form built from the bot token and that path, the documented validity window of a `file_path`, and the bot-download size ceiling | Telegram adapter media fetch (Requirements 10.4, 10.6) | Telegram Bot API `getFile` reference |
 | V26 | Telegram **inbound media facts**: that a `voice` message is always OGG/Opus and how it differs from `audio` and `document`, the `mime_type` and `file_size` fields actually present on each, and which entry of the `photo[]` size array to take for diagnosis. This row carries the fact that makes Requirement 10.6 satisfiable, so it is load-bearing rather than incidental | `src/lib/telegram.ts` (Requirements 10.4, 10.6, 10.9) | Telegram Bot API message-type reference |
 | V27 | Razorpay: order-creation endpoint and request/response shape, which identifiers the browser checkout needs, the **webhook signature scheme** (header name, HMAC algorithm, encoding, and which secret keys it), the **event names** for a captured and a failed payment, the payload paths for the payment id, order id, amount, and status, and the difference between test and live mode credentials (requirements O22-3) | `src/lib/razorpay.ts`, `src/app/api/payment/*` (Requirements 22.1–22.11, 22.25) | Razorpay orders, checkout, and webhooks documentation |
+| V28 | **MongoDB Node.js driver** (added by A3): package name and version, the `MongoClient` construction and options, how the connection pool is reused across serverless invocations (the `globalThis`-cached client of **D19**) within the M0 connection limit, the duplicate-key error code (`11000`) and where it is exposed on the thrown error, the return shape of `findOneAndUpdate` (whether it returns the pre- or post-update document and under which option), and how a write against a `$jsonSchema` validator reports a validation failure | `src/lib/db/*` (the Data_Access_Layer) | MongoDB Node.js driver docs |
+| V29 | **GridFS** (added by A3): the `GridFSBucket` API for an upload stream and a download stream, how `metadata` is written and read, `bucket.delete(id)` and whether it errors on an absent id, the `files` collection fields available for a query (notably `uploadDate` for the age-based orphan backstop and `length`/`metadata`), and how a download stream is piped to a route Response | `src/lib/media/*`, `src/services/retention.service.ts` (Requirements 2.1, 2.8, 8.1, 8.9, 12.5, 18.3, 18.4, 18.10) | MongoDB GridFS docs |
+| V30 | **Auth library — provider and adapter** (added by A3): for the library chosen under **V35**, the Google-provider configuration, the MongoDB adapter package and how it is pointed at this database, the sign-in / user-created hook used for the D8 bootstrap, the server-side session-read call that replaces `src/proxy.ts`'s Supabase session check, where the Google client id/secret and the library secret are configured, and which callback/redirect URLs must be registered | `src/lib/auth/*`, `src/app/api/auth/*`, `src/proxy.ts` (Requirements 1.1–1.4) | The chosen library's Google-provider + MongoDB-adapter docs |
+| V31 | **`mongodb-memory-server` in replica-set mode** (added by A3): the package and version, how to start it as a single-node replica set so multi-document transactions work, its startup cost and any binary download it needs, and how the test harness points the Data_Access_Layer at it — this is what lets the integration project run without Docker and stop self-skipping | `tests/integration/*`, test setup | `mongodb-memory-server` docs |
+| V32 | **Atlas M0 limits** (added by A3): the cluster-storage allowance (documented ~512 MB), the concurrent-connection limit the cached pool must stay under, and any operation/throughput caps relevant at the 6-farmer scale — the successor to the Supabase storage/egress row of the retired V19 line for the storage dimension | Retention arithmetic, connection pooling (**D19**) | MongoDB Atlas M0 tier limits page |
+| V33 | **Transactions on M0** (added by A3): confirmation that a multi-document transaction runs on the M0 replica set, the session/transaction API on the Node.js driver, the retryable-write and transient-transaction-error semantics, and any M0-specific caveat — load-bearing for the link-token consume-and-bind and the payment grant (**D19**) | `src/services/linking.service.ts`, `src/services/payment.service.ts` | MongoDB transactions + driver session docs |
+| V34 | **Gemini and Groq inline-byte limits** (added by A3): the maximum inline (base64 / bytes-in-request) payload each provider accepts for an image, and for any audio sent inline, since analysis now reads bytes from GridFS and sends them inline rather than handing the provider a URL — if a re-encoded image or a voice file can exceed the inline limit, that bound is a hard input to the upload ceilings | `src/lib/gemini.ts`, `src/lib/groq.ts` | Gemini and Groq request-size docs |
+| V35 | **Auth library choice** (added by A3): which of Auth.js (NextAuth v5) or Better Auth supports the Next.js version installed in this repo, decided by reading `node_modules/next/dist/docs` first as `AGENTS.md` requires. This single fact selects the library that **V30** then configures (**D18a**) | `package.json`, `src/lib/auth/*` | `node_modules/next/dist/docs`, then each library's Next.js compatibility notes |
 
 Rule for implementation: if a V-item cannot be confirmed, the code must fail loudly at startup (missing env var / unsupported model) rather than fall back to a guessed value.
 
@@ -79,11 +110,17 @@ V21 and V22 were added by the media-lifecycle amendment. They are the only third
 
 V23 through V27 were added by Amendment A1, and V2 and V12–V15 were retired by it. The retired rows are left in place with their numbers rather than deleted, because `docs/VERIFIED_VALUES.md` resolved several of them with source URLs and dated notes, and a reader arriving from that file needs to find the number they came for and learn that it no longer applies. Note what the retirement costs: V14's resolved row is the only record of why Requirement 10.6 was unsatisfiable under the old channel, and V13's is the only record of the signature-encoding ambiguity Jamee had to accept. Both problems are now historical, and **D12** says why the replacement is not a downgrade.
 
+V28 through V35 were added by Amendment A3, and V1, V3, V4, V5, V22, and V23 were retired by it — for the same reason A1's retirements were left in place: `docs/VERIFIED_VALUES.md` may have resolved a Supabase row with a dated note, and a reader arriving from that file must find the number they came for and be sent to its successor rather than meeting a gap. The A3 rows cluster by concern: V28/V29/V33 are the MongoDB driver, GridFS, and transactions the data layer and media store are built on; V30/V35 are the auth library and its Next.js fit; V31 is the test harness that makes the integration project run without Docker; V32 is the M0 allowance the retention arithmetic is sized against; and V34 is the one A3 adds because analysis bytes now travel *inline* to the providers rather than by URL. Every one is VERIFY, because A3 changed the substrate and none of these facts is asserted anywhere else in this design.
+
 ---
 
 ## Design decisions that resolve requirement tensions
 
-**D1 — `/api/diagnose` takes JSON, not multipart.** Requirement 2.2 mandates a JSON body carrying a storage reference, while Requirement 2.3 allows images up to 10 MB and Requirement 2.7 requires bodies under the platform ceiling (spec: 4.5 MB, V16). A multipart upload of a 10 MB image cannot satisfy both. The browser therefore uploads directly to Storage and posts a reference; the API reads bytes through a signed URL (Requirement 2.8). Consequence: request bodies are ~200 bytes regardless of image size, and the 10 MB allowance is real rather than nominal. The same reasoning applies to `/api/voice`.
+**D1 — `/api/diagnose` takes JSON, not multipart, and the bytes move on a separate upload leg.** *Amended by Amendment A3.* Requirement 2.2 mandates a JSON body carrying a media reference, while Requirement 2.3 allows images up to 10 MB and Requirement 2.7 requires bodies under the platform ceiling (spec: 4.5 MB, V16). A multipart upload of a 10 MB image cannot satisfy both. The analysis request therefore stays JSON and carries only a Media_Reference; the request body is ~200 bytes regardless of image size, and `/api/voice` follows the same reasoning.
+
+What A3 changes is *where the bytes go before that request*. Under Supabase the browser uploaded directly to Storage and the API later read the bytes through a signed URL. There is no browser-reachable object store anymore and no signed URL, so the browser now uploads the re-encoded file to an authenticated Jamee endpoint — the **Media_Endpoint** — which writes it to GridFS and returns the Media_Reference the analysis request then carries. So the byte-carrying leg moves *through* Jamee rather than around it, and it is a real upload subject to the 4.5 MB Request_Body_Ceiling: the re-encoded Full_Size_Image (Downscale_Target ~400 KB) and the voice file (Requirement 8's limit lowered to 3 MB by A3, precisely so it clears the ceiling with headroom) both fit. The analysis leg is unchanged — it never carried bytes and still does not. Server-side, the Diagnosis_Service reads the image bytes from GridFS by their Media_Reference and sends them **inline** to the model provider rather than handing over a URL (inline-byte limits are V34).
+
+The distinction that matters for a reader of the old design: "the browser never sends bytes to the API" was true of a world with a direct-to-storage upload. Under A3 the honest statement is narrower and is the one this decision now makes — *the analysis request never carries bytes; the upload leg does, and it is bounded by the ceiling rather than by the 10 MB admission limit.*
 
 **D2 — Validation is two-stage, so rejection reasons are distinguishable.** Requirement 5 wants a strict schema; Requirement 6.1 needs to know *specifically* that the rejection was an out-of-KB disease name. A single strict enum schema would report "parse failed" for both a malformed JSON blob and a real-but-unsupported disease. Stage 1 validates shape (`status`, `disease_name` as free string, `confidence`, `severity`, flags). Stage 2 checks knowledge-base membership. Both stages log a distinct `rejection_reason` (Requirement 5.7).
 
@@ -99,11 +136,13 @@ V23 through V27 were added by Amendment A1, and V2 and V12–V15 were retired by
 
 The amendment adds a guard and takes nothing away. Under Requirement 22.13 an update from a linked farmer who holds no entitlement produces no Diagnosis_Result at all — the gate replies and returns before any service is invoked — so there is nothing on the Telegram side to compare, and an unguarded parity claim would be *unsatisfiable* for that farmer rather than merely unexercised. Parity is therefore stated as: **where the submitting farmer holds a Bot_Entitlement**, the two channels agree on those four fields. Where the guard does not hold, the correct Telegram outcome is the gated reply of 22.14, and that is not a parity failure. Note what the guard does not do: it does not weaken parity where it applies, and it introduces no entitlement-dependent branch inside `DiagnosisService`. The gate lives in the adapter, ahead of the service (**D14**), so the service still has exactly one behaviour and the parity test still exercises one code path.
 
-**D8 — Profile creation uses a database trigger plus an idempotent server-side upsert, and it copies no phone number.** *Amended by Amendment A1.* Requirement 1.4 attributes profile creation to the Web_App. A purely client-driven insert can be skipped — the farmer closes the tab on the callback — and a farmer with no `profiles` row has no preferred language, no linking state, and nothing for an entitlement to hang off. So the obligation survives unchanged: an `on auth.users insert` trigger writes the row, and the post-sign-in server action upserts defensively. V5 records that Supabase documents the trigger as the supported pattern *and* warns that a failing trigger blocks sign-up, which is precisely why the upsert is the second half rather than the whole mechanism.
+**D8 — Profile creation uses the auth library's sign-in hook plus an idempotent server-side upsert, and it copies no phone number.** *Amended by Amendment A1, then by Amendment A3.* Requirement 1.4 attributes profile creation to the Web_App. A purely client-driven insert can be skipped — the farmer closes the tab on the callback — and a farmer with no `profiles` document has no preferred language, no linking state, and nothing for an entitlement to hang off. So the obligation survives unchanged: the bootstrap fires from a place the client cannot skip, and the post-sign-in server action upserts defensively.
 
-What changes is what gets copied. The trigger now writes `(id, email)` from the new `auth.users` row and writes **no** phone (Requirement 1.4 is explicit that the bootstrap stores no phone number). The `profiles.phone` column survives as nullable optional contact information with no constraint and no reader (Requirement 1.9).
+*A3 replaces the mechanism, not the obligation.* Under Supabase this was an `on auth.users insert` Postgres trigger plus the upsert. There is no Postgres and no `auth.users` table anymore: the first half is now the chosen auth library's **sign-in / user-created hook** (V30), which runs server-side when the library establishes a first session, and the second half is the same idempotent upsert, performed through the Data_Access_Layer (**D18**) into the `profiles` collection. The V5 worry that a failing trigger could block sign-up is gone with the trigger; the upsert remains the defensive second half so that a hook that does not fire — or fires before the library commits its own user record — still leaves a `profiles` document behind on the next authenticated request.
 
-**The E.164 normalizer goes away with it, and this is worth stating rather than leaving a reader to notice a deletion.** Under phone identity the bootstrap had a production-blocking defect: Supabase Auth stores `auth.users.phone` with the leading `+` stripped, while `profiles.phone` carried a `check (phone ~ '^\+[1-9][0-9]{7,14}$')` constraint and inbound WhatsApp senders arrived as a bare `wa_id`. The trigger, the constraint, and the adapter therefore disagreed about the same value's format, and every path that touched a phone needed a normalizer plus a test asserting the `+` was restored — a normalizer that, if it ever ran in only two of the three places, would have produced a sign-up that failed or a sender that resolved to nobody. None of that exists now. There is no format to reconcile, because the identity is a uuid the database generates and the trigger copies verbatim: `auth.users.id` → `profiles.id`. The normalizer is **not lost, it is unnecessary** — the problem it patched is gone with the identity that created it. Telegram senders resolve through `profiles.telegram_user_id`, a numeric id written only by the linking flow (**D13**), never parsed out of a message and never reformatted.
+What changes is what gets copied. The bootstrap now writes `(_id, email)` — the Auth_User_Id the library assigned, and the Google email — into the `profiles` collection and writes **no** phone (Requirement 1.4 is explicit that the bootstrap stores no phone number). *Amended by A3: the `auth.users` row and its trigger are gone; the same two values now come from the auth library's session/user record and are written by the sign-in hook and the defensive upsert (V30).* The `profiles.phone` field survives as nullable optional contact information with no constraint and no reader (Requirement 1.9).
+
+**The E.164 normalizer goes away with it, and this is worth stating rather than leaving a reader to notice a deletion.** Under phone identity the bootstrap had a production-blocking defect: Supabase Auth stores `auth.users.phone` with the leading `+` stripped, while `profiles.phone` carried a `check (phone ~ '^\+[1-9][0-9]{7,14}$')` constraint and inbound WhatsApp senders arrived as a bare `wa_id`. The trigger, the constraint, and the adapter therefore disagreed about the same value's format, and every path that touched a phone needed a normalizer plus a test asserting the `+` was restored — a normalizer that, if it ever ran in only two of the three places, would have produced a sign-up that failed or a sender that resolved to nobody. None of that exists now. There is no format to reconcile, because the identity is an opaque id the auth layer assigns and the bootstrap copies verbatim onto the Profile — under A1 that was `auth.users.id` → `profiles.id`, and *under A3 it is the auth library's user id → `profiles._id` (V30)*, a substrate change that leaves the argument intact: the id is generated once, never parsed, never reformatted. The normalizer is **not lost, it is unnecessary** — the problem it patched is gone with the identity that created it. Telegram senders resolve through `profiles.telegram_user_id`, a numeric id written only by the linking flow (**D13**), never parsed out of a message and never reformatted.
 
 **D9 — Chat language follows the message, resolved by the model, not by a script detector.** Requirement 9.6 requires answering in the language of the submitted message. Hindi and Marathi share the Devanagari script and cannot be separated by a character-range check. The chat prompt receives the farmer's preferred language *and* an instruction to answer in the message's language when that language is en/hi/mr. Requirement 9.5 still rejects unsupported explicit language codes at the edge with HTTP 400.
 
@@ -131,7 +170,7 @@ This reads like a weaker primitive than an HMAC and is not, for three reasons wo
 
 Putting the gate in the adapter rather than inside the services is what keeps **D7**'s parity claim testable and Requirement 22.17's "the web stays free" true by construction: the services have no entitlement parameter, cannot consult one, and so cannot accidentally start gating the web channel. A gated update reserves no quota unit, persists no row, and invokes no service (Requirement 22.13), which puts it in the same class as a duplicate delivery — acknowledged with 200 and audited by the `telegram_inbound` row alone.
 
-**The entitlement is keyed to the `Auth_User_Id`, never to a `Telegram_User_Id`** (Requirements 22.12, 22.20). The farmer paid, not the chat account. Keying it to the chat account would mean that unlinking discards a purchase, that re-linking from a new phone requires paying twice, and that a farmer who loses access to a Telegram account loses a permanent entitlement — three support problems manufactured by a schema choice. With the auth user id as the key, `unlink` clears one nullable column and costs nothing (Requirement 21.15), the entitlement row is untouched, and the farmer's next binding is served without further payment (Requirement 22.19). It also makes the `UNIQUE` constraint the right one: at most one entitlement per farmer, which is exactly the "one-time, permanent" semantics, whereas a Telegram-keyed row would permit one farmer to accumulate several.
+**The entitlement is keyed to the `Auth_User_Id`, never to a `Telegram_User_Id`** (Requirements 22.12, 22.20). *Amended by A3 — substrate only; the keying argument is unchanged.* The farmer paid, not the chat account. Keying it to the chat account would mean that unlinking discards a purchase, that re-linking from a new phone requires paying twice, and that a farmer who loses access to a Telegram account loses a permanent entitlement — three support problems manufactured by a schema choice. With the auth user id as the key, `unlink` clears one nullable field (`profiles.telegram_user_id`) and costs nothing (Requirement 21.15), the entitlement document is untouched, and the farmer's next binding is served without further payment (Requirement 22.19). It also makes the right uniqueness the natural one: under A3 the `bot_entitlements` collection uses the Auth_User_Id as its `_id`, so at most one entitlement per farmer holds by the primary-key uniqueness of `_id` itself — exactly the "one-time, permanent" semantics — whereas a Telegram-keyed document would permit one farmer to accumulate several. (Under Supabase this was a `UNIQUE`/primary-key column; the guarantee is identical.)
 
 **D15 — The payment webhook is trusted only after a signature over the raw body, and its idempotency is a claim rather than a read.** This is the one Jamee write path reachable with no farmer session at all (Requirement 22.24), so three properties carry the whole boundary.
 
@@ -139,13 +178,41 @@ Putting the gate in the adapter rather than inside the services is what keeps **
 
 *An absent secret is a failed verification, not a skipped one* (Requirement 22.6). The tempting implementation is `if (secret) verify(...)`, which is a deployment where someone forgot an environment variable turning into a deployment where anyone can grant themselves an entitlement by POSTing a JSON body. The check is written so the unconfigured case falls into the same 401 branch as a wrong signature, and `serverEnv` fails loudly at first use besides.
 
-*Idempotency is a `UNIQUE` claim on the provider's payment id, not a read-then-write* (Requirement 22.11). Razorpay retries, and a retry that arrives while the first delivery is still inside the handler would pass a `select … where payment_id = ?` check twice. So the grant is an `insert … on conflict do nothing` on a column carrying a `UNIQUE` constraint, and a zero-row result **is** the duplicate signal — acknowledge 200, change nothing (Requirement 22.10). This is the third instance of the same pattern in this design (the quota counter, the `update_id` claim, this), and the reason is identical each time: under `read committed`, a check and a write in two statements is a race, and the database is the only thing that can make them one.
+*Idempotency is a `UNIQUE` claim on the provider's payment id, not a read-then-write* (Requirement 22.11). Razorpay retries, and a retry that arrives while the first delivery is still inside the handler would pass a `select … where payment_id = ?` check twice. So the grant is an `insert … on conflict do nothing` on a column carrying a `UNIQUE` constraint, and a zero-row result **is** the duplicate signal — acknowledge 200, change nothing (Requirement 22.10). *Amended by A3: the same claim is a unique index on `bot_entitlements.providerPaymentId` and an `insertOne` whose duplicate-key error (code `11000`) is the "already granted" signal — see **D19**; the grant additionally spans two documents (claim the payment id, extend the window), so under A3 it runs in a multi-document transaction rather than as one statement, and the argument that the database and not the handler makes it atomic survives the substrate change.* This is the third instance of the same pattern in this design (the quota counter, the `update_id` claim, this), and the reason is identical each time: under `read committed`, a check and a write in two statements is a race, and the database is the only thing that can make them one.
 
 *Only the verified payload plus the recorded Payment_Order determine who paid what* (Requirement 22.7). The browser reports a checkout success too, and that report grants nothing — it only tells the UI to start showing an optimistic "confirming your payment" state. The amount, the currency, and the owning farmer are all server-side (Requirement 22.2), so a tampered request body cannot buy an entitlement for a different farmer or at a different price.
 
-**D16 — The payment webhook is rate limited per caller, which needs a limiter that does not require a farmer.** Requirement 13.9 asks for a bound on the work one caller can drive on the payment webhook route, and this collides with the existing limiter: `counters` is keyed on `user_id` with a `not null` foreign key to `profiles`, and on this route there is no farmer to key on until a signature verifies — and a caller whose signatures never verify never produces one. Reusing `counters` is therefore impossible rather than merely awkward.
+**D16 — The payment webhook is rate limited per caller, which needs a limiter that does not require a farmer.** *Amended by A3 — substrate only; the reasoning is unchanged.* Requirement 13.9 asks for a bound on the work one caller can drive on the payment webhook route, and this collides with the existing limiter: the `counters` collection is keyed on the owning Auth_User_Id (a required field that must reference a real Profile), and on this route there is no farmer to key on until a signature verifies — and a caller whose signatures never verify never produces one. Reusing `counters` is therefore impossible rather than merely awkward.
 
-Decision: a separate `webhook_throttle` table keyed on an opaque caller key and a minute window, with no foreign key and no farmer column, incremented by the same single-statement `on conflict … where used < limit` pattern as `counter_try_increment` (see migration 0013). The caller key is a hash of the platform-reported client address, never the raw address, so the table holds no retained network identifier. This is stated with its limitation rather than oversold: a client address is shared behind NAT and forgeable at scale, so this bound is a cost control, not an authentication control. The actual defence is ordering — verification is one HMAC over an already-read body and precedes every database write and every allocation — so an unauthenticated flood costs an invocation and a hash, and the limiter's job is only to stop even that from consuming the free-tier invocation allowance. The same table serves the Telegram webhook route, which has the identical shape of problem for the same reason.
+Decision: a separate `webhook_throttle` collection keyed on an opaque caller key and a minute window, with no reference to a Profile and no farmer field, incremented by the same single-statement conditional upsert as the quota counter — under A3 a `findOneAndUpdate` with `upsert:true` whose filter carries `used < limit`, mirroring `counter_try_increment` (**D19**). The caller key is a hash of the platform-reported client address, never the raw address, so the collection holds no retained network identifier. This is stated with its limitation rather than oversold: a client address is shared behind NAT and forgeable at scale, so this bound is a cost control, not an authentication control. The actual defence is ordering — verification is one HMAC over an already-read body and precedes every database write and every allocation — so an unauthenticated flood costs an invocation and a hash, and the limiter's job is only to stop even that from consuming the free-tier invocation allowance. The same collection serves the Telegram webhook route, which has the identical shape of problem for the same reason.
+
+**D17 — Files live in one GridFS bucket distinguished by `metadata.kind`, not two buckets.** *Added by Amendment A3.* Requirement 2 stores full-size crop images and their thumbnails; Requirement 8 stores voice recordings. Under Supabase these were two private buckets, `crop-images` and `voice-messages`, and the natural port is two GridFS buckets (`crop_images`, `voice_messages`). The design chooses **one** bucket instead, with each file carrying `metadata.kind` of `crop-image`, `thumbnail`, or `voice`. The reasoning, because the two-bucket instinct is strong:
+
+- **A GridFS bucket is not a security boundary the way a private Supabase bucket was.** A Supabase bucket carried its own RLS policies, so a bucket boundary *was* an isolation boundary and splitting media across two was splitting policy. Under A3 there is no storage RLS at all — isolation is `metadata.ownerId` checked by the Data_Access_Layer (**D18**) — so a second bucket buys no isolation, it only adds a second `.files`/`.chunks` collection pair and a second set of indexes to create in `db:setup`.
+- **Every access path already filters on `metadata` regardless.** The Media_Endpoint's owner check reads `metadata.ownerId`; the retention sweep already has to tell a `crop-image` original from a `thumbnail` (it deletes the first and keeps the second) and a `voice` original from either. That is a `metadata.kind` predicate whether the files sit in one bucket or three, so a bucket split would not remove a single filter — it would only move some of them into a bucket name.
+- **One bucket keeps the setup script and the connection story smaller.** On Atlas M0, where the connection count and the collection count both matter, one bucket is one pair of collections and one `GridFSBucket` handle to cache. The `metadata.kind` index plus a compound `{ 'metadata.ownerId': 1, 'metadata.kind': 1 }` index serve every query the two-bucket layout would have served with two separate indexes.
+
+What each file carries, then, is: `metadata.kind` (`crop-image` | `thumbnail` | `voice`), `metadata.ownerId` (the Auth_User_Id), and `metadata.sourceRef` — a link to the file's source. For a `thumbnail` that is the `_id` of its Full_Size_Image, which replaces the Supabase `.thumb`-infix path convention with an explicit stored link (Requirement 2.13); for a `crop-image` or `voice` original it is the `_id` of the `diagnoses` or `messages`/request document that references it, which is what the retention sweep's row-driven scan and its age-driven backstop both key on. GridFS's own `uploadDate` gives the age-driven backstop the timestamp the retired V22 could not get from `storage.objects`. The one cost of a single bucket, stated rather than hidden: a query that wants "all of one kind" must carry the `metadata.kind` filter and cannot lean on a bucket name, which is why the compound index above exists.
+
+**D18 — Tenant isolation is a Data_Access_Layer, and a CI check makes it the only holder of the driver.** *Added by Amendment A3.* Supabase RLS made isolation a property the database enforced on every query, including ones a route handler wrote carelessly. MongoDB has no row-level security, so that guarantee has to be relocated, and A3 records plainly that relocating it from the database into the application is a **weakening** accepted for an academic build (Requirement 5 of A3). The design makes the weakened form as strong as an application can make it:
+
+- **One module holds the `MongoClient` and the database handle.** `src/lib/db/*` — the Data_Access_Layer — is the only code that imports the `mongodb` driver or touches the raw handle. Every other module (route handlers, the three shared services, the access services, the Telegram adapter, the retention sweep) reaches data only through farmer-scoped accessors this layer exposes.
+- **The accessors inject the owner id — they do not accept an unscoped query.** An accessor takes the Auth_User_Id as a mandatory argument and merges `{ ownerId }` into every filter, and sets it on every insert; an update or delete cannot widen past it. There is deliberately no `find(arbitraryFilter)` seam that a caller could hand a filter with no owner in it. This is the structural analogue of the old rule "every service-role query carries an explicit `user_id` predicate" — A3 turns that review guideline into a module boundary.
+- **A CI check fails the build if the boundary is crossed.** `scripts/check-data-access.ts` (the sibling of the existing `check-secret-scope.ts`) asserts that no file outside `src/lib/db/**` imports `mongodb` or the raw handle. This is the same technique the design already uses to keep `profiles.phone` reader-free and secrets server-only: an *absence* enforced by a static check, because no behavioural test can prove an unscoped query is un-writable — only that the ones that exist happen to be scoped.
+
+The honest weakness, named as A3 requires: this is application-enforced. A defect *inside* the Data_Access_Layer — an accessor that forgets to merge the owner id — would breach isolation in a way RLS would have caught, and the CI check cannot see that, because the offending code is *in* the layer it trusts. So the layer is small, every accessor is unit-tested for the owner-id merge, and the integration suite attempts cross-farmer reads and writes and asserts they return nothing or fail (the MongoDB analogue of the old RLS cross-tenant test). Uniqueness, by contrast, stays database-enforced: a unique index is still the database's job, so the invariants that were `UNIQUE` in Postgres are exactly as strong under MongoDB (**D19**).
+
+**D18a — The auth library is whichever of Auth.js or Better Auth fits the installed Next.js, decided by reading the bundled docs first.** *Added by Amendment A3.* A3 requires an in-app auth library with the Google provider and a MongoDB adapter but names none, leaving the choice to the design. The two credible candidates are Auth.js (NextAuth v5) and Better Auth. The deciding criterion is not preference but **compatibility with the Next.js version installed in this repo** (V35), and `AGENTS.md` is explicit that this Next.js may differ from training-data assumptions and that `node_modules/next/dist/docs` must be read before writing code against it. So the implementation task reads those bundled docs, establishes the installed major/minor, and picks the library whose current release supports it — Auth.js if its v5 line matches, Better Auth otherwise, on the same footing. Whichever is chosen: it runs inside the Web_App, uses Google as the OAuth provider, stores its user and session records in MongoDB through its MongoDB adapter, provides the sign-in / user-created hook the D8 bootstrap fires from, and provides the server-side session check that replaces the Supabase session refresh formerly in `src/proxy.ts`. The environment names for the library secret and the Google client id/secret follow the chosen library's own convention (V30), which is why the *Security boundary* env table lists them by role rather than by a fixed name.
+
+**D19 — Every Postgres single-statement atomicity guarantee maps to a specific MongoDB operation, none of them a read-then-write.** *Added by Amendment A3.* The Supabase design leaned four times on the same principle — *a check and a write in two statements is a race, so make the database do it in one* — for the quota counter, the `telegram_inbound` claim, the payment grant, and the webhook throttle, plus the link-token consume-and-bind. A3 preserves every one of those guarantees by mapping it to a MongoDB operation with the same all-or-nothing property, and the connection pool that carries them is one `MongoClient` cached on `globalThis` so serverless invocations reuse it within the M0 connection limit (V28, V32). The mapping, guarantee by guarantee:
+
+- **Quota counter (Requirements 14.1–14.3).** The Postgres `insert … on conflict do update … where used < limit returning used` becomes a `findOneAndUpdate` with `upsert:true`, a filter of `{ ownerId, operation, windowKind, windowKey, used: { $lt: limit } }`, an update of `{ $inc: { used: 1 } }`, and `returnDocument:'after'`. The unique index on `{ ownerId, operation, windowKind, windowKey }` is what makes the upsert safe: two concurrent reserves at the boundary cannot both create the document, and the second sees a `used` already at the limit. A limit-reached reserve produces either no returned document or a duplicate-key error (`11000`) on the upsert, and both mean "declined" — no read-then-write, exactly as before. The refund is a guarded `$inc: { used: -1 }` with a `used > 0` filter, so it never drives the count below zero. `findOneAndUpdate`'s exact return shape is V28.
+- **`telegram_inbound` claim (Requirements 11.5–11.8, D11).** The Postgres `insert` whose primary-key violation was the duplicate signal becomes `insertOne` into `telegram_inbound` with `_id` equal to the Telegram `update_id`. A duplicate delivery raises a duplicate-key error (`11000`), and that error — not a preceding read — is the signal to acknowledge 200 and do nothing. `_id` being the `update_id` means the uniqueness is the primary key itself, so no secondary index is needed and the claim precedes every billable step exactly as D11 requires.
+- **Link-token consume-and-bind (Requirements 21.7, 21.13, D13).** This one spans two documents — consume the token and set `profiles.telegram_user_id` — so it cannot be a single statement and instead runs in a **multi-document transaction** (available because Atlas M0 is a replica set, V33). Inside the transaction: a `findOneAndUpdate` on `link_tokens` filtered `{ tokenHash, consumedAt: null, expiresAt: { $gt: now } }` setting `consumedAt`, whose returned document *is* the authorization (no document → unknown/expired/consumed, all one reply); then the bind write on `profiles`. A duplicate-key error on the unique `profiles.telegram_user_id` index inside the transaction aborts it, which leaves the token unconsumed and both profiles unchanged — precisely Requirement 21.13. The atomicity that Postgres gave through one statement plus `RETURNING`, MongoDB gives through the transaction boundary.
+- **Payment grant (Requirements 22.10, 22.11, D15).** Also two documents — claim the `providerPaymentId` and extend the entitlement window — so it runs in a transaction. The claim is an `insertOne` into `bot_entitlements` (with `_id` = Auth_User_Id, and a unique index on `providerPaymentId`); a duplicate-key error (`11000`) on either key is the "already granted" duplicate signal. The window extension must equal `nextExpiry` from `src/lib/config/access.ts` — the later of now and the current expiry plus 7 days — and it happens in the *same* transaction as the claim, so a crash between the two cannot leave a grant without its window and a redelivery cannot double-extend: the second delivery loses the claim and its extension never runs.
+- **Webhook throttle (Requirement 13.9, D16).** The same conditional upsert as the quota counter, on the `webhook_throttle` collection keyed `{ route, callerHash, windowKey }` with a `used < limit` filter — one operation, no read-then-write, for the same reason.
+
+The through-line A3 does not break: in every case the *database* makes the check-and-write atomic, and the handler never reads-then-writes. What changes is the primitive — a conditional upsert or an `insertOne`-with-duplicate-key where one Postgres statement sufficed, and a multi-document transaction where the work genuinely spans two documents. The duplicate-key code (`11000`), the `findOneAndUpdate` return shape, and the transaction/session semantics on M0 are V28 and V33; the design commits to the *pattern* and defers only those third-party specifics.
 
 ---
 
@@ -155,12 +222,12 @@ Decision: a separate `webhook_throttle` table keyed on an opaque caller key and 
 
 | Layer | Responsibility | Must not |
 | --- | --- | --- |
-| **Route handlers** (`src/app/api/*`) | Session check, Zod-parse the request, resolve language, call one service, map result/error to HTTP | Contain agronomy, prompt text, provider calls, or SQL |
-| **Domain services** (`src/services/*`) | Diagnosis, Chat, Voice orchestration: ownership check → quota reserve → provider call → validation → KB grounding → persistence. Accept `channel` as a parameter (Requirement 16.5) | Know anything about HTTP, cookies, or Telegram payloads; consult a Bot_Entitlement (D14) |
+| **Route handlers** (`src/app/api/*`) | Session check, Zod-parse the request, resolve language, call one service, map result/error to HTTP | Contain agronomy, prompt text, provider calls, or a raw database query — under A3, import the `mongodb` driver or the database handle at all (**D18**) |
+| **Domain services** (`src/services/*`) | Diagnosis, Chat, Voice orchestration: ownership check → quota reserve → provider call → validation → KB grounding → persistence. Accept `channel` as a parameter (Requirement 16.5) | Know anything about HTTP, cookies, or Telegram payloads; consult a Bot_Entitlement (D14); hold the database handle — they reach data only through the Data_Access_Layer (**D18**) |
 | **Access services** (`src/services/linking.service.ts`, `entitlement.service.ts`, `payment.service.ts`) | Mint and atomically consume a Link_Token, bind or clear a `telegram_user_id`, create a Payment_Order, grant a Bot_Entitlement, answer "does this farmer hold one" | Produce farmer-facing agronomy, call a model provider, or touch a quota counter |
 | **AI gateway** (`src/lib/ai/gateway.ts`) | Capability-based provider selection, fallback policy (Requirement 14.4), returns raw provider text plus which provider served it | Interpret content or decide farmer-facing messaging |
 | **Provider adapters** (`gemini.ts`, `groq.ts`) | One provider each: request shaping, error classification into `RATE_LIMIT` / `UNAVAILABLE` / `OTHER` | Retry across providers |
-| **Repositories + storage** (`src/lib/db/*`, `src/lib/storage/*`) | Typed Supabase access, signed URLs, service-role isolation | Leak the service-role client toward the browser |
+| **Data_Access_Layer + Media store** (`src/lib/db/*`, `src/lib/media/*`) | *Amended by A3.* The only holder of the `MongoClient` and the database handle; exposes farmer-scoped accessors that inject the owner id into every read, write, and delete (**D18**); reads/writes GridFS files by `metadata` (**D17**). Replaces the former typed-Supabase repositories, signed URLs, and service-role client | Expose an unscoped accessor, or let any module outside this layer import the `mongodb` driver or the raw handle (CI-enforced) |
 
 ### System diagram
 
@@ -176,6 +243,7 @@ graph TB
             RD["/api/diagnose"]
             RC["/api/chat"]
             RV["/api/voice"]
+            RMU["/api/media (upload + owner-checked serve)"]
             RT["/api/telegram"]
             RL["/api/link/token"]
             RPO["/api/payment/order"]
@@ -195,7 +263,7 @@ graph TB
         TGA["TelegramAdapter<br/>secret token + update_id claim<br/>+ profile resolve + entitlement gate"]
         GW["AiGateway<br/>capability routing + fallback"]
         VAL["Validation_Layer (Zod)"]
-        REPO["Repositories + Storage helpers"]
+        DAL["Data_Access_Layer<br/>owner-scoped accessors + GridFS"]
     end
 
     subgraph Providers["External providers"]
@@ -206,14 +274,14 @@ graph TB
         RZP["Razorpay - VERIFY order + webhook scheme"]
     end
 
-    subgraph Supabase
-        AUTH["Auth - Google OAuth"]
-        DB[("Postgres + RLS")]
-        ST[("Private buckets<br/>crop-images / voice-messages")]
+    subgraph MongoDB["MongoDB Atlas (M0)"]
+        AUTH["Auth library<br/>Google OAuth + MongoDB adapter"]
+        DB[("Collections<br/>profiles, diagnoses, ...")]
+        GFS[("GridFS bucket<br/>metadata.kind: crop-image / thumbnail / voice")]
     end
 
-    BROWSER -->|"signed direct upload"| ST
-    BROWSER -->|"JSON: storage ref + language"| RD
+    BROWSER -->|"upload re-encoded file"| RMU
+    BROWSER -->|"JSON: Media_Reference + language"| RD
     BROWSER --> RC
     BROWSER --> RV
     BROWSER -->|"Google sign-in"| AUTH
@@ -226,8 +294,9 @@ graph TB
     RT --> TGA
     TGA -->|"getFile + file download"| TAPI
     TGA -->|"sendMessage reply"| TAPI
-    TGA -->|"service-role upload"| ST
+    TGA -->|"write to GridFS (owner = resolved profile)"| DAL
 
+    RMU --> DAL
     RD --> DS
     RC --> CS
     RV --> VS
@@ -252,19 +321,19 @@ graph TB
     GW -.->|"fallback"| GRQ
     GW --> WHS
     GW --> VAL
-    VAL --> REPO
-    DS --> REPO
-    CS --> REPO
+    VAL --> DAL
+    DS --> DAL
+    CS --> DAL
     QS --> DB
     LS --> DB
     ES --> DB
     PS --> DB
     PS --> RZP
-    REPO --> DB
-    REPO --> ST
+    DAL --> DB
+    DAL --> GFS
 ```
 
-Two edges in that diagram are the whole access story. `TGA --> ES` is the gate: it resolves before any edge into `Domain` is taken, so a farmer with no entitlement never reaches a shared service (**D14**). `RPW --> PS` is the only path that grants one, and it is the only inbound edge in the diagram with no farmer session behind it, which is why **D15** treats its signature check as the entire boundary.
+Two edges in that diagram are the whole access story. `TGA --> ES` is the gate: it resolves before any edge into `Domain` is taken, so a farmer with no entitlement never reaches a shared service (**D14**). `RPW --> PS` is the only path that grants one, and it is the only inbound edge in the diagram with no farmer session behind it, which is why **D15** treats its signature check as the entire boundary. *Amended by A3:* every edge into `DB` or `GFS` now runs through the `Data_Access_Layer` node — there is no browser-to-storage edge and no route or service that reaches MongoDB directly (**D18**), and the browser's upload leg goes to `RMU` (the Media_Endpoint), never to the store.
 
 ### Diagnosis sequence — both channels converge
 
@@ -278,16 +347,17 @@ sequenceDiagram
     participant ES as EntitlementService
     participant DS as DiagnosisService (shared)
     participant Q as QuotaService
-    participant ST as Supabase Storage
+    participant DAL as Data_Access_Layer<br/>(collections + GridFS)
     participant GW as AiGateway
     participant V as Validation_Layer
-    participant DB as Postgres
 
     rect rgb(238,245,255)
-    note over B,RH: Web path
-    B->>ST: direct upload to crop-images/{user_id}/...
-    ST-->>B: storage reference
-    B->>RH: POST {bucket, path, language, conversationId?}
+    note over B,RH: Web path (Amendment A3)
+    B->>RH: POST /api/media (re-encoded bytes, multipart, < 4.5 MB)
+    RH->>DAL: write GridFS file (metadata.kind, ownerId, sourceRef)
+    DAL-->>RH: fileId
+    RH-->>B: Media_Reference {fileId, kind:'crop-image'}
+    B->>RH: POST /api/diagnose {mediaRef, language, conversationId?}
     RH->>RH: session check (401 if absent)
     note right of RH: no Bot_Entitlement check here (Req 22.17)
     end
@@ -296,40 +366,40 @@ sequenceDiagram
     note over T,ES: Telegram path - order fixed by Req 22.16
     T->>RH: webhook POST + X-Telegram-Bot-Api-Secret-Token
     RH->>AD: constant-time secret token compare (401, body unparsed)
-    AD->>DB: insert update_id (unique)
-    note right of AD: duplicate -> 200, zero quota, no service call
-    AD->>DB: resolve profiles.telegram_user_id -> profile
+    AD->>DAL: insertOne telegram_inbound (_id = update_id)
+    note right of AD: duplicate-key 11000 -> 200, zero quota, no service call
+    AD->>DAL: resolve profiles.telegram_user_id -> profile
     note right of AD: no profile -> linking instructions, zero quota
     AD->>ES: holdsEntitlement(profile.id)
     ES-->>AD: yes / no
-    note right of AD: no -> unlock reply (22.14), zero quota,<br/>no service call, no row persisted
+    note right of AD: no -> unlock reply (22.14), zero quota,<br/>no service call, no doc persisted
     AD->>T: getFile(file_id) -> file_path
     AD->>T: GET file endpoint + file_path
-    AD->>ST: service-role upload to crop-images/{user_id}/...
+    AD->>DAL: write GridFS file, ownerId = resolved profile.id
     end
 
-    RH->>DS: diagnose({userId, storageRef, language, channel, conversationId?})
-    AD->>DS: diagnose({userId, storageRef, language, channel:'telegram', conversationId})
+    RH->>DS: diagnose({userId, mediaRef, language, channel, conversationId?})
+    AD->>DS: diagnose({userId, mediaRef, language, channel:'telegram', conversationId})
 
-    DS->>ST: verify bucket + {user_id}/ prefix ownership
-    ST-->>DS: object metadata
+    DS->>DAL: verify GridFS metadata.kind='crop-image' + metadata.ownerId
+    DAL-->>DS: file metadata
     note over DS: mismatch -> 403, quota untouched
     DS->>Q: reserve('image') atomically
     Q-->>DS: allowed / at-limit
     note over DS: at-limit -> decline with limit + reset, no provider call
-    DS->>ST: create signed URL
-    DS->>GW: classify(image bytes, strict JSON schema)
+    DS->>DAL: read image bytes from GridFS
+    DS->>GW: classify(image bytes inline, strict JSON schema)
     GW-->>DS: raw model output + provider used
     DS->>V: stage 1 shape, stage 2 KB membership
     alt validated verified condition
-        DS->>DB: read disease_knowledge row
+        DS->>DAL: read disease_knowledge doc
         DS->>GW: rephrase KB content into language
         GW-->>DS: localized explanation
     else unknown / blurry / non-plant / out-of-KB / malformed
         note over DS: static localized inconclusive copy,<br/>no further model call
     end
-    DS->>DB: insert diagnoses row (+ conversation, channel)
-    DS->>DB: insert usage_logs row (provider, outcome, fallback?)
+    DS->>DAL: insert diagnoses doc (+ conversation, channel)
+    DS->>DAL: insert usage_logs doc (provider, outcome, fallback?)
     DS-->>RH: Diagnosis_Result
     DS-->>AD: Diagnosis_Result
     RH-->>B: JSON result
@@ -347,18 +417,18 @@ sequenceDiagram
     participant B as Browser
     participant RL as /api/link/token
     participant LS as LinkingService
-    participant DB as Postgres
+    participant DAL as Data_Access_Layer<br/>(collections; A3)
     participant T as Telegram Bot API
     participant AD as TelegramAdapter
 
     B->>RL: POST (authenticated session)
     RL->>LS: mint(authUserId)
-    LS->>DB: insert link_tokens (token_hash, user_id, expires_at)
+    LS->>DAL: insert link_tokens (tokenHash, ownerId, expiresAt)
     LS-->>B: deep link - t.me/BOT?start=TOKEN
     B->>T: farmer opens the deep link, sends /start TOKEN
     T->>AD: webhook update (secret token verified, update_id claimed)
-    AD->>DB: single UPDATE - consume token AND bind telegram_user_id
-    note right of AD: RETURNING no row -> "link no longer valid",<br/>identical wording for unknown / expired / consumed (21.8)
+    AD->>DAL: txn - findOneAndUpdate consume token, then bind telegram_user_id
+    note right of AD: no returned doc -> "link no longer valid",<br/>identical wording for unknown / expired / consumed (21.8);<br/>dup-key on telegram_user_id aborts txn -> token unconsumed (21.13)
     AD->>T: confirmation reply in the Profile's language (21.19)
 ```
 
@@ -370,20 +440,20 @@ sequenceDiagram
     participant PS as PaymentService
     participant RZP as Razorpay
     participant RPW as /api/payment/webhook
-    participant DB as Postgres
+    participant DAL as Data_Access_Layer<br/>(collections; A3)
 
     B->>RPO: POST (authenticated session, empty body)
     RPO->>PS: createOrder(authUserId)
     note right of PS: amount, currency, owner all server-side (22.2)
     PS->>RZP: create order for BOT_UNLOCK_PRICE
-    PS->>DB: insert payment_orders (provider_order_id, user_id, 'created')
+    PS->>DAL: insert payment_orders (providerOrderId, ownerId, 'created')
     PS-->>B: checkout identifiers only
     B->>RZP: checkout
     RZP->>RPW: POST event + signature header
     RPW->>RPW: HMAC over RAW body, constant time; absent secret = fail (22.6)
     RPW->>PS: onVerifiedEvent(payload)
-    PS->>DB: insert bot_entitlements (user_id, provider_payment_id) - UNIQUE claim
-    note right of PS: zero rows claimed -> duplicate -> 200, no state change (22.10)
+    PS->>DAL: txn - insertOne bot_entitlements (_id=ownerId, providerPaymentId) + extend window to nextExpiry
+    note right of PS: dup-key 11000 -> duplicate -> 200, no state change (22.10, 22.11)
 ```
 
 ---
@@ -398,24 +468,25 @@ src/
     diagnose/page.tsx              # upload + result screen
     chat/page.tsx                  # conversation screen
     voice/page.tsx                 # hold-to-speak screen
-    history/page.tsx               # server component, RLS-scoped list
+    history/page.tsx               # server component, owner-scoped list (A3: via Data_Access_Layer)
     diagnosis/[id]/page.tsx        # detail view (Requirement 12.3)
     profile/page.tsx               # display name + preferred language (Requirement 1.8)
-    auth/callback/route.ts         # OAuth code exchange + ensure-profile (D8, V23)
     api/
-      diagnose/route.ts            # POST, JSON storage ref (D1)
+      auth/[...]/route.ts          # auth library handler (Google provider); D8 bootstrap hook (A3, V30, V35)
+      diagnose/route.ts            # POST, JSON Media_Reference (D1)
       chat/route.ts                # POST
       voice/route.ts               # POST
+      media/route.ts               # POST upload -> GridFS -> Media_Reference; GET owner-checked serve (A3, D17)
       telegram/route.ts            # POST webhook only - secret token (D12)
       link/token/route.ts          # POST mint Link_Token (21.1), DELETE unlink (21.15)
       payment/order/route.ts       # POST create Payment_Order (22.1)
       payment/webhook/route.ts     # POST, no session, signature-authenticated (22.24)
   components/
-    GoogleSignInButton.tsx         # signInWithOAuth({provider:'google'}), client
-    ImageUploader.tsx              # validation + direct upload, client
+    GoogleSignInButton.tsx         # auth-library Google sign-in, client (A3)
+    ImageUploader.tsx              # validation + upload to /api/media, client (A3)
     DiagnosisResultCard.tsx        # severity, confidence, needs_expert banner
     ChatThread.tsx / ChatComposer.tsx
-    VoiceRecorder.tsx              # MediaRecorder, 120s / 10MB caps
+    VoiceRecorder.tsx              # MediaRecorder, 120s / 3MB caps (A3)
     LanguageSwitcher.tsx
     HistoryList.tsx / EmptyState.tsx
     ErrorBanner.tsx                # code -> localized message + retry
@@ -427,19 +498,24 @@ src/
     voice.service.ts
     quota.service.ts
     conversation.service.ts        # find-or-create per channel
-    linking.service.ts             # mint + atomic consume-and-bind (D13)
-    entitlement.service.ts         # holdsEntitlement + grant (D14)
-    payment.service.ts             # order creation + verified-webhook grant (D15)
+    linking.service.ts             # mint + atomic consume-and-bind, one txn (D13, D19)
+    entitlement.service.ts         # holdsEntitlement + grant, one txn (D14, D19)
+    payment.service.ts             # order creation + verified-webhook grant (D15, D19)
   lib/
-    supabase/
-      client.ts                    # browser client (anon key)
-      server.ts                    # RLS-scoped server client (user session)
-      admin.ts                     # service-role client, server-only guard
+    auth/
+      index.ts                     # chosen auth library config: Google provider + MongoDB adapter (A3, V30, V35)
+      session.ts                   # server-side session check (replaces Supabase refresh in proxy.ts)
+    db/                            # THE Data_Access_Layer (D18): only holder of the mongodb driver
+      client.ts                    # MongoClient cached on globalThis, server-only (D19, V28)
+      collections.ts               # owner-scoped accessors; inject ownerId into every op
+      setup.ts                     # idempotent collections + indexes + $jsonSchema + seed (npm run db:setup)
+    media/
+      gridfs.ts                    # GridFS upload/download/delete by metadata (D17, V29)
     ai/
       gateway.ts                   # capability routing + fallback (14.4)
       errors.ts                    # RATE_LIMIT | UNAVAILABLE | OTHER
-    gemini.ts                      # primary adapter (V6, V7)
-    groq.ts                        # text fallback + transcription (V8, V9, V10)
+    gemini.ts                      # primary adapter, inline bytes (V6, V7, V34)
+    groq.ts                        # text fallback + transcription (V8, V9, V10, V34)
     telegram.ts                    # secret token, parse, getFile, sendMessage (V24-V26)
     razorpay.ts                    # order create + webhook signature (V27)
     prompts.ts                     # classification + rephrase + chat prompts
@@ -448,48 +524,38 @@ src/
     messages/                      # static en/hi/mr catalogs (D5)
       en.ts  hi.ts  mr.ts
     errors.ts                      # AppError + code -> status mapping
-    storage.ts                     # path builder, signed URLs, ownership check
     rate-limit.ts                  # per-farmer burst limiter (13.8) + per-caller
                                    #   webhook throttle (13.9, D16)
     config/
       media.ts                     # MEDIA_RETENTION_DAYS (18.1)
       access.ts                    # LINK_TOKEN_TTL_MINUTES (21.4),
-                                   #   BOT_UNLOCK_PRICE (22.4) - one place each,
-                                   #   never an env var
+                                   #   BOT_UNLOCK_PRICE (22.4), nextExpiry() (A2/D19)
+                                   #   - one place each, never an env var
     time.ts                        # Asia/Kolkata window keys + reset time
   types/
-    domain.ts  api.ts  database.ts # generated Supabase types
-supabase/
-  migrations/
-    0001_extensions.sql
-    0002_profiles.sql
-    0003_conversations_messages.sql
-    0004_disease_knowledge.sql
-    0005_diagnoses.sql
-    0006_usage_logs.sql
-    0007_counters_and_quota_fn.sql
-    0008_telegram_inbound.sql
-    0009_storage_buckets_policies.sql
-    0010_seed_disease_knowledge.sql
-    0011_link_tokens.sql                 # Requirement 21
-    0012_payment_orders_entitlements.sql # Requirement 22
-    0013_webhook_throttle.sql            # Requirement 13.9 (D16)
+    domain.ts  api.ts  db.ts       # hand-written domain/collection types (A3: no generated Supabase types)
+scripts/
+  db-setup.ts                      # entrypoint for npm run db:setup (A3, replaces supabase/migrations)
+  check-secret-scope.ts            # secrets appear only in server modules
+  check-data-access.ts             # no module outside src/lib/db imports the mongodb driver (D18)
 docs/
   API.md  DEPLOYMENT.md  TESTING_REPORT.md
 .env.example
 ```
 
-`src/services/*` and `src/lib/*` never import from `src/app/*`. That one-way rule is what keeps Requirement 16.3/16.4's "exactly one implementation" true over time.
+*(Historical, retired by Amendment A3: `src/lib/supabase/{client,server,admin}.ts`, `src/lib/storage.ts`, and the entire `supabase/migrations/0001`–`0013` tree. The 14 SQL migrations are replaced by one idempotent `npm run db:setup` that creates collections, unique/partial indexes, `$jsonSchema` validators, and the five-condition seed; `supabase/migrations/` is kept only as a historical record, applied to nothing.)*
+
+`src/services/*` and `src/lib/*` never import from `src/app/*`. That one-way rule is what keeps Requirement 16.3/16.4's "exactly one implementation" true over time. **Under A3 a second one-way rule joins it:** nothing outside `src/lib/db/**` imports the `mongodb` driver or the database handle (**D18**), which is what makes the Data_Access_Layer the only place an owner-scoped filter can be forgotten — and `scripts/check-data-access.ts` fails the build if it is crossed.
 
 ---
 
-## Data model and migrations
+## Data model and collection setup
 
-Six domain tables, three access tables (Requirements 21 and 22), and three operational tables. Enum-like columns are `text` with check constraints rather than Postgres enums, so a new severity or channel is a migration edit instead of a type alteration; the check constraint keeps the database as strict as the Zod layer.
+Six domain collections, three access collections (Requirements 21 and 22), and three operational collections, plus whatever collections the auth library's MongoDB adapter needs for its own user and session records (V30). *Amended by Amendment A3: what were Postgres tables are now MongoDB collections.* Enum-like fields were `text` with `CHECK` constraints under Supabase; under A3 they are validated by MongoDB **`$jsonSchema` collection validation** where practical, so a new severity or channel is a validator edit rather than a type alteration, and the validator keeps the database as strict as the Zod layer. Every former `UNIQUE` becomes a **unique index**, partial or sparse where the field is nullable. `updatedAt` is set by the writing accessor in the Data_Access_Layer rather than by a database trigger, since MongoDB has no trigger equivalent and A3 forbids scattering the concern into route handlers — one accessor owns it.
 
-`updated_at` is maintained by one shared trigger function so no route handler has to remember it.
+**Amendment A3 replaces the migration tree with one idempotent setup script.** The 14 SQL migrations `0001`–`0013` under `supabase/migrations/` become historical; collection creation, index creation, `$jsonSchema` validators, and the five-condition seed are performed by `scripts/db-setup.ts`, run as `npm run db:setup`, which is safe to re-run (creating an existing collection or index is a no-op, and the seed upserts on `diseaseName`). The SQL blocks that follow are kept as the record of *what each collection is and why its constraints exist* — read them for the invariants (the reason a field is unique, the reason an enumerated field is constrained, the shape of the atomic quota function), and read **D19** and the notes under each heading for how that invariant is expressed in MongoDB. Where a block shows `create table … CHECK/UNIQUE/RLS`, the A3 reading is: collection with a `$jsonSchema` validator for the CHECKs, a unique index for the UNIQUEs, and Data_Access_Layer owner-scoping in place of RLS (**D18**).
 
-**Amendment A1 edits migrations in place rather than shipping a column-altering follow-up.** Nothing in `supabase/migrations/` has been applied to a deployed project yet — this is a pre-pilot release — so `0002` is rewritten, `0003` / `0005` / `0006` have their `channel` check constraints corrected, and `0008` is renamed and re-keyed. Amending is the honest option here: an `alter table … drop constraint` follow-up would leave the original phone-identity schema readable as though it had once been real, and a future reader would have to replay two migrations to learn what the table is. Three new migrations, `0011`–`0013`, add the access tables. If a project has already been migrated, the corrections have to arrive as `0014` instead, and the in-place edits above become a documentation-only change.
+> **How to read the SQL below under A3.** These blocks are retained for their invariants and their argument, not as the DDL that runs. `create table T (col … CHECK (col in (…)))` → a collection `T` whose `$jsonSchema` validator pins `col` to that enum. `col … UNIQUE` → a unique index on `col`, made **partial** (`{ partialFilterExpression: { col: { $exists: true } } }`) or **sparse** where `col` is nullable, so many documents may omit it — this is how `profiles.telegram_user_id` and `payment_orders.providerPaymentId` stay unique-when-present. `primary key (a,b,c)` → a unique compound index on `{a,b,c}` (or that tuple as a structured `_id`). `references … on delete cascade` → there are no foreign keys in MongoDB; the Data_Access_Layer performs the cascade, or the design tolerates an orphan and the retention/age scans clean it (the `diagnoses`→GridFS link is exactly this). `enable row level security` + policies → **deleted**; isolation is the Data_Access_Layer (**D18**), and "writes only via the service role" reads as "writes only through server-side accessors". A `security definer` SQL function (the quota counter, the throttle) → the MongoDB operation named in **D19**. Bucket/storage SQL → GridFS in one bucket (**D17**).
 
 ### 0001–0002: extensions and profiles
 
@@ -555,7 +621,9 @@ create policy profiles_insert_own on public.profiles
 
 The load-bearing constraint moved. It is now `telegram_user_id bigint unique`: Requirement 10.12 says one Telegram account belongs to at most one Profile, and Requirement 21.16 requires that rule to be enforced by the database rather than by application code alone — so the `/start` handler of **D13** does not have to defend the invariant, it only has to handle the unique violation, which is the case of Requirement 21.13 (this Telegram account is already linked elsewhere). The column is nullable because an unlinked farmer is the normal state, and Postgres treats nulls as distinct, so any number of unlinked profiles coexist.
 
-`phone` keeps its column and loses everything else: no `not null`, no `unique`, no E.164 check constraint, and no index. **D8** records why the normalizer that used to accompany it is gone rather than misplaced. Nothing reads this column; it exists because Requirement 1.9 says it exists as optional contact information, and a CI check that greps for readers of `profiles.phone` outside a migration is the cheapest way to keep that true.
+> **A3 mapping (profiles).** The collection's `_id` is the Auth_User_Id the auth library assigns (**D8**, V30), so identity is the primary key. `telegram_user_id` becomes a **partial unique index** — `{ 'telegram_user_id': 1 }, { unique: true, partialFilterExpression: { telegram_user_id: { $type: 'long' } } }` — which is how "unique when present, any number of unlinked profiles" survives: MongoDB's plain unique index would reject a second missing value under some encodings, so the partial filter, indexing only documents that *have* the field, is the correct form (V28). `email` stays optional (no unique). `phone` has no index and no reader, and `scripts/check-data-access.ts`'s sibling phone-reader check keeps it that way. The enumerated `language` field is pinned by the collection's `$jsonSchema` validator to `['en','hi','mr']`. `db:setup` creates the index and validator idempotently; there is no trigger, so `updatedAt` is set by the writing accessor.
+
+`phone` keeps its field and loses everything else: no required constraint, no unique index, no E.164 validation, and no index at all. **D8** records why the normalizer that used to accompany it is gone rather than misplaced. Nothing reads this field; it exists because Requirement 1.9 says it exists as optional contact information, and the CI check that greps for readers of `profiles.phone` outside the setup script is the cheapest way to keep that true.
 
 `email` is nullable rather than `not null` on purpose. It is copied from `auth.users` by a trigger that V5 warns can fail without blocking the row, so a hard constraint here would turn a missing claim into a sign-up that cannot complete. The identity does not depend on it.
 
@@ -797,6 +865,17 @@ The table holds no farmer-authored content. `telegram_user_id` is still an ident
 
 ### 0009: storage buckets and policies
 
+> **Superseded by Amendment A3 — files live in one GridFS bucket, not two private Storage buckets.** Everything in this section below the line is the retired Supabase-Storage design; it is kept for its reasoning (why ownership was the first path segment, why a thumbnail path was derived rather than stored, why the policies were narrowed to `select, insert`) because each of those choices maps to a decision under A3. What replaces it (**D17**, and the GridFS API is **V29**):
+>
+> - **One GridFS bucket.** No `crop-images`/`voice-messages` buckets and no `storage.buckets` rows. Files are one GridFS bucket whose `metadata.kind` is `crop-image`, `thumbnail`, or `voice`. `db:setup` creates the bucket's `.files`/`.chunks` collections and the indexes below; there is no bucket-privacy setting because GridFS collections are only reachable through the Data_Access_Layer, never from the browser.
+> - **Ownership is `metadata.ownerId`, not a path prefix.** Every GridFS file carries `metadata.ownerId` (the Auth_User_Id). The former "first path segment equals `auth.uid()`" storage-RLS predicate is replaced by the Data_Access_Layer comparing `metadata.ownerId` to the requesting Farmer (**D18**); the Media_Endpoint serves a file only when that comparison holds (Requirements 2.5, 2.6, 8.11). Telegram media is written with `metadata.ownerId` set to the resolved `profiles._id`, exactly as the old design set the `{user_id}/` prefix, so a Telegram diagnosis appears in that farmer's web history for the same reason.
+> - **Thumbnail linkage is stored, not derived.** The `.thumb`-infix path convention is retired (Requirement 2.13, A3): a `thumbnail` GridFS file records `metadata.sourceRef` = the `_id` of its Full_Size_Image, an explicit link between two files rather than a path a function computes. The obligation to produce and store a thumbnail is unchanged; only the linkage scheme changes.
+> - **Indexes on the GridFS `files` collection.** A unique constraint is not needed on file ids (GridFS assigns `_id`), but `db:setup` creates `{ 'metadata.ownerId': 1, 'metadata.kind': 1 }` (owner + kind queries: the Media_Endpoint's serve check and the retention sweep's kind filter) and relies on the built-in `uploadDate` for the age-based orphan backstop that the retired V22 could not do under Supabase.
+> - **`storageRefSchema` becomes `mediaRefSchema`.** No path regex; a Media_Reference is `{ fileId, kind }`, and `kind` is a `z.enum(['crop-image','thumbnail','voice'])`. A client still cannot submit a thumbnail as the object to diagnose — the diagnose schema refines `kind === 'crop-image'` — and cannot fabricate a path, because there is no path. See *Storage references* under the schemas section, amended by A3.
+> - **No `video-inputs` bucket** (Requirement 19 deferred) — unchanged in intent, now simply "no `video` kind is written".
+>
+> The retired SQL below is not part of `db:setup`.
+
 ```sql
 insert into storage.buckets (id, name, public)
 values ('crop-images','crop-images',false),
@@ -1015,7 +1094,9 @@ create policy bot_entitlements_select_own on public.bot_entitlements
 -- change an amount.
 ```
 
-Three column choices carry requirements rather than taste:
+> **A3 mapping (payment_orders, bot_entitlements).** `bot_entitlements` uses the Auth_User_Id as its `_id`, so "at most one entitlement per farmer" is the `_id` primary-key uniqueness itself (**D14**, **D19**). `bot_entitlements.providerPaymentId` gets its own **unique index** — the idempotency claim of Requirement 22.11, whose `11000` duplicate-key error is the "already granted" signal. `payment_orders.providerOrderId` is a plain unique index (always present). Where a provider-payment identifier is stored on a document that may legitimately lack it, the unique index is made **partial/sparse** exactly as `profiles.telegram_user_id` is, so absence never collides — this is the `payment_orders.provider_payment_id` partial-index case A3 point 2 calls out. `db:setup` creates all of these; the grant and its window extension run in one transaction (**D19**, V33).
+
+Three column choices carry requirements rather than taste (read under the A3 mapping above — "primary key" is the collection `_id`, "`unique`" is a unique index):
 
 - **`user_id` is the primary key of `bot_entitlements`**, which is how Requirement 22.12's "at most one per Auth_User_Id" is enforced without a second constraint, and it is why **D14**'s "keyed to the farmer, not the chat account" is structural: there is no `telegram_user_id` column here to be tempted by, so unlinking cannot touch this table (Requirement 22.20).
 - **`provider_payment_id` carries its own `unique`**, and that constraint is the idempotency mechanism of Requirement 22.11 — a replayed webhook loses the insert race and the zero-row result is the duplicate signal (**D15**). It is separate from the primary key because two different payment ids must not both grant, and one payment id must not grant twice; the two constraints answer two different questions.
@@ -1071,7 +1152,7 @@ Both options were considered against the race requirement.
 | Refund | Requires deleting or flagging audit rows, corrupting the audit trail | `used = used - 1` on a counter row; audit stays append-only |
 | Log retention | Pruning old logs to stay inside the free tier would silently change quota answers | Retention and quota are independent |
 
-**Decision: the dedicated `counters` table** (migration 0007). It is race-free in a single statement without advisory locks, constant-time, and it keeps `usage_logs` a pure append-only audit trail (D10). The trade-off accepted is one extra table and the need to refund explicitly rather than "just not logging".
+**Decision: the dedicated `counters` table** (migration 0007). It is race-free in a single statement without advisory locks, constant-time, and it keeps `usage_logs` a pure append-only audit trail (D10). The trade-off accepted is one extra table and the need to refund explicitly rather than "just not logging". *Amended by Amendment A3: `counters` becomes a MongoDB collection with a unique index on `{ ownerId, operation, windowKind, windowKey }`, and the race-free single statement becomes the conditional `findOneAndUpdate` upsert of **D19** — the argument is unchanged, only the primitive. The comparison against counting `usage_logs` also carries over: an aggregation `count` over a growing audit collection under concurrent writes has the same read-then-decide race the Postgres `count(*)` had, and the dedicated counter's atomic upsert avoids it the same way.*
 
 Double-spend is prevented by three things together: the single-statement atomic increment; one reserve per request, taken exactly once at a defined point; and, on Telegram, the `update_id` claim that happens *before* the reserve so a redelivery cannot reach the counter at all (Requirement 11.7).
 
@@ -1086,10 +1167,10 @@ Order of operations in every service — the sequence is the contract:
 3. Telegram only, in the order Requirement 22.16 fixes: secret token compared, then the `telegram_inbound` insert of the `update_id` (unique violation → acknowledge 200, log `duplicate_ignored`, **no reserve**, Requirements 11.5, 11.7), then profile resolution, then the Bot_Entitlement check. No entitlement → the unlock reply of 22.14 and **no reserve** (Requirement 22.13). No profile → linking instructions and **no reserve** (Requirement 21.17).
 4. Storage reference checked: correct bucket and `{user_id}/` prefix owned by the caller. Mismatch → 403 — **no reserve** (Requirement 2.6, explicitly "quota unchanged").
 5. Burst rate limit checked (Requirement 13.8, `window_kind='minute'`) → 429 — **no reserve**.
-6. **Reserve**: `counter_try_increment(user, op, 'day', kolkataDay, limit)`. Null result → decline with the limit and the reset time, and **no provider call is made** (Requirement 14.3).
-7. Provider work: signed URL, classification, validation, KB grounding, rephrase.
-8. **Finalize**: persist the domain rows and append a `usage_logs` row with the provider, outcome, and `used_fallback`. The counter is not touched again.
-9. **Refund** (`counter_decrement`) only when step 7 failed *before the first provider call was attempted* — signed-URL issuance failure, unreadable object, knowledge-base read failure, or an unhandled error thrown ahead of the gateway call. The `usage_logs` row records `quota_spent = false`.
+6. **Reserve**: the atomic quota reserve — under *Amendment A3* a `findOneAndUpdate` upsert on `counters` with a `used < limit` filter (the MongoDB form of `counter_try_increment`, **D19**). No returned document (or an `11000` on the upsert) → decline with the limit and the reset time, and **no provider call is made** (Requirement 14.3).
+7. Provider work: read the media bytes from GridFS, classification, validation, KB grounding, rephrase. (*A3: a GridFS read replaces the signed-URL issuance of the Supabase design.*)
+8. **Finalize**: persist the domain documents and append a `usage_logs` document with the provider, outcome, and `used_fallback`. The counter is not touched again.
+9. **Refund** (the guarded `$inc: {used:-1}` decrement, **D19**) only when step 7 failed *before the first provider call was attempted* — a GridFS read failure, an unreadable/absent file, a knowledge-base read failure, or an unhandled error thrown ahead of the gateway call. The `usage_logs` document records `quota_spent = false`.
 
 The reserve is taken once per *request*, by whichever service owns that request's operation type. A `ChatService` invocation nested inside a `VoiceService` request therefore performs **no** reserve of its own: the voice unit taken at step 6 covers the answer that request produces, so one voice message never spends both a voice unit and a chat unit. `ChatService` reserves only when it is itself the entry point — the chat endpoint, or an inbound Telegram text message.
 
@@ -1119,27 +1200,29 @@ Requirement 13.8 also covers the Payment_Order endpoint, which has a session and
 
 ## Media lifecycle and retention
 
-Quotas bound how many *requests* a farmer makes. Nothing above bounds how many *bytes* accumulate, and bytes are the dimension that runs out first: V19 puts Supabase Free at **1 GB storage** and **5 GB monthly egress**, and at full worst-case load the unamended design wrote 240 objects a day and deleted none. Requirement 18 closes that, and Requirements 2.10–2.14, 8.9–8.11 and 12.6–12.11 are the surfaces that make it survivable for a farmer.
+Quotas bound how many *requests* a farmer makes. Nothing above bounds how many *bytes* accumulate, and bytes are the dimension that runs out first. *Amended by Amendment A3:* the binding allowance is now **Atlas M0's ~512 MB cluster storage** (V32), and every uploaded file lives inside that same 512 MB as a GridFS document rather than in a separate Storage bucket — so records and files now compete for one budget, which makes the retention design *more* load-bearing, not less. The former Supabase figures (1 GB storage, 5 GB monthly egress) are retired; egress is no longer a separately-metered dimension, because MongoDB Atlas does not bill free-tier egress the way Supabase Storage did, so the *storage* budget is the one constraint the arithmetic below is re-derived against. At full worst-case load the unamended design wrote 240 files a day and deleted none. Requirement 18 closes that, and Requirements 2.10–2.14, 8.9–8.11 and 12.6–12.11 are the surfaces that make it survivable for a farmer.
 
 Three mechanisms, in the order the bytes meet them:
 
-1. **Re-encode before upload** (Requirement 2.10). The browser downscales an admitted image toward ~400 KB, so both storage growth and per-read egress fall by roughly an order of magnitude against the 10 MB admission ceiling.
-2. **Read a derivative for list views** (Requirements 2.13, 12.6). A history screen of 20 entries reads 20 thumbnails, not 20 full-size originals.
-3. **Delete what nothing reads** (Requirements 8.9, 18.3, 18.4). Voice originals go as soon as their transcript is durable; full-size crop images go when the retention window elapses; thumbnails and every database row stay.
+1. **Re-encode before upload** (Requirement 2.10). The browser downscales an admitted image toward ~400 KB, so GridFS growth falls by roughly an order of magnitude against the 10 MB admission ceiling.
+2. **Read a derivative for list views** (Requirements 2.13, 12.6). A history screen of 20 entries streams 20 thumbnails from GridFS, not 20 full-size originals.
+3. **Delete what nothing reads** (Requirements 8.9, 18.3, 18.4). Voice originals go as soon as their transcript is durable; full-size crop images go when the retention window elapses; thumbnails and every database document stay.
 
-Note what mechanism 1 does *not* change: Requirements 2.3 and 2.4 still gate on the file the farmer **selects**. A 9 MB photo is still admitted, still gets the "accepted types and size limit" message only when it breaches 10 MB or the MIME list, and only then is re-encoded. The 10 MB allowance stays real; it is simply no longer the size of the object that lands in the bucket.
+Note what mechanism 1 does *not* change: Requirements 2.3 and 2.4 still gate on the file the farmer **selects**. A 9 MB photo is still admitted, still gets the "accepted types and size limit" message only when it breaches 10 MB or the MIME list, and only then is re-encoded. The 10 MB allowance stays real; it is simply no longer the size of the object that lands in GridFS. (Voice is different under A3: its admission ceiling itself drops to 3 MB, because the upload leg now carries the bytes under the 4.5 MB Request_Body_Ceiling — see the voice-recorder note in *Frontend* and Requirement 8.2/8.3.)
 
 ### What is deleted, when, and by whom
 
 | Object | Written by | Deleted when | Deleted by | Requirement |
 | --- | --- | --- | --- | --- |
-| `voice-messages/{user_id}/…` original | Browser (web) or service role (Telegram) | Immediately after its transcript is persisted as a `messages` row | `VoiceService`, service-role client | 8.9 |
-| `voice-messages/…` original, transcription failed or transcript empty | same | Retention sweep, once older than the window | `RetentionService`, service-role client | 8.10, 18.4 |
-| `crop-images/…/{uuid}.{ext}` — Full_Size_Image | Browser (web) or service role (Telegram) | Retention sweep, once its `diagnoses` row is older than the window | `RetentionService`, service-role client | 18.3 |
-| `crop-images/…/{uuid}.thumb.{ext}` — Thumbnail_Derivative | Browser only | Never | — | 18.5 |
-| `diagnoses`, `messages`, `conversations`, `usage_logs` rows | Services | Never by this design | — | 18.6 |
+| GridFS `voice` file (`metadata.kind='voice'`) | Media_Endpoint (web) or Telegram adapter, both through the Data_Access_Layer | Immediately after its transcript is persisted as a `messages` document | `VoiceService`, via Data_Access_Layer | 8.9 |
+| GridFS `voice` file, transcription failed or transcript empty | same | Retention sweep, once older than the window | `RetentionService`, via Data_Access_Layer | 8.10, 18.4 |
+| GridFS `crop-image` file — Full_Size_Image | Media_Endpoint (web) or Telegram adapter, both through the Data_Access_Layer | Retention sweep, once its `diagnoses` document is older than the window | `RetentionService`, via Data_Access_Layer | 18.3 |
+| GridFS `thumbnail` file — Thumbnail_Derivative | Browser (web) only | Never | — | 18.5 |
+| `diagnoses`, `messages`, `conversations`, `usage_logs` documents | Services | Never by this design | — | 18.6 |
 
-**The browser never deletes.** Every deletion runs server-side with the service role, for one reason that applies to both paths: the Telegram path has no farmer session at all, so a session-scoped delete could not be the single implementation. Making the service role the only deleter keeps one code path and one audit story. It is also why the storage policies get narrowed to `select, insert` (see migration `0009` above) — a farmer session has no legitimate reason to hold `delete` on an object the history view depends on.
+*Amended by Amendment A3: what were bucket object paths (`crop-images/{user_id}/…`, `voice-messages/{user_id}/…`, `…/{uuid}.thumb.{ext}`) are now GridFS files distinguished by `metadata.kind` and owned by `metadata.ownerId`; every deleter is the Data_Access_Layer rather than a Supabase service-role client.*
+
+**The browser never deletes.** Every deletion runs server-side through the Data_Access_Layer, for one reason that applies to both paths: the Telegram path has no farmer session at all, so a session-scoped delete could not be the single implementation. Making the Data_Access_Layer the only deleter keeps one code path and one audit story. Under A3 there is no storage policy to narrow — GridFS is only reachable through that layer in the first place, which is a stronger form of the same guarantee the old `select, insert` policy narrowing gave (a farmer session simply has no path to a `delete` at all).
 
 **Why voice originals go on success rather than on a timer.** Requirement 8.8 rules out synthesized speech and nothing in the requirements reads a recording back; the transcript is the durable artefact, persisted as a `messages` row with `input_kind = 'voice'`. So once that row is committed, the object has no reader. Deleting it there removes roughly half the accumulation rate at its source rather than deferring it to a sweep.
 
@@ -1147,24 +1230,24 @@ Note what mechanism 1 does *not* change: Requirements 2.3 and 2.4 still gate on 
 
 ### How the sweep finds its work
 
-Two scans per invocation, in this order, both bounded:
+Two scans per invocation, in this order, both bounded (*queries amended by A3 to MongoDB / GridFS*):
 
-1. **Row-driven, for known originals.** `select id, user_id, image_bucket, image_path from diagnoses where full_image_deleted_at is null and created_at < now() - (retention_days || ' days')::interval order by created_at limit N`. Each row's `image_path` is deleted and `full_image_deleted_at` is stamped (Requirement 18.7). This is the scan that keeps the history view honest, and it is served by the partial index added to `0005`.
-2. **Age-driven, as an orphan backstop.** A browser upload that succeeded before a diagnosis request failed leaves an object with no `diagnoses` row, and a failed transcription leaves a voice object with no `messages` row, so neither is reachable from scan 1. Scan 2 reads object names and ages from the `storage` schema for both buckets, excludes any `crop-images` path containing the `.thumb.` infix, and deletes the remainder past the window. Whether `storage.objects` exposes a usable creation timestamp is **V22** — until it resolves, scan 2 is the part of the sweep that does not run, and scan 1 alone still satisfies Requirements 18.3 and 18.7 for every object a farmer can see.
+1. **Document-driven, for known originals.** The Data_Access_Layer finds `diagnoses` documents where `fullImageDeletedAt` is null and `createdAt < now − retentionDays`, sorted oldest-first, `limit N`. Each document's `mediaRef.fileId` is deleted from GridFS (`GridFSBucket.delete`) and `fullImageDeletedAt` is stamped (Requirement 18.7). This is the scan that keeps the history view honest, and it is served by the partial index on `{ createdAt: 1 }` with `partialFilterExpression: { fullImageDeletedAt: null }` (the MongoDB form of the partial index the SQL block for `0005` describes).
+2. **Age-driven, as an orphan backstop.** A browser upload that succeeded before a diagnosis request failed leaves a GridFS `crop-image` file with no `diagnoses` document, and a failed transcription leaves a `voice` file with no `messages` document, so neither is reachable from scan 1. Scan 2 queries the GridFS `files` collection directly, filtered on `metadata.kind in ('crop-image','voice')` (never `'thumbnail'`, which is kept) and `uploadDate < now − window`, and deletes the remainder. *This is the scan A3 unblocks:* under Supabase, whether `storage.objects` exposed a usable creation timestamp was the retired V22 (U-V22b), and until it resolved this scan did not run. GridFS files carry a built-in `uploadDate`, so the timestamp is guaranteed to be present (**V29** confirms the field and query), and scan 2 runs from day one rather than waiting on a third-party fact.
 
-Deletion is idempotent by construction (Requirement 18.10): scan 1's `where full_image_deleted_at is null` predicate excludes anything a previous run already stamped, and an object that is already absent is treated as deleted rather than as an error — **V22** also covers whether the delete call errors on a missing path, and the service normalizes that outcome either way. Both scans take a `limit N` so one invocation stays inside the 60 s ceiling (Requirement 18.11); leftover work is simply picked up by the next run, which is safe precisely because the operation is idempotent.
+Deletion is idempotent by construction (Requirement 18.10): scan 1's `fullImageDeletedAt: null` predicate excludes anything a previous run already stamped, and a `GridFSBucket.delete` on an id already gone is normalized to "already deleted" rather than an error (**V29** covers whether `delete` throws on a missing id, and the service normalizes either way). Both scans take a `limit N` so one invocation stays inside the 60 s ceiling (Requirement 18.11); leftover work is picked up by the next run, which is safe precisely because the operation is idempotent.
 
-### RLS, storage policies, and why the application check is the boundary
+### Tenant isolation during deletion, and why the application check is the boundary
 
-The service role bypasses RLS and bypasses the storage path policies, so neither of them constrains the sweep. That is the same situation as the Telegram adapter, the access services, and the quota functions, and it gets the same answer from *Security boundary → Defence in depth*: **every service-role operation carries an explicit `user_id` anchor, and one without it is a defect.**
+*Amended by Amendment A3.* Under Supabase the service role bypassed RLS and the storage policies, so the deletion boundary was purely the application check. Under A3 there is no RLS and no storage policy at all — the Data_Access_Layer is the only holder of the database handle (**D18**) — so the situation is the same and the answer is unchanged: **every accessor the sweep calls carries an explicit owner anchor, and one without it is a defect.**
 
-Concretely, for deletion that means the sweep never deletes a path it invented or a path it found by listing a bucket root:
+Concretely, the sweep never deletes a file it invented or a file it found by an unscoped scan:
 
-- Scan 1 deletes only `image_path` values read off a `diagnoses` row, and asserts the path's first segment equals that row's `user_id` before issuing the delete. A mismatch is a hard error, not a skipped row — it means either the path convention or the row is corrupt, and continuing would risk deleting across tenants (Requirement 18.8).
-- Scan 2's candidates come from the storage schema rather than from a row, so its `user_id` anchor is the path's own first segment; it deletes only under `{first_segment}/` and never widens.
-- `VoiceService`'s on-success delete reuses the existing `assertOwnership` seam against the requesting farmer before deleting (Requirement 8.11).
+- Scan 1 deletes only the `mediaRef.fileId` read off a `diagnoses` document, and asserts the GridFS file's `metadata.ownerId` equals that document's `ownerId` before issuing the delete. A mismatch is a hard error, not a skipped document — it means the reference or the file metadata is corrupt, and continuing would risk deleting across tenants (Requirement 18.8).
+- Scan 2's candidates come from the GridFS `files` collection rather than from a domain document, so its owner anchor is the file's own `metadata.ownerId`; it deletes a file only after confirming that field is present and well-formed, and refuses (rather than deletes) any file whose owner metadata is missing.
+- `VoiceService`'s on-success delete confirms the file's `metadata.ownerId` equals the requesting farmer before deleting (Requirement 8.11), the MongoDB analogue of the old `assertOwnership` seam.
 
-Tenant isolation during deletion is therefore the *same* predicate that Property 5 already holds for reads, applied to a second verb. Property 31 states it over deletion.
+Tenant isolation during deletion is therefore the *same* owner-scoping the Data_Access_Layer applies to reads, applied to a second verb. Property 31 states it over deletion.
 
 ### Triggering a sweep with no always-on process
 
@@ -1187,55 +1270,57 @@ The honest reading: automation is a convenience here, and the correctness of Req
 
 ### The arithmetic that bounds the window
 
-One configurable constant, `MEDIA_RETENTION_DAYS` in `src/lib/config/media.ts`, **default 7**. The constraint it has to satisfy:
+*Amended by Amendment A3: the budget is Atlas M0's ~512 MB cluster storage, not Supabase's 1 GB, and records and files now share it.* One configurable constant, `MEDIA_RETENTION_DAYS` in `src/lib/config/media.ts`, **default 7**. The constraint it has to satisfy, with a term for the records that now live in the same cluster:
 
 ```
 (full_size_bytes_per_day + straggler_bytes_per_day) × MEDIA_RETENTION_DAYS
   + thumbnail_bytes_per_day × pilot_days
-  ≤ 1 GB × 0.75
+  + record_bytes_total
+  ≤ 512 MB × 0.75
 ```
 
-Worst-case load is Jamee's own quota: 6 farmers × 20 images and 20 voice notes a day = 120 of each. Substituting, with the three per-object figures labelled for what they are:
+Worst-case load is Jamee's own quota: 6 farmers × 20 images and 20 voice notes a day = 120 of each. Substituting, with the per-item figures labelled for what they are:
 
 | Term | Figure | Basis |
 | --- | --- | --- |
 | `full_size_bytes_per_day` | 120 × ~400 KB ≈ **48 MB/day** | The Downscale_Target — a design target, not a measurement |
 | `thumbnail_bytes_per_day` | 120 × ~25 KB ≈ **3 MB/day** | Planning estimate for a ~320 px longest-edge re-encode; **retained forever** |
-| `straggler_bytes_per_day` | ≈ **5 MB/day** | Planning estimate: voice objects whose transcription did not succeed |
-| Usable budget | 0.75 × 1 GB ≈ **768 MB** | V19's 1 GB, less 25% headroom for a missed sweep run |
+| `straggler_bytes_per_day` | ≈ **5 MB/day** | Planning estimate: voice files whose transcription did not succeed |
+| `record_bytes_total` | ≈ **a few tens of MB over the pilot** | The domain/access/operational collections and the auth library's records; small next to media, but non-zero on the *same* 512 MB now (V32) |
+| Usable budget | 0.75 × 512 MB ≈ **384 MB** | M0's ~512 MB, less 25% headroom for a missed sweep run |
 
 ```
-day 0   of the pilot:  768        / 53 ≈ 14 days available
-day 90  of the pilot: (768 − 270) / 53 ≈  9 days available
-day 132 of the pilot: (768 − 396) / 53 ≈  7 days available   <- the default's limit
+day 0   of the pilot:  ~360      / 53 ≈  7 days available
+day 30  of the pilot: (~360 − 90) / 53 ≈ 5 days available
+                                            <- 7-day default is already tight at M0's budget
 ```
 
-Read that top to bottom: **the safe window shrinks as thumbnails accumulate.** Thumbnails are never swept, so they are a slow permanent accumulation — 3 MB/day is ~1 GB in under a year at full quota. The default of 7 days holds for roughly the first **four months at maximum farmer activity**, and far longer at realistic activity (at 20% of quota the whole media footprint is under 300 MB after a year). This is the reason `MEDIA_RETENTION_DAYS` is configurable and the reason Requirement 18.2 puts the arithmetic in the deployment document: it is a number to review, not a number to set once. The amendment converts a six-day deadline into a multi-month runway; it does not make storage unbounded.
+(The `~360` reserves a rough `record_bytes_total` off the 384 MB usable figure; the exact reservation is a V32 number to confirm at deployment.) Read that top to bottom: **the budget A3 moved to is roughly half the Supabase one, and it is now shared with records, so the safe window is materially shorter than it was.** Thumbnails are still never swept — 3 MB/day is ~1 GB in under a year at full quota, which *exceeds M0 on its own*, so at sustained maximum activity thumbnails alone become the binding term within months and the pilot's realistic activity (well under full quota) is what keeps the 7-day default viable. This is exactly why Requirement 18.2 puts the arithmetic in the deployment document and why `MEDIA_RETENTION_DAYS` is configurable: on M0 it is a number to review early, not a number to set once. A3 does not make storage unbounded; it makes the budget tighter, which the deployment note must state plainly rather than inherit the old 1 GB comfort.
 
-For contrast, the unamended figures: at the ~700 KB average that the egress allowance permits, 240 objects a day is 168 MB/day and fills 1 GB in about **6 days**, with nothing deleting anything.
+For contrast, the unamended figures: at the ~700 KB average, 240 objects a day is 168 MB/day and fills even the old 1 GB in about **6 days**, with nothing deleting anything.
 
-### Egress after the amendment
+### Read cost after the amendment
 
-5 GB/month is about 170 MB/day. Media leaves Supabase once per provider read, because both providers accept a URL (V6, V10), and again on every history or detail render — and signed-URL expiry is measured in seconds (V3), so browser cache reuse across renders is limited and repeat views really do re-fetch.
+*Amended by Amendment A3.* Under Supabase the binding read dimension was a separately-metered 5 GB/month egress, re-fetched on every render because signed-URL expiry was seconds (the retired V3). Atlas M0 does not meter free-tier egress the same way, so the concern shifts from a monthly egress cap to **per-request work and the M0 connection pool** (V32): every media read is now a GridFS download streamed through a Jamee function rather than a farmer's browser fetching a signed URL, so reads cost a function invocation and a database round trip instead of provider-side bandwidth. The list-vs-detail asymmetry the amendment was built around still holds and still matters, now as invocation cost rather than egress:
 
-| Read path | Per day at worst-case load | Before the amendment |
+| Read path | Per day at worst-case load | Before the amendment (Supabase egress) |
 | --- | --- | --- |
-| Provider image reads | 120 × ~400 KB ≈ 48 MB | 120 × up to 10 MB |
-| Provider audio reads | 120 × ~400 KB ≈ 48 MB | unchanged — voice is not re-encoded |
-| History list renders | 20 thumbnails × ~25 KB ≈ **0.5 MB per render** | 20 originals ≈ **14 MB per render** |
+| Provider image reads | 120 × ~400 KB inline to the model (V34) | 120 × up to 10 MB, by URL |
+| Provider audio reads | 120 × ~400 KB inline to the model (V34) | unchanged — voice is not re-encoded |
+| History list renders | 20 thumbnails × ~25 KB ≈ **0.5 MB per render**, streamed from GridFS | 20 originals ≈ **14 MB per render** |
 | Detail views | one full-size original per open, while it exists | same |
 
-The list-render line is the one that changes character rather than magnitude: at 14 MB a render, a farmer scrolling their history a few times a day was a genuine threat to a 170 MB/day budget; at 0.5 MB it is noise. Past the retention window it drops to zero, because the detail view has no original left to fetch.
+The list-render line is the one that changes character rather than magnitude: at 14 MB a render, a farmer scrolling their history a few times a day was a genuine threat to the old 170 MB/day egress budget; at 0.5 MB it is noise, and under A3 it is 20 small GridFS downloads through the function rather than 20 signed-URL fetches. Past the retention window it drops to zero, because the detail view has no original left to fetch.
 
 ### Residual exposures, stated rather than fixed
 
 Three things the amendment does not solve. None is a defect against Requirement 18; all three would be expensive to rediscover.
 
-- **A pathological voice day is not bounded by any window.** Requirement 8.2 admits recordings up to 10 MB, and 120 of those is 1.2 GB — past the whole allowance inside a single day, before any sweep could run, and none of it deleted on success if the transcriptions also fail. Reaching it needs all six pilot farmers to spend their full voice quota on maximum-size recordings, so it is abuse rather than use. The mechanisms that would actually bound it — a lower voice admission ceiling, or client-side audio re-encoding — are outside the approved scope of this amendment and are recorded here as the follow-up decision, not adopted.
-- **Telegram-originated diagnoses have no thumbnail.** Requirement 2.13 puts thumbnail production in the browser, and the Telegram path has no browser: the adapter downloads bytes into a function and uploads them with the service role. Producing a thumbnail there would mean server-side image decoding in the one code path where bytes already move through a function, which V19's Active-CPU note flags as the path worth measuring. So those entries take Requirement 12.7's fallback and render the full-size original in the list until the window elapses, then Requirement 12.10's no-image state. That is why 12.7 exists as a first-class criterion rather than as retention-only degradation — it carries the Telegram channel too. One thing the channel change improves here: Telegram's `photo[]` array offers several server-side size variants (V26), so the adapter can *choose* a smaller variant for the stored original instead of decoding anything, which narrows the gap without adding CPU. Whether that is worth doing is an implementation call, not a design commitment.
-- **Thumbnails accumulate without bound.** Covered in the arithmetic above. The alternative — sweeping thumbnails on a longer second window — would need a second configurable constant and would make history entries lose their image entirely, so it is not adopted here.
+- **A pathological voice day is smaller under A3 but still not bounded by any window.** *Amended by A3:* the voice admission ceiling drops from 10 MB to 3 MB (Requirement 8.2/8.3), so the worst case is 120 × 3 MB ≈ 360 MB in a day rather than 1.2 GB — but that already meets M0's ~512 MB usable budget on its own, before any sweep could run and with none deleted on success if the transcriptions also fail. So A3 shrinks this exposure by more than half yet does not remove it. Reaching it needs all six pilot farmers to spend their full voice quota on maximum-size recordings, so it is abuse rather than use. The mechanisms that would actually bound it — a still-lower voice ceiling, or client-side audio re-encoding — are outside the approved scope of this amendment and are recorded here as the follow-up decision, not adopted.
+- **Telegram-originated diagnoses have no thumbnail.** Requirement 2.13 puts thumbnail production in the browser, and the Telegram path has no browser: the adapter downloads bytes into a function and writes them to GridFS through the Data_Access_Layer (*A3; formerly a service-role upload*). Producing a thumbnail there would mean server-side image decoding in the one code path where bytes already move through a function, which the Active-CPU concern (retired V19, now the M0 posture of V32) flags as the path worth measuring. So those entries take Requirement 12.7's fallback and render the full-size original in the list until the window elapses, then Requirement 12.10's no-image state. That is why 12.7 exists as a first-class criterion rather than as retention-only degradation — it carries the Telegram channel too. One thing the channel change improves here: Telegram's `photo[]` array offers several server-side size variants (V26), so the adapter can *choose* a smaller variant for the stored original instead of decoding anything, which narrows the gap without adding CPU. Whether that is worth doing is an implementation call, not a design commitment.
+- **Thumbnails accumulate without bound.** Covered in the arithmetic above, and sharper on M0: at full quota thumbnails alone exceed the M0 budget within months. The alternative — sweeping thumbnails on a longer second window — would need a second configurable constant and would make history entries lose their image entirely, so it is not adopted here.
 
-All schemas live in `src/lib/schemas.ts`; all types are inferred from them, never hand-declared twice. The verified-condition list is declared once and reused by the Zod enum, the TypeScript union, and the SQL check constraints above.
+All schemas live in `src/lib/schemas.ts`; all types are inferred from them, never hand-declared twice. The verified-condition list is declared once and reused by the Zod enum, the TypeScript union, and — under *Amendment A3* — the MongoDB `$jsonSchema` collection validators (formerly the Postgres check constraints) described above.
 
 ### Shared enums
 
@@ -1329,25 +1414,26 @@ export type DiagnosisResult = z.infer<typeof diagnosisResultSchema>;
 
 Because `knowledge` is `null` in the inconclusive branch, TypeScript makes it impossible to render treatment text for an inconclusive result — the compiler enforces Requirement 6.5 at the UI layer, and the `diagnoses_unknown_shape` check constraint enforces it at the database layer.
 
-### Storage references
+### Media references
+
+*Amended by Amendment A3.* Under Supabase this was a `storageRefSchema` of `{ bucket, path }` whose regex pinned a `{user_id}/{YYYY}/{MM}/{uuid}.{ext}` object path. There is no bucket and no path anymore (**D17**): a Media_Reference is a GridFS file id plus its kind.
 
 ```ts
-export const storageRefSchema = z.object({
-  bucket: z.enum(['crop-images', 'voice-messages']),
-  path: z.string().min(1).max(512)
-    .regex(/^[0-9a-f-]{36}\/\d{4}\/\d{2}\/[0-9a-f-]{36}\.[a-z0-9]{2,5}$/,
-           'path must be {user_id}/{YYYY}/{MM}/{uuid}.{ext}'),
+export const mediaRefSchema = z.object({
+  fileId: z.string().min(1),                        // GridFS file _id (stringified ObjectId)
+  kind: z.enum(['crop-image', 'thumbnail', 'voice']),
 });
+export type MediaReference = z.infer<typeof mediaRefSchema>;   // used by the service interfaces
 ```
 
-The regex enforces the shape; it does not prove ownership. Ownership is a runtime comparison of `path.split('/')[0]` against the session user id, plus an object-exists probe, executed before any quota reserve (Requirements 2.5, 2.6).
+The schema pins the *shape*; it does not prove ownership. Ownership is a runtime comparison of the GridFS file's `metadata.ownerId` against the session user id, done by the Data_Access_Layer before any quota reserve (Requirements 2.5, 2.6) — there is no path to parse and no first-segment trick, so the check is a metadata read rather than a string split, which is stricter (a client cannot craft a reference into another farmer's data because `fileId` is opaque and the owner is read from the stored file, not from the reference).
 
 ### API request and response contracts
 
 ```ts
-// POST /api/diagnose   (D1: JSON, not multipart)
+// POST /api/diagnose   (D1: JSON, not multipart; A3: Media_Reference, not storage ref)
 export const diagnoseRequestSchema = z.object({
-  image: storageRefSchema.refine(r => r.bucket === 'crop-images'),   // Requirement 2.5
+  image: mediaRefSchema.refine(r => r.kind === 'crop-image'),        // Requirement 2.5 (A3)
   language: languageSchema,
   conversationId: z.string().uuid().optional(),                      // Requirement 7.5
 });
@@ -1378,9 +1464,9 @@ export const chatResponseSchema = z.object({
   quota: quotaStatusSchema,
 });
 
-// POST /api/voice
+// POST /api/voice   (A3: Media_Reference, not storage ref)
 export const voiceRequestSchema = z.object({
-  audio: storageRefSchema.refine(r => r.bucket === 'voice-messages'),
+  audio: mediaRefSchema.refine(r => r.kind === 'voice'),
   language: languageSchema,
   conversationId: z.string().uuid(),
   durationSeconds: z.number().positive().max(120),  // Requirement 8.2, re-checked server-side
@@ -1459,7 +1545,7 @@ export const errorEnvelopeSchema = z.object({
 ```ts
 export interface DiagnoseInput {
   userId: string;
-  storageRef: StorageRef;
+  mediaRef: MediaReference;               // A3: GridFS file id + kind, was StorageRef
   language: Language;
   channel: Channel;                       // Requirement 16.5
   conversationId?: string;
@@ -1474,7 +1560,7 @@ export interface ChatService {
                   inputKind?: 'text' | 'voice' }): Promise<ChatAnswer>;
 }
 export interface VoiceService {
-  handle(input: { userId: string; storageRef: StorageRef; language: Language;
+  handle(input: { userId: string; mediaRef: MediaReference; language: Language;
                   channel: Channel; conversationId: string })
     : Promise<{ transcript: string; answer: ChatAnswer }>;
 }
@@ -1705,9 +1791,9 @@ Requirement 22.16 fixes the first four steps as an ordering obligation, so this 
 ```
 1. Parse update → { updateId, telegramUserId, type, textBody?, fileId?,
                     startPayload? }                            [VERIFY V24, V26]
-2. INSERT INTO telegram_inbound (update_id, …)
-     - unique violation → log duplicate_ignored, return 200, ZERO quota,
-       no service call                          [Requirements 11.5, 11.6, 11.7, 11.8]
+2. insertOne into telegram_inbound (_id = update_id)            [A3; was INSERT … unique PK]
+     - duplicate-key error (11000) → log duplicate_ignored, return 200, ZERO
+       quota, no service call                   [Requirements 11.5, 11.6, 11.7, 11.8]
 3. /start short-circuit                                        [Requirement 21]
      - with a token payload  → LinkingService.consumeAndBind (one txn), reply per
        BindOutcome, mark 'processed', 200, ZERO quota            [21.6–21.13, 21.18]
@@ -1724,9 +1810,9 @@ Requirement 22.16 fixes the first four steps as an ordering obligation, so this 
    notes", mark 'rejected', 200, zero quota                    [Requirement 10.9]
 7. Find-or-create the farmer's active Telegram conversation    [Requirements 10.5, 10.8]
 8. Dispatch by type:
-     photo → getFile + download → service-role upload → DiagnosisService  [10.4]
+     photo → getFile + download → write GridFS via Data_Access_Layer → DiagnosisService  [10.4]
      text  → ChatService with the conversation id                         [10.5]
-     voice → getFile + download → service-role upload → VoiceService      [10.6]
+     voice → getFile + download → write GridFS via Data_Access_Layer → VoiceService      [10.6]
 9. Send the reply via sendMessage
 10. Mark telegram_inbound.status = 'processed', return 200      [Requirement 10.11]
 ```
@@ -1747,7 +1833,7 @@ Telegram's retrieval is also two calls, but they are not Meta's two calls, and t
 - **A `file_path` expires.** It is fetched immediately before the download and never cached across invocations, which suits an inline handler (**D11**) and would not suit a deferred one.
 - **The container question is answered rather than open.** A `voice` message is OGG/Opus (V26), which V10's accepted list includes, so Requirement 10.6 is satisfiable — this is the criterion the retired V14 row recorded as unsatisfiable. The adapter still checks the reported `mime_type` against V10's list before downloading, because "always OGG/Opus" is a documented guarantee and not a verified runtime fact, and the check is one comparison. A `voice` note and an `audio` file are different update types with different guarantees, so the adapter admits `voice` and treats `audio` and `document` as the unsupported type of Requirement 10.9.
 
-The adapter then uploads the bytes with the **service-role** client, because a webhook carries no farmer session, writing to `crop-images/{profile.id}/{YYYY}/{MM}/{uuid}.{ext}`. Keeping the `{user_id}/` prefix means the object is readable later by that farmer's own session under the storage policy, which is what lets Telegram diagnoses appear in the web history (Requirements 12.2, 12.5) — through Requirement 12.7's full-size fallback, since this path produces no thumbnail.
+The adapter then writes the bytes to GridFS through the **Data_Access_Layer** (*Amendment A3; formerly a service-role upload to a `crop-images/{profile.id}/…` object path*), because a webhook carries no farmer session — the layer sets `metadata.ownerId` to the resolved `profiles._id` and `metadata.kind` to `crop-image`. Recording the owner as the resolved profile (rather than the `telegram_user_id`) is what lets that farmer's own session read the file later through the owner-checked Media_Endpoint, which is what makes Telegram diagnoses appear in the web history (Requirements 12.2, 12.5) — through Requirement 12.7's full-size fallback, since this path produces no thumbnail. This is the same guarantee the old `{user_id}/` storage prefix gave, moved from a path convention to a metadata field.
 
 Content type and size are checked against the same limits as the web path before upload; an oversized or unsupported media item gets a plain-language reply and spends nothing. Telegram reports no duration on a voice note either, so the web recorder's 120-second check has nothing to compare on this channel and the size cap is the operative bound — the same honest gap the retired V14 row recorded, carried forward because it is a property of inbound chat media rather than of any one provider.
 
@@ -1764,7 +1850,7 @@ Requirement 10.11 wants a 200 for every accepted delivery; Requirement 10.10 wan
 **Decision (D11): process inline in one invocation, then acknowledge, with a soft deadline and an idempotency guard.** *Amended by Amendment A1 — the reasoning is unchanged; the provider names and one retired constraint are.* Reasoning:
 
 - A serverless function on this platform cannot be relied on to keep working after the response is sent unless a supported continuation primitive exists — **VERIFY (V18)**. Designing on an unverified primitive would be the riskier choice.
-- The observed work is one classification call plus one rephrase call plus two Supabase round trips. That fits comfortably inside the assumed 60 s ceiling for a single update.
+- The observed work is one classification call plus one rephrase call plus two MongoDB round trips (*Amendment A3*; formerly Supabase). That fits comfortably inside the assumed 60 s ceiling for a single update.
 - The `telegram_inbound` insert already happened, so even if Telegram redelivers after a slow 200, the redelivery is dropped as a duplicate. **Correctness does not depend on the acknowledgement being fast** — that is the load-bearing sentence in this decision, and it is why the claim precedes anything billable rather than merely preceding the reply.
 - A soft deadline (a fraction of the configured ceiling, same constant as the gateway budget) fires before the platform kills the function: the adapter sends "Jamee is taking longer than usual on this photo — please send it again in a moment", marks the row `failed`, and returns 200. Marking it `failed` rather than `processed` is deliberate — it keeps the audit honest, and the farmer's next send carries a new `update_id` so it is processed normally.
 - `markProcessed` runs **after** the reply is sent, not before. A row marked `processed` on an update whose reply never left the function would make a redelivery a silent no-op and lose the farmer's answer outright.
@@ -1784,21 +1870,23 @@ If V18 confirms a supported continuation primitive, the upgrade path is containe
 | --- | --- | --- |
 | `/` | Server component; `GoogleSignInButton` is client | One control, one provider (Requirement 1.1). Redirects to `/diagnose` when a session exists; shows the "sign-in did not complete" message and offers a retry when the callback returned no exchangeable authorization (Requirement 1.3) |
 | `/diagnose` | Server shell (session + preferred language) + client `ImageUploader` and `DiagnosisResultCard` | Upload, progress, result |
-| `/chat` | Server shell loads conversation + messages via RLS; client `ChatComposer` | Optimistic farmer bubble, server-confirmed answer |
+| `/chat` | Server shell loads conversation + messages through the Data_Access_Layer (A3; was RLS); client `ChatComposer` | Optimistic farmer bubble, server-confirmed answer |
 | `/voice` | Server shell; client `VoiceRecorder` | Needs `MediaRecorder`, so client-only |
-| `/history` | Server component; data via the RLS-scoped server client | Signed thumbnail URLs minted server-side (Requirement 12.5); `EmptyState` invites a first upload when the farmer has no diagnoses (Requirement 12.4) |
+| `/history` | Server component; data through the owner-scoped Data_Access_Layer (A3; was the RLS-scoped server client) | Thumbnails are served by the owner-checked Media_Endpoint, not signed URLs (A3, Requirement 12.5); `EmptyState` invites a first upload when the farmer has no diagnoses (Requirement 12.4) |
 | `/diagnosis/[id]` | Server component | Image, condition or inconclusive label, confidence, severity, full explanation, conversation messages (Requirement 12.3) |
-| `/profile` | Server shell + client form, plus `TelegramLinkCard` and `BotUnlockCard` | Display name + preferred language (Requirement 1.8). The server shell reads the access state so the two cards render from one round trip: linked or not, with the link or unlink action accordingly (Requirement 21.20); entitlement active with no further order offered, or the unlock action with the price (Requirement 22.18). A fresh Link_Token is minted by the action, never on page render, so opening the profile screen does not litter the table with unused capabilities |
+| `/profile` | Server shell + client form, plus `TelegramLinkCard` and `BotUnlockCard` | Display name + preferred language (Requirement 1.8). The server shell reads the access state so the two cards render from one round trip: linked or not, with the link or unlink action accordingly (Requirement 21.20); entitlement active with no further order offered, or the unlock action with the price (Requirement 22.18). A fresh Link_Token is minted by the action, never on page render, so opening the profile screen does not litter the collection with unused capabilities |
 
-Rule of thumb applied throughout: data fetching and signed-URL minting are server-side; anything touching `navigator`, `MediaRecorder`, or local component state is a client component. No route handler is called just to read data a server component can query directly under RLS.
+Rule of thumb applied throughout: data fetching and media serving are server-side; anything touching `navigator`, `MediaRecorder`, or local component state is a client component. No route handler is called just to read data a server component can query directly through the Data_Access_Layer (*Amendment A3; formerly "directly under RLS"* — the owner scope is now the accessor's, not the database's).
 
-### Browser-direct upload
+### Browser upload through the Media_Endpoint
 
-`ImageUploader` validates MIME type against `image/jpeg | image/png | image/webp` and size against 10 MB, and on rejection states both the accepted types and the limit (Requirements 2.3, 2.4). It then uploads straight to `crop-images/{user_id}/{YYYY}/{MM}/{uuid}.{ext}` with the browser Supabase client — the storage policy independently enforces the prefix, so a tampered client cannot write into another farmer's folder. Only on a successful upload does it POST the reference (Requirement 15.5: an upload failure produces an upload error and **no** diagnosis request).
+*Amended by Amendment A3 — the browser no longer uploads directly to a storage bucket; it uploads to a Jamee endpoint, which writes to GridFS.*
+
+`ImageUploader` validates MIME type against `image/jpeg | image/png | image/webp` and size against 10 MB, and on rejection states both the accepted types and the limit (Requirements 2.3, 2.4). *Amended by Amendment A3:* it then re-encodes toward the Downscale_Target and POSTs the file to the Media_Endpoint (`POST /api/media`, multipart, under the 4.5 MB Request_Body_Ceiling), which writes it to GridFS with `metadata.ownerId` = the session user and returns a Media_Reference. There is no browser storage client and no path prefix for a tampered client to escape — the server sets the owner from the session, not from anything the client sends, so a client cannot write into another farmer's data. Only on a successful upload does it POST the Media_Reference to `/api/diagnose` (Requirement 15.5: an upload failure produces an upload error and **no** diagnosis request).
 
 ### Voice capture
 
-`VoiceRecorder` is hold-to-speak: `MediaRecorder` starts on press, stops on release. It enforces a hard 120 s stop with a visible countdown from 100 s, and rejects a blob over 10 MB after stop, stating both limits (Requirements 8.2, 8.3). The recorded container/codec must be one the transcription provider accepts — **VERIFY (V10, V20)**; the component picks from a preference list of supported MIME types and surfaces a clear message if the browser offers none. Upload goes directly to `voice-messages/{user_id}/…`, then `/api/voice` receives the reference and the measured duration. The response renders transcript above answer (Requirement 8.6). No audio playback of answers in this release (Requirement 8.8).
+`VoiceRecorder` is hold-to-speak: `MediaRecorder` starts on press, stops on release. It enforces a hard 120 s stop with a visible countdown from 100 s, and — *Amendment A3* — rejects a blob over **3 MB** after stop (was 10 MB; lowered so the upload leg clears the 4.5 MB Request_Body_Ceiling with headroom, Requirements 8.2, 8.3), stating both limits. The recorded container/codec must be one the transcription provider accepts — **VERIFY (V10, V20)**; the component picks from a preference list of supported MIME types and surfaces a clear message if the browser offers none. *A3:* the upload goes to the Media_Endpoint (`POST /api/media`), which writes it to GridFS as a `voice` file, then `/api/voice` receives the Media_Reference and the measured duration. The response renders transcript above answer (Requirement 8.6). No audio playback of answers in this release (Requirement 8.8).
 
 ### Honest loading states
 
@@ -1826,11 +1914,14 @@ Accessibility specifics: every control has a visible label plus an accessible na
 
 ### Environment variables
 
+*Amended by Amendment A3.* The four Supabase variables are removed; the Supabase anon-vs-service-role distinction that shaped this section is gone, because there is no browser database key and no service-role key. What replaces them is one server-only connection string and the auth library's own secrets.
+
 | Variable | Exposure | Used by |
 | --- | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Public (browser) | Browser + server clients |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public (browser) | Browser client; RLS applies |
-| `SUPABASE_SERVICE_ROLE_KEY` | **Server only** | `lib/supabase/admin.ts` |
+| `MONGODB_URI` | **Server only** | `src/lib/db/client.ts` — the only holder of the `MongoClient` (D18, D19, V28). Carries credentials; never `NEXT_PUBLIC_` |
+| `AUTH_SECRET` *(name per chosen library, V30/V35)* | **Server only** | The auth library's session signing/encryption |
+| `GOOGLE_CLIENT_ID` *(name per chosen library)* | **Server only** | Auth library Google provider (V30) |
+| `GOOGLE_CLIENT_SECRET` *(name per chosen library)* | **Server only** | Auth library Google provider (V30) |
 | `GEMINI_API_KEY` | **Server only** | `lib/gemini.ts` |
 | `GROQ_API_KEY` | **Server only** | `lib/groq.ts` |
 | `TELEGRAM_BOT_TOKEN` | **Server only** | `getFile`, file download, `sendMessage` (V24, V25) |
@@ -1842,25 +1933,25 @@ Accessibility specifics: every control has a visible label plus an accessible na
 | `RAZORPAY_WEBHOOK_SECRET` | **Server only** | Payment webhook signature (Requirement 22.5, D15) |
 | `RETENTION_SWEEP_SECRET` | **Server only** | Retention sweep gate (Requirement 18.12) |
 
-No SMS provider variable appears, and none is required (Requirement 1.10). The Google OAuth client id and secret are configured in the Supabase dashboard rather than in Jamee's environment, so they are not in this table — V23 confirms where they live and which redirect URLs must be registered.
+No SMS provider variable appears, and none is required (Requirement 1.10). *A3:* unlike the Supabase design, where the Google client id/secret lived in the Supabase dashboard (the retired V23), they are now Jamee's own server-only environment variables consumed by the in-app auth library, named according to whichever library V35 selects — which is why they appear here by role rather than by a fixed name (V30). There is no public database URL and no public database key at all anymore, so the only `NEXT_PUBLIC_` values are the Telegram bot username and the duplicated Razorpay checkout key id, neither a secret.
 
 The duplicated Razorpay key id deserves its note. A single `RAZORPAY_KEY_ID` read from both a server module and a client component would work right up until someone moved the read, at which point the build would silently ship `undefined` to checkout. Two names make the exposure a declaration instead of an accident, and a CI check asserts the unprefixed name never appears in a file containing `'use client'`. `BOT_UNLOCK_PRICE` and `LINK_TOKEN_TTL_MINUTES` are deliberately **not** in this table at all: Requirements 22.4 and 21.4 require them to be compile-time constants read from one place, reviewable in a diff, not values an environment can change without a code review.
 
-Only `NEXT_PUBLIC_`-prefixed values can reach the browser bundle, which is the mechanical guarantee behind Requirement 13.7. Three further layers make an accidental leak hard:
+Only `NEXT_PUBLIC_`-prefixed values can reach the browser bundle, which is the mechanical guarantee behind Requirement 13.7. Three further layers make an accidental leak hard (*A3 restates them against the new modules*):
 
-1. `src/lib/supabase/admin.ts` begins with `import 'server-only'`, so importing it from a client component is a build error, not a runtime surprise.
-2. The service-role client is created inside a function (never at module scope) and that function throws when `typeof window !== 'undefined'`.
+1. `src/lib/db/client.ts` begins with `import 'server-only'`, so importing the module that holds the `MongoClient` from a client component is a build error, not a runtime surprise — the same guard the retired `lib/supabase/admin.ts` carried.
+2. The `MongoClient` is created inside a cached factory (never at module scope beyond the `globalThis` cache) and that factory throws when `typeof window !== 'undefined'`.
 3. Secrets are read through a small `serverEnv` accessor in a `server-only` module that validates presence at first use with Zod and fails loudly; no `process.env.X!` scattered through the codebase.
 
-A CI grep asserts that `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` appear only under `src/lib/**` server modules and `src/app/api/**`, and never in a file containing `'use client'`. `scripts/check-secret-scope.ts` is the existing home for that check.
+A CI grep asserts that `MONGODB_URI`, the auth library secret and Google client id/secret, `GEMINI_API_KEY`, `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET_TOKEN`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` appear only under `src/lib/**` server modules and `src/app/api/**`, and never in a file containing `'use client'`. `scripts/check-secret-scope.ts` is the existing home for that check, and `scripts/check-data-access.ts` (D18) is its sibling for the driver boundary.
 
 ### Defence in depth
 
-RLS is the primary authorization boundary and is enabled on all six farmer-facing tables plus the three access tables `link_tokens`, `payment_orders`, and `bot_entitlements` (Requirements 13.1, 21.3, 22.23), plus `counters`, `telegram_inbound`, and `webhook_throttle`. Route handlers additionally check the session (Requirement 1.7) and object ownership (Requirement 2.5) rather than relying on RLS alone, because service-role paths (the Telegram adapter, the access services, the quota functions, the retention sweep) bypass RLS by design — so for those paths the application check *is* the boundary. Every service-role query is written with an explicit `user_id` predicate for exactly that reason, and code review treats a service-role query without a `user_id` filter as a defect.
+*Amended by Amendment A3.* Under Supabase, RLS was the *primary* authorization boundary and the application checks were defence in depth on top of it. A3 inverts that: MongoDB has no RLS, so the **Data_Access_Layer's owner-scoping is the primary boundary** and it is application-enforced (**D18**), which A3 records as an accepted weakening. The session check (Requirement 1.7) and the media ownership check (Requirement 2.5) remain, and every accessor injects the owning Auth_User_Id into its filter, insert, update, and delete — so a query without an owner scope is not merely a review defect, it is unreachable, because the raw driver is not importable outside `src/lib/db/**` and the accessors expose no unscoped seam. What was "every service-role query carries an explicit `user_id` predicate" becomes "every accessor carries the owner scope by construction", and `scripts/check-data-access.ts` fails the build if any module reaches around the layer.
 
-The three access tables carry a `select`-own policy and **no** write policy at all, which is Requirement 22.23's "restrict every write to server-side modules using the Service_Role_Key" expressed the way Postgres enforces it: with RLS enabled and no `insert`, `update`, or `delete` policy, those verbs are unreachable for `anon` and `authenticated`, and only the service role — which bypasses RLS — can write. A farmer session therefore cannot mint a token for someone else, extend an expiry, un-consume a token, mark an order captured, or grant itself an entitlement, and none of that depends on application code being careful.
+What used to be RLS write-policies on the access collections becomes the same thing MongoDB expresses differently: `link_tokens`, `payment_orders`, and `bot_entitlements` are written only through Data_Access_Layer accessors that a farmer session has no path to invoke with someone else's owner id, since the owner id is taken from the session or from a server-verified record, never from client input. A farmer session therefore cannot mint a token for someone else, extend an expiry, un-consume a token, mark an order captured, or grant itself an entitlement — the guarantee Requirement 22.23 asks for, now held by the module boundary rather than by an `anon`/`authenticated` policy split. Uniqueness stays database-enforced throughout: the unique indexes of **D19** are the database's job exactly as the old `UNIQUE` constraints were, so that half of the boundary is not weakened at all.
 
-Two service-role writes in this amendment are worth naming because their tenant anchor is not a `user_id` the caller supplied. The linking bind takes its `user_id` from the token row's own `RETURNING user_id`, never from anything in the Telegram update — a sender cannot nominate whose profile to bind to. The entitlement grant takes its `user_id` from the recorded `payment_orders` row, never from the webhook payload (Requirement 22.7) — a forged-but-somehow-verified payload cannot redirect a grant.
+Two writes in this amendment are worth naming because their tenant anchor is not an owner id the caller supplied. The linking bind takes its owner id from the token document's own value returned by the consume `findOneAndUpdate`, never from anything in the Telegram update — a sender cannot nominate whose profile to bind to. The entitlement grant takes its owner id from the recorded `payment_orders` document, never from the webhook payload (Requirement 22.7) — a forged-but-somehow-verified payload cannot redirect a grant.
 
 ---
 
@@ -1874,11 +1965,11 @@ One `AppError` type carrying a stable code; one mapping table to HTTP status and
 | `OAUTH_INCOMPLETE` | 401 | yes | Sign-in did not complete; offers to sign in again. Replaces `OTP_INVALID`, retired with phone auth. One code for a cancelled authorization, a provider error, and a callback with nothing to exchange — the farmer's next action is identical in all three, and distinguishing them would only describe Google's internals | 1.3 |
 | `LANGUAGE_UNSUPPORTED` | 400 | no | Names `en`, `hi`, `mr` in `details.supportedLanguages` | 9.5 |
 | `MESSAGE_INVALID` | 400 | no | The question could not be read; type it again. The text counterpart of `STORAGE_REF_INVALID`, so `/api/chat`'s body-contract fallback does not name a photo | 7.1, 15.3 |
-| `STORAGE_REF_INVALID` | 400 | no | Reference is not a usable object | 2.2 |
-| `STORAGE_REF_FORBIDDEN` | 403 | no | Not your file | 2.6 (quota untouched) |
+| `STORAGE_REF_INVALID` | 400 | no | Reference is not a usable file (A3: a Media_Reference, `{fileId,kind}`; the stable code name is kept) | 2.2 |
+| `STORAGE_REF_FORBIDDEN` | 403 | no | Not your file (A3: ownership is the GridFS `metadata.ownerId`) | 2.6 (quota untouched) |
 | `FILE_TYPE_UNSUPPORTED` | 400 | no | Lists accepted types and max size | 2.4 |
-| `FILE_TOO_LARGE` | 400 | no | States the 10 MB limit | 2.4, 8.3 |
-| `AUDIO_TOO_LONG` | 400 | no | States 120 s and 10 MB | 8.3 |
+| `FILE_TOO_LARGE` | 400 | no | States the 10 MB image limit | 2.4, 8.3 |
+| `AUDIO_TOO_LONG` | 400 | no | States 120 s and the 3 MB audio size limit (A3: was 10 MB) | 8.3 |
 | `AUDIO_FORMAT_UNSUPPORTED` | 400 | no | The recording cannot be used; type the question instead. V10's accepted containers go in `details.acceptedTypes`, not into the sentence | 8.4, 10.6 |
 | `RATE_LIMITED` | 429 | yes | Slow down, try again shortly | 13.8 |
 | `QUOTA_EXCEEDED` | 429 | no (today) | States the limit and reset time via `details` | 14.3 |
@@ -1908,9 +1999,11 @@ Unit and property tests are complementary: property tests cover the universal ru
 
 ### Unit tests (Vitest)
 
+*Amended by Amendment A3: unit tests mock the Data_Access_Layer (its owner-scoped accessors), not a Supabase client — a service under test receives a fake accessor and asserts the owner id it passed, rather than asserting against a fake Supabase query builder.*
+
 - **Zod schemas.** Malformed JSON, missing fields, confidence at `-0.1` / `0` / `1` / `1.1`, unknown severity, out-of-KB disease name — each maps to its expected `RejectionReason` (Requirements 5.2–5.6).
 - **Grounding.** Rephrase requests contain the knowledge-base arrays and no other agronomic content; `Tomato Healthy` produces no treatment text; canonical names survive `en`/`hi`/`mr` untouched (Requirements 3.4, 4.6, 9.4).
-- **Quota atomicity.** Against a real Postgres instance: fire the reserve concurrently at the limit boundary and assert the total never exceeds the limit and no reservation is lost; assert refund never drives `used` below zero.
+- **Quota atomicity.** *Amended by A3:* against a real MongoDB (a `mongodb-memory-server` replica set, V31), fire the `findOneAndUpdate` reserve concurrently at the limit boundary and assert the total never exceeds the limit and no reservation is lost; assert the guarded decrement never drives `used` below zero.
 - **Spend rule.** Ownership 403 → zero; duplicate delivery → zero; inconclusive → exactly one; pre-provider failure → refunded to zero.
 - **Webhook secret token.** Matching header passes; absent header, wrong value, right value with a flipped byte, and an unconfigured secret all yield 401 with the body unparsed; the comparison is constant-time and takes the same time for an absent header as a wrong one (Requirements 11.2–11.4).
 - **Payment signature.** Valid signature over the raw body passes; flipped byte, truncated digest, absent header, unconfigured secret, and a re-serialized body all fail; comparison is constant-time (Requirements 22.5, 22.6).
@@ -1925,11 +2018,13 @@ Unit and property tests are complementary: property tests cover the universal ru
 
 The single-implementation claims are structural, not behavioural, so they are verified by a static check rather than by a property test: exactly one `DiagnosisService` module and one `ChatService` module exist; both the route handlers and the Telegram adapter import those modules rather than reimplementing image analysis, grounding, or rephrasing; and nothing under `src/services/**` or `src/lib/**` imports from `src/app/**`. That last rule is what keeps the first two true as the codebase grows (Requirements 3.8, 7.7, 16.1–16.4).
 
-Two checks are added by Amendment A1, and both are structural for the same reason — they assert an *absence*, which no behavioural test can do convincingly. First, no module under `src/services/diagnosis|chat|voice` imports `entitlement.service`, which is **D14** and Requirement 22.17 enforced by the dependency graph rather than by vigilance. Second, `profiles.phone` has no reader outside `supabase/migrations/**`, which keeps Requirement 1.9's "takes part in no identity resolution" true as the codebase grows rather than only on the day it was written.
+Two checks are added by Amendment A1, and both are structural for the same reason — they assert an *absence*, which no behavioural test can do convincingly. First, no module under `src/services/diagnosis|chat|voice` imports `entitlement.service`, which is **D14** and Requirement 22.17 enforced by the dependency graph rather than by vigilance. Second, `profiles.phone` has no reader outside the collection setup (A3: `scripts/db-setup.ts`; formerly `supabase/migrations/**`), which keeps Requirement 1.9's "takes part in no identity resolution" true as the codebase grows rather than only on the day it was written.
 
-### Integration tests (mocked providers, real Postgres)
+**Amendment A3 adds a third structural check, for the same reason and the same technique:** no module outside `src/lib/db/**` imports the `mongodb` driver or the raw database handle (`scripts/check-data-access.ts`, **D18**). This is what turns "tenant isolation is application-enforced" from a hope into a boundary — the owner scope can be forgotten only inside the one small layer that is unit-tested for it, because nowhere else can even reach the driver to write an unscoped query. It is the exact analogue of the secret-scope and phone-reader checks: an absence a static check can prove and a behavioural test cannot.
 
-Providers are mocked at the adapter seam so the gateway, services, validation, persistence, and RLS are all real. Scenarios follow the requirements' own test matrix: healthy crop, clear diseased crop, blurry image, non-plant image, multiple leaves; chat in three languages plus a subject-less follow-up and an unknown question; voice with empty and noisy transcripts; Telegram text, photo, voice note, unsupported type, unlinked sender, **linked sender holding no entitlement**, duplicate update, timeout, and provider rate limit; account linking across a valid first-time link, an expired token, a consumed token, a Telegram account already linked elsewhere, and a `/start` with no payload; payment across an abandoned checkout, a replayed webhook, a forged signature, a captured payment opening a previously gated sender, and a flood of unauthenticated calls on the webhook route. RLS is verified by attempting cross-farmer reads with a second farmer's session and asserting zero rows — now including `link_tokens`, `payment_orders`, and `bot_entitlements`, and including a write attempt on each, which must fail rather than return zero rows.
+### Integration tests (mocked providers, real MongoDB)
+
+*Amended by Amendment A3.* Integration tests run against a real MongoDB via `mongodb-memory-server` in **replica-set mode** (V31) — needed because the link and payment paths use multi-document transactions (**D19**, V33) — so no Docker and no Supabase local stack is required, and the integration project no longer has to self-skip. Providers are mocked at the adapter seam so the gateway, services, validation, persistence, and the Data_Access_Layer's owner-scoping are all real. Scenarios follow the requirements' own test matrix: healthy crop, clear diseased crop, blurry image, non-plant image, multiple leaves; chat in three languages plus a subject-less follow-up and an unknown question; voice with empty and noisy transcripts; Telegram text, photo, voice note, unsupported type, unlinked sender, **linked sender holding no entitlement**, duplicate update, timeout, and provider rate limit; account linking across a valid first-time link, an expired token, a consumed token, a Telegram account already linked elsewhere, and a `/start` with no payload; payment across an abandoned checkout, a replayed webhook, a forged signature, a captured payment opening a previously gated sender, and a flood of unauthenticated calls on the webhook route. Tenant isolation is verified by attempting cross-farmer reads through a second farmer's scope and asserting zero documents — across `profiles`, `conversations`, `messages`, `diagnoses`, `usage_logs`, `link_tokens`, `payment_orders`, and `bot_entitlements` — and, on the access collections, a cross-farmer *write* attempt that must fail (the accessor exposes no unscoped seam) rather than return zero documents. GridFS ownership is verified the same way: a farmer cannot fetch or delete a file whose `metadata.ownerId` is another's.
 
 ### Manual tester validation
 
@@ -1948,28 +2043,28 @@ Results are recorded in `docs/TESTING_REPORT.md` (Requirement 17.5).
 
 ## Deployment
 
-Ten steps for `docs/DEPLOYMENT.md` (Requirement 17.3), each with the V-items it must resolve:
+Ten steps for `docs/DEPLOYMENT.md` (Requirement 17.3), each with the V-items it must resolve. *Amended by Amendment A3: the Supabase steps become Atlas + auth-library + `db:setup`.*
 
-1. Create the Supabase project; record URL, anon key, service-role key.
-2. Configure the Google OAuth client and register the callback redirect URLs for local and deployed origins, then enable the Google provider in Supabase (V23). No SMS provider is configured, and none is needed (Requirement 1.10).
-3. Run `supabase/migrations/*` in order; assert `select count(*) = 5 from disease_knowledge` (Requirement 4.1), that both buckets exist and are private (Requirement 13.5), and that RLS is enabled on all nine farmer-facing and access tables (Requirements 13.1, 21.3, 22.23).
-4. Obtain `GEMINI_API_KEY` and `GROQ_API_KEY`; resolve model identifiers (V6, V8, V9, V10) and record them in `docs/API.md`.
+1. Create the MongoDB Atlas free (M0) cluster; record `MONGODB_URI` (server-only). Note the accepted academic trade-off that network access MAY be `0.0.0.0/0` on a platform without fixed egress IPs (A3 point 7). Confirm the M0 storage and connection limits (V32).
+2. Choose the auth library (Auth.js v5 or Better Auth) by reading `node_modules/next/dist/docs` for the installed Next.js version (V35, D18a); configure its Google provider and MongoDB adapter; create the Google OAuth client and register the callback redirect URLs for local and deployed origins; record the library secret and the Google client id/secret as server-only env vars (V30). No SMS provider is configured, and none is needed (Requirement 1.10).
+3. Run `npm run db:setup` (A3, replaces the SQL migrations): it creates every collection, its unique/partial/sparse indexes, its `$jsonSchema` validators, the GridFS bucket, and seeds the five conditions; then assert `disease_knowledge` count = 5 (Requirement 4.1), that the GridFS bucket exists (Requirement 13.5 as amended), and that the owner-scoping accessors and unique indexes are in place across the nine farmer-facing and access collections plus `counters`, `telegram_inbound`, and `webhook_throttle` (Requirements 13.1, 21.3, 22.23; V28, V29).
+4. Obtain `GEMINI_API_KEY` and `GROQ_API_KEY`; resolve model identifiers and inline-byte limits (V6, V8, V9, V10, V34) and record them in `docs/API.md`.
 5. Create the Telegram bot with BotFather; record `TELEGRAM_BOT_TOKEN` and the bot username; generate `TELEGRAM_WEBHOOK_SECRET_TOKEN` from a cryptographically secure source (V24).
-6. Create the Razorpay account; record the key id, key secret, and webhook secret; register the payment webhook endpoint and subscribe it to the captured and failed payment events; record whether this environment is in test or live mode (Requirements 22.25, O22-3; V27).
+6. Create the Razorpay account; record the key id, key secret, and webhook secret; register the payment webhook endpoint and subscribe it to the captured and failed payment events; record whether this environment is in test or live mode — A3 resolves O22-3 to **test mode for all pilot testers** (Requirements 22.25, O22-3; V27).
 7. Deploy to Vercel with all environment variables; confirm the permitted `maxDuration` on the plan (V16, V17).
 8. Register the webhook with `setWebhook`, supplying the deployed route URL and the `secret_token` (Requirement 11.1); confirm a POST with no secret-token header returns 401 and that a real message from the bot reaches the route.
 9. Smoke test the release acceptance sequence from the requirements, end to end, on a phone — payment before linking, linking before the photo, as step 6 of that sequence requires.
-10. Record free-tier headroom for 6 farmers from the resolved V19 numbers.
+10. Record free-tier headroom for 6 farmers from the resolved V32 numbers (Atlas M0 storage and connections), noting that under A3 records and files share the ~512 MB budget (see the retention arithmetic).
 
 TypeScript strict mode with zero errors is a release gate, enforced in CI (Requirement 17.8).
 
 ### Documentation deliverables (Requirement 17)
 
-- `.env.example` — every variable name with a placeholder, no real secret, including the three Razorpay names (17.2, 22.25). `BOT_UNLOCK_PRICE` and `LINK_TOKEN_TTL_MINUTES` do **not** appear here; they are compile-time constants (Requirements 21.4, 22.4).
-- `docs/API.md` — each endpoint's method, request schema, response schema, and error codes, generated from the Zod schemas so it cannot drift (17.4). The two webhook routes are documented with their authentication mechanism in place of a request schema, since neither body is Jamee's.
-- `docs/DEPLOYMENT.md` — the ten steps above, the resolved values-to-verify table, the retention arithmetic (18.2), the recorded Bot_Unlock_Price (22.4), and the note that the Payment_Provider adds no fixed or recurring cost (22.26).
+- `.env.example` — every variable name with a placeholder, no real secret, including `MONGODB_URI`, the auth library secret and Google client id/secret, and the three Razorpay names (17.2, 22.25; A3). The retired Supabase names do not appear. `BOT_UNLOCK_PRICE` and `LINK_TOKEN_TTL_MINUTES` do **not** appear here; they are compile-time constants (Requirements 21.4, 22.4).
+- `docs/API.md` — each endpoint's method, request schema, response schema, and error codes, generated from the Zod schemas so it cannot drift (17.4). The Media_Endpoint (A3) and the two webhook routes are documented with their behaviour/authentication mechanism in place of a full request schema, since the webhook bodies are the providers' and the upload leg is multipart.
+- `docs/DEPLOYMENT.md` — the ten steps above, the resolved values-to-verify table, the retention arithmetic against the ~512 MB M0 budget (18.2, A3), the recorded Bot_Unlock_Price (22.4), and the note that the Payment_Provider adds no fixed or recurring cost (22.26).
 - `docs/TESTING_REPORT.md` — image, chat, voice, Telegram, account-linking, and payment scenario outcomes (17.5).
-- `supabase/migrations/` — tables, RLS policies, buckets, and the five seed rows (17.6).
+- **Database setup (A3)** — `scripts/db-setup.ts` run as `npm run db:setup`: collections, unique/partial indexes, `$jsonSchema` validators, the GridFS bucket, and the five seed documents (17.6). This replaces the `supabase/migrations/` deliverable, which is retained only as a historical record applied to nothing.
 
 ---
 
@@ -1977,7 +2072,7 @@ TypeScript strict mode with zero errors is a release gate, enforced in CI (Requi
 
 Two seams exist so the deferred requirements do not force a rewrite, and neither is built in this release:
 
-- **Video frame analysis (Requirement 19).** `DiagnosisService` already separates "obtain image bytes" from "classify and ground". A future frame-sampling step would produce N images and reduce them to one `Diagnosis_Result` through the existing validation and grounding path. The `video-inputs` bucket is **not created** in this release.
+- **Video frame analysis (Requirement 19).** `DiagnosisService` already separates "obtain image bytes" from "classify and ground". A future frame-sampling step would produce N images and reduce them to one `Diagnosis_Result` through the existing validation and grounding path. No `video` GridFS kind is written in this release (A3; formerly "the `video-inputs` bucket is not created").
 - **Expert video calling (Requirement 20).** `needs_expert` is already persisted on every inconclusive diagnosis, so a future "request an expert" action has a query to hang off with no schema change.
 
 *(These two were numbered 18 and 19 in the pre-amendment requirements. They are 19 and 20 now — 18 is Media Lifecycle And Retention, which this release implements.)*
