@@ -1350,38 +1350,38 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - The three invalid-token cases resolve to one byte-identical string within each of en/hi/mr; every amended taxonomy code yields its status, retryable flag, and a non-empty message in all three languages
     - _Requirements: 13.7, 15.3, 21.8, 22.4_
 
-- [ ] 52. Build the Data_Access_Layer as the only holder of the driver
-  - [ ] 52.1 Create `src/lib/db/client.ts` — the cached server-only MongoClient
+- [x] 52. Build the Data_Access_Layer as the only holder of the driver
+  - [x] 52.1 Create `src/lib/db/client.ts` — the cached server-only MongoClient
     - `import 'server-only'` at the top; a `globalThis`-cached `MongoClient` so serverless invocations reuse one pool within the M0 connection limit (D19, V28, V32); the factory throws when `typeof window !== 'undefined'`; `MONGODB_URI` read through `serverEnv`
     - This module and its siblings under `src/lib/db/**` are the **only** code that imports the `mongodb` driver or touches the raw handle
     - _Requirements: 13.7_
     - _Depends on: V28, V32_
 
-  - [ ] 52.2 Create the typed collection handles and `$jsonSchema`-validated accessors
+  - [x] 52.2 Create the typed collection handles and `$jsonSchema`-validated accessors
     - Typed handles for `profiles`, `conversations`, `messages`, `diagnoses`, `usage_logs`, `disease_knowledge`, `link_tokens`, `payment_orders`, `bot_entitlements`, `counters`, `telegram_inbound`, `webhook_throttle`, plus whatever collections the auth adapter needs — types inferred from the existing Zod schemas in `src/lib/schemas.ts`, never hand-declared twice
     - Every accessor takes the owning Auth_User_Id as a **mandatory** argument and merges `{ ownerId }` into every filter, sets it on every insert, and cannot widen past it on update or delete; there is deliberately **no** unscoped `find(arbitraryFilter)` seam (D18)
     - The writing accessor sets `updatedAt` (there is no trigger); expose the atomic operations of D19 (`counter_try_increment` / decrement / used as `findOneAndUpdate`, the `telegram_inbound` `insertOne` claim, the `webhook_throttle` upsert, and the two transactional operations for linking and payment as session-bearing helpers)
     - _Requirements: 13.1, 13.2, 14.1, 14.2, 14.3_
     - _Design: D18, D19; depends on V28, V33_
 
-  - [ ] 52.3 Create `scripts/check-data-access.ts` as a CI guard
+  - [x] 52.3 Create `scripts/check-data-access.ts` as a CI guard
     - Fail the build if any file outside `src/lib/db/**` imports the `mongodb` driver or the raw database handle — the sibling of `check-secret-scope.ts`, turning "isolation is application-enforced" into a module boundary a static check proves (D18)
     - _Requirements: 13.7_
     - _Design: D18; Static architecture check (CI)_
 
-  - [ ]* 52.4 Write unit tests for the owner-id merge and the client isolation
+  - [x]* 52.4 Write unit tests for the owner-id merge and the client isolation
     - Every accessor merges `{ ownerId }` into filters and sets it on inserts; an update or delete cannot escape the owner scope; there is no accessor that accepts a filter with no owner
     - The client factory throws when a browser global is present; importing `src/lib/db/client.ts` from a `'use client'` module fails the build
     - _Requirements: 13.2, 13.7_
 
-- [ ] 53. Create the idempotent `npm run db:setup` — collections, validators, indexes, seed
-  - [ ] 53.1 Create `scripts/db-setup.ts` (run as `npm run db:setup`) creating collections with `$jsonSchema` validators
+- [x] 53. Create the idempotent `npm run db:setup` — collections, validators, indexes, seed
+  - [x] 53.1 Create `scripts/db-setup.ts` (run as `npm run db:setup`) creating collections with `$jsonSchema` validators
     - Create all twelve Jamee collections idempotently (creating an existing collection or index is a no-op). Attach `$jsonSchema` validators pinning the enumerated fields the SQL CHECKs held: `profiles.language` ∈ en/hi/mr; `conversations.channel` and `messages.channel` ∈ web/telegram; `messages.role` ∈ farmer/jamee and `input_kind` ∈ text/voice/image; `disease_knowledge.disease_name` ∈ the five Verified_Conditions, `crop` ∈ tomato/potato, and the healthy-has-no-treatment invariant where `$jsonSchema` can express it; `diagnoses.status` ∈ identified/unknown, `severity`, `channel`, `model_provider`, and the unknown-shape / identified-shape constraints; `usage_logs.operation`/`outcome`/`channel`; `counters` and `webhook_throttle` enumerations; `payment_orders.status` ∈ created/captured/failed/cancelled; `telegram_inbound.message_type` and `status` (incl. `unlinked`, `not_entitled`)
     - `profiles._id` is the Auth_User_Id; `bot_entitlements._id` is the Auth_User_Id (at-most-one-per-farmer by primary key, D14); `telegram_inbound._id` is the `update_id` (the claim, D19)
     - _Requirements: 4.1, 4.2, 13.1, 13.3, 13.4, 17.6, 21.16, 22.12_
     - _Design: Data model and collection setup; D14, D19; depends on V28_
 
-  - [ ] 53.2 Create every index from design A3 in the same script
+  - [x] 53.2 Create every index from design A3 in the same script
     - Unique indexes for every former `UNIQUE`, **partial or sparse where the field is nullable**: `profiles.telegram_user_id` partial (unique when present, any number of unlinked profiles), `disease_knowledge.disease_name`, `link_tokens.token_hash`, `payment_orders.provider_order_id`, `payment_orders.provider_payment_id` partial (the A3-called-out case), `bot_entitlements.provider_payment_id`
     - Query indexes: `conversations {user_id, updated_at desc}`, `messages {conversation_id, created_at desc}`, `diagnoses {user_id, created_at desc}` and `{conversation_id, created_at desc}`, the partial retention index `{createdAt: 1}` with `partialFilterExpression: { fullImageDeletedAt: null }`, `usage_logs {user_id, created_at desc}` and `{outcome, created_at desc}`, `telegram_inbound {received_at desc}`, `link_tokens {user_id, created_at desc}`, `payment_orders {user_id, created_at desc}`
     - The compound `counters {user_id, operation, window_kind, window_key}` and `webhook_throttle {route, caller_hash, window_key}` unique indexes that make the atomic upserts safe (D19)
@@ -1389,18 +1389,18 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 11.5, 11.6, 13.9, 14.1, 21.7, 22.11_
     - _Design: D19; 0002–0013 collection notes; depends on V28_
 
-  - [ ] 53.3 Create the single GridFS bucket and its metadata indexes in the same script
+  - [x] 53.3 Create the single GridFS bucket and its metadata indexes in the same script
     - One `GridFSBucket` (its `.files`/`.chunks` collections), files distinguished by `metadata.kind` ∈ crop-image/thumbnail/voice, owned by `metadata.ownerId`, linked by `metadata.sourceRef` (D17)
     - Indexes `{ 'metadata.ownerId': 1, 'metadata.kind': 1 }` for the owner-check and the retention kind-filter; rely on the built-in `uploadDate` for the age-based backstop. No `video` kind is written
     - _Requirements: 13.5, 13.6_
     - _Design: D17; depends on V29_
 
-  - [ ] 53.4 Seed the five verified conditions idempotently in the same script
+  - [x] 53.4 Seed the five verified conditions idempotently in the same script
     - One document each for Tomato Early Blight, Tomato Late Blight, Tomato Healthy, Potato Early Blight, Potato Late Blight with symptoms, causes, treatment, prevention, `default_severity`, and a verbatim extension-service `source` per row (replace the design's placeholder citations with real ones); Tomato Healthy carries an empty treatment array; upsert on `disease_name` so re-running is a no-op
     - _Requirements: 4.1, 4.2, 17.6_
     - _Design: 0010 seed_
 
-  - [ ]* 53.5 Write integration tests for the setup, the validators, and the invariants
+  - [x]* 53.5 Write integration tests for the setup, the validators, and the invariants
     - `count = 5` on `disease_knowledge`; a `$jsonSchema` violation (bad severity, out-of-KB name, an `unknown` diagnosis carrying a disease name) is rejected by the validator; `db:setup` run twice changes nothing
     - A partial unique index lets any number of profiles omit `telegram_user_id` but rejects a second identical present value; two `bot_entitlements` for one `user_id` fail (primary key) and two rows carrying one `provider_payment_id` fail (unique index); `counter_try_increment` returns the new count below the limit and null/`11000` at it
     - _Requirements: 4.1, 6.4, 6.5, 13.3, 13.4, 21.16, 22.11, 22.12_
