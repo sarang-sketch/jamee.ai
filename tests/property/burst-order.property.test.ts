@@ -1,11 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
 import * as fc from 'fast-check';
+import { ObjectId, type WithId } from 'mongodb';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner } from '@/lib/ai/capabilities';
-import { BURST_QUOTAS, DAILY_QUOTAS, STORAGE_BUCKETS } from '@/lib/config/verified';
+import { BURST_QUOTAS, DAILY_QUOTAS } from '@/lib/config/verified';
+import type { MessageDoc } from '@/lib/db/collections';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import { ERROR_SPECS, errorResponse, isAppError, toEnvelope, type AppError } from '@/lib/errors';
 import type { TranscriptionResult } from '@/lib/groq';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
@@ -16,18 +18,18 @@ import {
   type Channel,
   type ChatInput,
   type Language,
+  type MediaRef,
   type Operation,
-  type StorageRef,
   type VerifiedCondition,
   type WindowKind,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import { dayWindowKey, minuteWindowKey } from '@/lib/time';
 import {
   chatTurn,
   type ChatTurnDeps,
   type ChatWriteStore,
   type ContextStore,
+  type MessageInsert,
 } from '@/services/chat.service';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
@@ -41,13 +43,12 @@ import {
 import {
   transcribeAndAnswer,
   type ChatAnswerer,
+  type MediaRemover,
   type NestedChatOutcome,
-  type ObjectRemoveClient,
   type Transcriber,
   type VoiceDeps,
   type VoiceStore,
 } from '@/services/voice.service';
-import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
 
 /**
  * **Property 28: Burst rate limiting precedes any quota spend**
@@ -102,11 +103,12 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
  * ### Which channels are generated, and why both
  *
  * Requirement 13.8 names the diagnosis, chat and voice **endpoints** — the three web routes — and
- * `rate-limit.ts` records that the WhatsApp webhook deliberately binds no limiter. The channel is
- * generated anyway, and the reason is the one that module gives for writing the audit row in the
- * services: the row must be honest about the channel "even if the WhatsApp adapter ever binds a
- * limiter". A run with `channel: 'whatsapp'` is therefore that future binding, and what it asserts is
- * that the refusal's row records the channel the service was given rather than a hardcoded `web`.
+ * `rate-limit.ts` records that the inbound-webhook path deliberately binds no limiter. The channel
+ * is generated anyway (`web` and `telegram`, the two `channelSchema` holds under Amendment A1), and
+ * the reason is the one that module gives for writing the audit row in the services: the row must be
+ * honest about the channel "even if the inbound adapter ever binds a limiter". A run with
+ * `channel: 'telegram'` is therefore that future binding, and what it asserts is that the refusal's
+ * row records the channel the service was given rather than a hardcoded `web`.
  *
  * ### Non-vacuity
  *
@@ -202,7 +204,7 @@ interface RequestRecord {
   readonly increments: CounterCall[];
   readonly decrements: string[];
   providerCalls: number;
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly usageRows: UsageLogInsert[];
   readonly nestedCoverage: QuotaContext['role'][];
 }
 
@@ -295,35 +297,21 @@ function minuteIncrements(record: RequestRecord): CounterCall[] {
 /* Shared seams                                                                */
 /* ========================================================================== */
 
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
-
 const knowledge: KnowledgeReader = (names) =>
   Promise.resolve(KNOWLEDGE_ROWS.filter((row) => names.includes(row.disease_name)));
 
-function storageStub(): StorageClientLike & ObjectRemoveClient {
-  return {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: true, error: null }),
-        createSignedUrl: (path: string) =>
-          Promise.resolve({
-            data: { signedUrl: `https://storage.test/${path}?token=synthetic` },
-            error: null,
-          }),
-        remove: () => Promise.resolve({ data: [{ name: 'removed' }], error: null }),
-      }),
-    },
-  };
-}
+/** A3: the crop image and the recording are `{ fileId, kind }` Media_References, not storage paths. */
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
+const AUDIO_REF: MediaRef = { fileId: 'c'.repeat(24), kind: 'voice' };
+
+/** The owner-checked media read seam — yields the bytes the model is sent inline (A3, V34). */
+const readImage = (): Promise<{ bytes: Buffer; mimeType: string }> =>
+  Promise.resolve({ bytes: Buffer.from('jamee fake crop-image bytes'), mimeType: 'image/jpeg' });
+const readAudio = (): Promise<{ bytes: Buffer; mimeType: string }> =>
+  Promise.resolve({ bytes: Buffer.from('jamee fake voice bytes'), mimeType: 'audio/ogg' });
+
+/** The owner-scoped media delete voice uses; here it always removes. */
+const removeStub: MediaRemover = () => Promise.resolve(true);
 
 function conversationFor(userId: string, channel: Conversation['channel']): Conversation {
   return {
@@ -336,24 +324,33 @@ function conversationFor(userId: string, channel: Conversation['channel']): Conv
   };
 }
 
-function refFor(bucket: string): StorageRef {
-  return { bucket: bucket as StorageRef['bucket'], path: `${USER_ID}/2026/09/${randomUUID()}.jpg` };
-}
-
-function messageRowFor(row: TablesInsert<'messages'>, id: string): MessageRow {
+/**
+ * A stored `messages` record, as the owner-scoped `insertChatTurn` returns it — a `WithId<MessageDoc>`.
+ * The record's `conversationId` field is not asserted, so a fresh ObjectId keeps this tolerant of a
+ * non-ObjectId conversation id on the input row.
+ */
+function messageRecordFor(row: MessageInsert, id: ObjectId): WithId<MessageDoc> {
   return {
-    id,
-    conversation_id: row.conversation_id,
-    user_id: row.user_id,
+    _id: id,
+    ownerId: row.ownerId,
+    conversationId: ObjectId.isValid(row.conversationId)
+      ? new ObjectId(row.conversationId)
+      : new ObjectId(),
     role: row.role,
     content: row.content,
     language: row.language,
     channel: row.channel,
-    input_kind: row.input_kind ?? 'text',
-    transcript_of: row.transcript_of ?? null,
-    created_at: '2026-09-16T06:17:42.000Z',
+    inputKind: row.inputKind,
+    transcriptOf:
+      row.transcriptOf === undefined
+        ? null
+        : { fileId: new ObjectId(row.transcriptOf.fileId), kind: row.transcriptOf.kind },
+    createdAt: new Date(CLOCK_MS),
   };
 }
+
+const FARMER_MESSAGE_OID = new ObjectId();
+const ANSWER_MESSAGE_OID = new ObjectId();
 
 /* -------------------------------------------------------------------------- */
 /* The three services, each with the real limiter at its own step              */
@@ -377,28 +374,7 @@ function diagnosisDeps(rpc: CounterRpc, burst: BurstCheck, record: RequestRecord
   };
 
   const store: DiagnosisStore = {
-    insertDiagnosis: (row) => {
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T06:17:42.000Z',
-      };
-      return Promise.resolve(stored);
-    },
+    insertDiagnosis: () => Promise.resolve(DIAGNOSIS_ID),
     insertUsageLog: (row) => {
       record.usageRows.push(row);
       return Promise.resolve();
@@ -412,9 +388,8 @@ function diagnosisDeps(rpc: CounterRpc, burst: BurstCheck, record: RequestRecord
   };
 
   return {
-    supabase: unreachableSupabase,
-    storage: storageStub(),
     store,
+    readMedia: readImage,
     conversations,
     knowledge,
     models,
@@ -448,8 +423,8 @@ function chatDeps(rpc: CounterRpc, burst: BurstCheck, record: RequestRecord): Ch
   const writes: ChatWriteStore = {
     insertTurn: (rows) =>
       Promise.resolve([
-        messageRowFor(rows[0], FARMER_MESSAGE_ID),
-        messageRowFor(rows[1], ANSWER_MESSAGE_ID),
+        messageRecordFor(rows[0], FARMER_MESSAGE_OID),
+        messageRecordFor(rows[1], ANSWER_MESSAGE_OID),
       ]),
     insertUsageLog: (row) => {
       record.usageRows.push(row);
@@ -460,7 +435,6 @@ function chatDeps(rpc: CounterRpc, burst: BurstCheck, record: RequestRecord): Ch
   };
 
   return {
-    supabase: unreachableSupabase,
     writes,
     store,
     knowledge,
@@ -523,13 +497,10 @@ function voiceDeps(rpc: CounterRpc, burst: BurstCheck, record: RequestRecord): V
     },
   };
 
-  const storage = storageStub();
-
   return {
-    supabase: unreachableSupabase,
     chat,
-    storage,
-    deleter: storage,
+    readMedia: readAudio,
+    remove: removeStub,
     store,
     transcribe,
     burst,
@@ -589,7 +560,7 @@ async function runRequest(
       await diagnose(
         {
           userId: USER_ID,
-          storageRef: refFor(STORAGE_BUCKETS.cropImages),
+          image: IMAGE_REF,
           language,
           channel,
           conversationId: CONVERSATION_ID,
@@ -612,7 +583,7 @@ async function runRequest(
       await transcribeAndAnswer(
         {
           userId: USER_ID,
-          storageRef: refFor(STORAGE_BUCKETS.voiceMessages),
+          audio: AUDIO_REF,
           language,
           channel,
           conversationId: CONVERSATION_ID,
@@ -638,7 +609,7 @@ type ExecutionOrder = 'sequential' | 'concurrent';
 
 const ORDERS: readonly ExecutionOrder[] = ['sequential', 'concurrent'];
 const OPERATIONS: readonly Operation[] = ['image', 'chat', 'voice'];
-const CHANNELS: readonly Channel[] = ['web', 'whatsapp'];
+const CHANNELS: readonly Channel[] = ['web', 'telegram'];
 
 interface Burst {
   readonly operation: Operation;
@@ -776,7 +747,7 @@ describe('Property 28: the burst check runs before anything is spent', () => {
 
           /** Requirement 13.8's audit row, written by the service that knows the channel. */
           expect(outcome.record.usageRows, label).toHaveLength(1);
-          const row = outcome.record.usageRows[0] as TablesInsert<'usage_logs'>;
+          const row = outcome.record.usageRows[0] as UsageLogInsert;
           expect(row.outcome, label).toBe('rate_limited');
           expect(row.quota_spent, label).toBe(false);
           expect(row.model_provider, label).toBe('none');

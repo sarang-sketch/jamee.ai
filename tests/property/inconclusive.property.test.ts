@@ -1,27 +1,29 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { Buffer } from 'node:buffer';
+
 import * as fc from 'fast-check';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { ProviderFailure } from '@/lib/ai/errors';
 import type { CapabilityRunner, TextCall, VisionCall } from '@/lib/ai/capabilities';
 import { run, type AdapterSet } from '@/lib/ai/gateway';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
+import type { DiagnosisInsert } from '@/lib/db/analysis';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
 import {
   HEALTHY_CONDITION,
   VERIFIED_CONDITIONS,
   inconclusiveResultSchema,
+  type Channel,
   type Language,
+  type MediaRef,
   type RejectionReason,
   type Severity,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
 import type { CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
 
 /**
  * ### Property 8: All non-identified outcomes collapse into one inconclusive shape
@@ -98,8 +100,9 @@ import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
  * =============================================================================
  *
  * Every dependency of `diagnose()` is injected, so there is no Supabase stack, no provider, and no
- * clock. Reads of the request client are a thrown error rather than a silent pass (see
- * `unreachableSupabase`), because a seam that leaked would make every count below meaningless.
+ * clock. Under Amendment A3 the owner-checked media read is the `readMedia` seam (returning
+ * `{ bytes, mimeType }` from GridFS), and its call count is one of the tallies below, so a seam that
+ * fired the wrong number of times shows up rather than passing silently.
  *
  * The one thing *not* stubbed away is `run()`. The `CapabilityRunner` here is built over the real
  * gateway with two hand-built adapters underneath it, so Property 9's "no extra model call" is
@@ -132,10 +135,15 @@ import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
 /* Fixtures                                                                    */
 /* ========================================================================== */
 
-const CROP_IMAGES = STORAGE_BUCKETS.cropImages;
-
 const CONVERSATION_ID = '77777777-7777-4777-8777-777777777777';
 const DIAGNOSIS_ID = '88888888-8888-4888-8888-888888888888';
+
+/** A3: the analysis input is a `{ fileId, kind }` Media_Reference, not a bucket/path storage ref. */
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
+
+/** The bytes the owner-checked read yields, and the MIME type stored alongside them. */
+const IMAGE_BYTES = Buffer.from('jamee property harness: fake crop-image bytes');
+const IMAGE_MIME = 'image/jpeg';
 
 /** 2026-09-15T19:30:00Z is 2026-09-16T01:00 in Asia/Kolkata — the far side of the +05:30 offset. */
 const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
@@ -281,7 +289,7 @@ const PATH_DEFAULTS = {
 } as const;
 
 const languageArb = fc.constantFrom<Language>('en', 'hi', 'mr');
-const channelArb = fc.constantFrom<'web' | 'whatsapp'>('web', 'whatsapp');
+const channelArb = fc.constantFrom<Channel>('web', 'telegram');
 const severityArb = fc.constantFrom<Severity>('none', 'low', 'moderate', 'high');
 const conditionArb = fc.constantFrom<VerifiedCondition>(...VERIFIED_CONDITIONS);
 
@@ -562,29 +570,10 @@ const pathArb: fc.Arbitrary<InconclusivePath> = fc.oneof(
 );
 
 /* ========================================================================== */
-/* The storage reference, under the caller's own prefix                        */
+/* The caller                                                                  */
 /* ========================================================================== */
 
 const farmerIdArb = fc.uuid();
-
-const pathPartsArb = fc.record({
-  year: fc.integer({ min: 2024, max: 2099 }).map(String),
-  month: fc.integer({ min: 1, max: 12 }).map((month) => String(month).padStart(2, '0')),
-  objectId: fc.uuid(),
-  extension: fc.constantFrom('jpg', 'jpeg', 'png', 'webp'),
-});
-
-interface PathParts {
-  readonly year: string;
-  readonly month: string;
-  readonly objectId: string;
-  readonly extension: string;
-}
-
-/** `{user_id}/{YYYY}/{MM}/{uuid}.{ext}` — the one convention `buildStorageRef()` emits. */
-function ownedPath(owner: string, parts: PathParts): string {
-  return `${owner}/${parts.year}/${parts.month}/${parts.objectId}.${parts.extension}`;
-}
 
 /* ========================================================================== */
 /* The transport dimension (Requirement 14.4)                                  */
@@ -621,27 +610,16 @@ interface Tallies {
   /** The transport seam, inside the fallback loop: how many provider invocations happened. */
   visionInvocations: number;
   textInvocations: number;
-  /** Storage. */
-  probes: number;
-  signings: number;
+  /** The owner-checked media read (A3, GridFS). */
+  mediaReads: number;
   /** Knowledge-base reads. */
   knowledgeReads: number;
 }
 
 /**
- * A tripwire, not a stand-in. Every seam is injected, so a read of the request client means the
- * service reached past its dependencies — which would make every count above meaningless.
+ * A3, V34: the owner-checked media read yields the bytes the model is sent inline. Every seam is
+ * injected below, so there is no Supabase stack to stand in for.
  */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
 
 interface HarnessOptions {
   readonly classificationText: string;
@@ -652,8 +630,8 @@ interface HarnessOptions {
 interface Harness {
   readonly deps: DiagnosisDeps;
   readonly tallies: Tallies;
-  readonly diagnosisRows: TablesInsert<'diagnoses'>[];
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly diagnosisRows: DiagnosisInsert[];
+  readonly usageRows: UsageLogInsert[];
   /** Every input the transport seam was handed, in order. */
   readonly visionInputs: VisionCall[];
   readonly textInputs: TextCall[];
@@ -668,32 +646,18 @@ function harness(options: HarnessOptions): Harness {
     generates: 0,
     visionInvocations: 0,
     textInvocations: 0,
-    probes: 0,
-    signings: 0,
+    mediaReads: 0,
     knowledgeReads: 0,
   };
 
-  const diagnosisRows: TablesInsert<'diagnoses'>[] = [];
-  const usageRows: TablesInsert<'usage_logs'>[] = [];
+  const diagnosisRows: DiagnosisInsert[] = [];
+  const usageRows: UsageLogInsert[] = [];
   const visionInputs: VisionCall[] = [];
   const textInputs: TextCall[] = [];
 
-  const storage: StorageClientLike = {
-    storage: {
-      from: () => ({
-        exists: () => {
-          tallies.probes += 1;
-          return Promise.resolve({ data: true, error: null });
-        },
-        createSignedUrl: (path: string) => {
-          tallies.signings += 1;
-          return Promise.resolve({
-            data: { signedUrl: `https://storage.test/${path}?token=abc` },
-            error: null,
-          });
-        },
-      }),
-    },
+  const readMedia = (): Promise<{ bytes: Buffer; mimeType: string }> => {
+    tallies.mediaReads += 1;
+    return Promise.resolve({ bytes: IMAGE_BYTES, mimeType: IMAGE_MIME });
   };
 
   const rpc: CounterRpc = {
@@ -787,30 +751,11 @@ function harness(options: HarnessOptions): Harness {
   };
 
   const store: DiagnosisStore = {
-    insertDiagnosis: (row: TablesInsert<'diagnoses'>) => {
+    insertDiagnosis: (row: DiagnosisInsert) => {
       diagnosisRows.push(row);
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T01:00:00.000Z',
-      };
-      return Promise.resolve(stored);
+      return Promise.resolve(DIAGNOSIS_ID);
     },
-    insertUsageLog: (row: TablesInsert<'usage_logs'>) => {
+    insertUsageLog: (row: UsageLogInsert) => {
       usageRows.push(row);
       return Promise.resolve();
     },
@@ -837,9 +782,8 @@ function harness(options: HarnessOptions): Harness {
     visionInputs,
     textInputs,
     deps: {
-      supabase: unreachableSupabase,
-      storage,
       store,
+      readMedia,
       conversations,
       knowledge,
       models,
@@ -906,24 +850,24 @@ function canonicalShape(language: Language): Record<string, unknown> {
   };
 }
 
-/** Requirement 6.4/6.5 at the persistence layer: the same shape, in the column set. */
+/** Requirement 6.4/6.5 at the persistence layer: the same shape, in the document's fields. */
 const CANONICAL_ROW_SHAPE = {
   status: 'unknown',
-  disease_name: null,
-  knowledge_id: null,
+  diseaseName: null,
+  knowledgeId: null,
   confidence: null,
   severity: 'none',
-  needs_expert: true,
+  needsExpert: true,
 } as const;
 
-function rowShapeOf(row: TablesInsert<'diagnoses'>): Record<string, unknown> {
+function rowShapeOf(row: DiagnosisInsert): Record<string, unknown> {
   return {
     status: row.status,
-    disease_name: row.disease_name ?? null,
-    knowledge_id: row.knowledge_id ?? null,
+    diseaseName: row.diseaseName ?? null,
+    knowledgeId: row.knowledgeId ?? null,
     confidence: row.confidence ?? null,
     severity: row.severity,
-    needs_expert: row.needs_expert ?? false,
+    needsExpert: row.needsExpert ?? false,
   };
 }
 
@@ -949,10 +893,9 @@ describe('Property 8: all non-identified outcomes collapse into one inconclusive
           language: languageArb,
           channel: channelArb,
           caller: farmerIdArb,
-          parts: pathPartsArb,
           transport: transportArb,
         }),
-        async ({ path, language, channel, caller, parts, transport }) => {
+        async ({ path, language, channel, caller, transport }) => {
           exercised.add(path.kind);
           languages.add(language);
           errorLog.mockClear();
@@ -966,7 +909,7 @@ describe('Property 8: all non-identified outcomes collapse into one inconclusive
           const outcome = await diagnose(
             {
               userId: caller,
-              storageRef: { bucket: CROP_IMAGES, path: ownedPath(caller, parts) },
+              image: IMAGE_REF,
               language,
               channel,
             },
@@ -1021,7 +964,7 @@ describe('Property 8: all non-identified outcomes collapse into one inconclusive
 
           // ── The same shape at the persistence layer, for every cause ──
           expect(test.diagnosisRows, label).toHaveLength(1);
-          const row = test.diagnosisRows[0] as TablesInsert<'diagnoses'>;
+          const row = test.diagnosisRows[0] as DiagnosisInsert;
           expect(rowShapeOf(row), label).toStrictEqual(CANONICAL_ROW_SHAPE);
           expect(row.explanation, label).toBe(explanation);
           expect(row.language, label).toBe(language);
@@ -1058,9 +1001,8 @@ describe('Property 9: an inconclusive result costs exactly one unit and no extra
           language: languageArb,
           channel: channelArb,
           caller: farmerIdArb,
-          parts: pathPartsArb,
         }),
-        async ({ path, transport, language, channel, caller, parts }) => {
+        async ({ path, transport, language, channel, caller }) => {
           exercisedPaths.add(path.kind);
           exercisedTransports.add(transport);
           errorLog.mockClear();
@@ -1074,7 +1016,7 @@ describe('Property 9: an inconclusive result costs exactly one unit and no extra
           const outcome = await diagnose(
             {
               userId: caller,
-              storageRef: { bucket: CROP_IMAGES, path: ownedPath(caller, parts) },
+              image: IMAGE_REF,
               language,
               channel,
             },
@@ -1117,7 +1059,7 @@ describe('Property 9: an inconclusive result costs exactly one unit and no extra
 
           // ── Requirement 6.7 in the audit — one row, and it says the unit was spent ──
           expect(test.usageRows, label).toHaveLength(1);
-          const usage = test.usageRows[0] as TablesInsert<'usage_logs'>;
+          const usage = test.usageRows[0] as UsageLogInsert;
           expect(usage.quota_spent, label).toBe(true);
           expect(usage.operation, label).toBe('image');
           expect(usage.rejection_reason, label).toBe(outcome.rejectionReason);

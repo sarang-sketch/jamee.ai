@@ -3,17 +3,19 @@
  *
  * The integration harness has two halves, and only one of them needs a database.
  *
- * This file tests the half that does not: the connection-string derivation, the sign-in credentials
- * `createTestFarmer` mints, the provider stubs and the classification fixtures they script, and the
- * object-store double. All of it runs on every
- * machine on every `npm test`, which matters because the other half —
- * `tests/integration/harness.test.ts` — is skipped without `JAMEE_TEST_DATABASE_URL`, so a fixture
- * bug there would sit undiscovered on any machine that has no local stack.
+ * This file tests the half that does NOT: the classification fixtures and the two-stage validation
+ * they drive, and the provider stubs (the real gateway over the real adapters over stubbed SDK
+ * calls). All of it runs on every machine on every `npm test`, which matters because the other
+ * half — `tests/integration/harness.test.ts` — needs an in-memory replica set, so a fixture bug
+ * there would surface only when the integration project runs.
  *
  * Requirements: 5.1 – 5.6 (the two validation stages), 6.2 / 6.3 (the model's own non-identified
  *               statuses), 14.4 (a rate limit on the primary retries on the fallback), 14.8 (a
- *               both-provider failure is one failed operation), 2.5 / 2.6 (a reference outside the
- *               farmer's own prefix, or in the wrong bucket, is refused), 17.5
+ *               both-provider failure is one failed operation), 17.5
+ * Design: Amendment A3 — the harness runs on `mongodb-memory-server`, and the DB-bound fixtures
+ *         (the two Google-path farmers and the GridFS media) are exercised in the integration
+ *         `harness.test.ts` rather than here, because under A3 there is no session-derivation or
+ *         object-store double left to test without a database.
  *
  * `node` rather than the unit project's jsdom default, for the reason `src/lib/groq.test.ts` gives:
  * the provider adapters are `server-only` modules that run in the Node.js runtime V17 pins every
@@ -21,25 +23,12 @@
  */
 import { describe, expect, it } from 'vitest';
 
+import { Buffer } from 'node:buffer';
+
 import { isFallbackTrigger } from '@/lib/ai/errors';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
 import { isAppError } from '@/lib/errors';
-import { buildStorageRef } from '@/lib/storage';
 import { interpret } from '@/services/diagnosis.service';
 
-import {
-  LOCAL_SUPABASE_API_PORT,
-  SUPABASE_ANON_KEY_VAR,
-  SUPABASE_API_URL_VAR,
-  SUPABASE_PUBLISHABLE_KEY_VAR,
-  SUPABASE_SERVICE_ROLE_KEY_VAR,
-  TEST_DATABASE_URL_VAR,
-  apiUrlFromDatabaseUrl,
-  hostOfDatabaseUrl,
-  requireSupabaseTestConfig,
-} from '../integration/database';
-import { randomTestPassword } from '../integration/farmers';
-import { objectStore, uploadedImage, uploadedRecording } from '../integration/objects';
 import {
   CLASSIFICATIONS,
   DEFAULT_REPHRASE,
@@ -55,141 +44,17 @@ import {
   respondsAfterPrimaryRateLimit,
 } from '../integration/providers';
 
-/** The documented local value, from `.env.example` and `docs/DEPLOYMENT.md`. */
-const LOCAL_DATABASE_URL = 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
-
 const VISION_CALL = {
-  imageUrl: 'https://jamee-test.invalid/signed/leaf.jpg',
+  imageBase64: 'aGVsbG8=',
   imageMimeType: 'image/jpeg',
   prompt: 'classify this leaf',
   responseSchema: { type: 'object' },
 } as const;
 
-/** Swap in an environment, run, and put every variable back — including its absence. */
-async function withEnv(
-  values: Record<string, string | undefined>,
-  run: () => void | Promise<void>,
-): Promise<void> {
-  const previous = new Map<string, string | undefined>();
-  for (const [name, value] of Object.entries(values)) {
-    previous.set(name, process.env[name]);
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
-  try {
-    await run();
-  } finally {
-    for (const [name, value] of previous) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  }
-}
-
-describe('the harness stack configuration', () => {
-  it('derives the local API URL from the documented database URL', () => {
-    expect(hostOfDatabaseUrl(LOCAL_DATABASE_URL)).toBe('127.0.0.1');
-    expect(apiUrlFromDatabaseUrl(LOCAL_DATABASE_URL)).toBe(
-      `http://127.0.0.1:${LOCAL_SUPABASE_API_PORT}`,
-    );
-  });
-
-  it('reads a host out of a connection string the URL parser rejects', () => {
-    expect(hostOfDatabaseUrl('postgres://user:p@ss@db.internal:5432/postgres')).toBe('db.internal');
-    expect(hostOfDatabaseUrl('not a url at all')).toBeUndefined();
-  });
-
-  it('prefers a configured API URL over the derived one', async () => {
-    await withEnv(
-      {
-        [TEST_DATABASE_URL_VAR]: LOCAL_DATABASE_URL,
-        [SUPABASE_API_URL_VAR]: 'https://project.supabase.co',
-        // Nulled for the reason the sibling test below nulls it: `requireSupabaseTestConfig()`
-        // prefers the publishable name over the anon one, so a developer or CI job that exports a
-        // real `sb_publishable_...` would win over the `'anon'` this case sets and the result would
-        // depend on the shell rather than on the code. Every variable the function reads is stated
-        // here, including the ones stated as absent.
-        [SUPABASE_PUBLISHABLE_KEY_VAR]: undefined,
-        [SUPABASE_ANON_KEY_VAR]: 'anon',
-        [SUPABASE_SERVICE_ROLE_KEY_VAR]: 'service-role',
-      },
-      () => {
-        expect(requireSupabaseTestConfig()).toEqual({
-          databaseUrl: LOCAL_DATABASE_URL,
-          apiUrl: 'https://project.supabase.co',
-          anonKey: 'anon',
-          serviceRoleKey: 'service-role',
-        });
-      },
-    );
-  });
-
-  it('fails by naming the missing variable rather than skipping the opted-in suite', async () => {
-    await withEnv(
-      {
-        [TEST_DATABASE_URL_VAR]: LOCAL_DATABASE_URL,
-        [SUPABASE_API_URL_VAR]: undefined,
-        // The exported constant rather than the literal it used to spell: a rename in
-        // `database.ts` would leave a literal silently failing to null the variable it names, which
-        // is the same ambient-leak this file just had to fix once.
-        [SUPABASE_PUBLISHABLE_KEY_VAR]: undefined,
-        [SUPABASE_ANON_KEY_VAR]: undefined,
-        [SUPABASE_SERVICE_ROLE_KEY_VAR]: undefined,
-      },
-      () => {
-        expect(() => requireSupabaseTestConfig()).toThrow(SUPABASE_SERVICE_ROLE_KEY_VAR);
-        // The URL is derivable from the database URL, so it must NOT be reported as missing.
-        expect(() => requireSupabaseTestConfig()).toThrow(SUPABASE_ANON_KEY_VAR);
-        expect(() => requireSupabaseTestConfig()).toThrow('supabase start');
-      },
-    );
-  });
-});
-
-/**
- * GoTrue hashes with bcrypt, and bcrypt refuses an input over **72 BYTES** — by panicking, so the
- * admin create endpoint answers 500 with no usable message and every integration `beforeAll` fails
- * at once. The harness shipped a 73-byte password (two raw UUIDs and a hyphen) and so could never
- * have passed on any machine. These assertions run the REAL generator on every `npm test`, which is
- * the only reason they would catch the regression coming back.
- */
-describe('the test farmer password, against the bcrypt 72-byte limit', () => {
-  /** Bcrypt's documented ceiling. Not derived from the harness, so the harness cannot move it. */
-  const BCRYPT_MAX_BYTES = 72;
-
-  it('generates a password bcrypt will accept, with headroom', () => {
-    const password = randomTestPassword();
-
-    // Bytes, not characters: bcrypt counts bytes, and a `.length` assertion would pass on input
-    // bcrypt rejects the moment anything multi-byte is introduced.
-    const bytes = Buffer.byteLength(password, 'utf8');
-
-    expect(bytes).toBeGreaterThan(0);
-    expect(bytes).toBeLessThanOrEqual(BCRYPT_MAX_BYTES);
-    // Strictly under, so a later tweak has room. Sitting exactly on 72 invites the same bug back.
-    expect(bytes).toBeLessThan(BCRYPT_MAX_BYTES);
-
-    // ASCII-only is what makes byte length equal character length above, and hex keeps it so.
-    expect(password).toMatch(/^[0-9a-f]+$/);
-    expect(password).toHaveLength(bytes);
-  });
-
-  it('generates a distinct password per farmer, all within the limit', () => {
-    // Unique per farmer because `signInWithPassword` consumes it immediately and concurrent suites
-    // must not interfere; every sample is checked, not just the first.
-    const passwords = Array.from({ length: 16 }, () => randomTestPassword());
-
-    for (const password of passwords) {
-      expect(Buffer.byteLength(password, 'utf8')).toBeLessThan(BCRYPT_MAX_BYTES);
-    }
-    expect(new Set(passwords).size).toBe(passwords.length);
-  });
-});
-
 describe('the classification fixtures', () => {
   /**
-   * The four branches task 29.1 names, driven through the REAL two-stage validation rather than
-   * compared against the fixture's own values. `interpret()` is `diagnosis.service.ts`'s.
+   * The four branches driven through the REAL two-stage validation rather than compared against the
+   * fixture's own values. `interpret()` is `diagnosis.service.ts`'s.
    */
   it('drives the identified, healthy, unclear and no_plant branches', () => {
     const identified = interpret(classificationText(CLASSIFICATIONS.tomatoEarlyBlight));
@@ -238,10 +103,10 @@ describe('the provider seam', () => {
     expect(result.usedFallback).toBe(false);
     expect(JSON.parse(result.value)).toEqual(CLASSIFICATIONS.potatoLateBlight);
 
-    // The adapter built this request, not the harness: the image part carries the signed URL and
-    // the MIME type in V6's `uri` form, which is what makes the seam sit BELOW the adapter.
+    // The adapter built this request, not the harness: the image part carries the inline bytes and
+    // the MIME type in A3's `data` form (V34), which is what makes the seam sit BELOW the adapter.
     expect(providers.calls.geminiVision[0]?.input).toEqual([
-      { type: 'image', uri: VISION_CALL.imageUrl, mime_type: 'image/jpeg' },
+      { type: 'image', data: VISION_CALL.imageBase64, mime_type: 'image/jpeg' },
       { type: 'text', text: VISION_CALL.prompt },
     ]);
     expect(providers.calls.geminiVision[0]?.store).toBe(false);
@@ -300,7 +165,7 @@ describe('the provider seam', () => {
     const providers = providerStubs();
 
     const spoken = await providers.transcribe({
-      audioUrl: 'https://jamee-test.invalid/signed/note.webm',
+      audioBytes: Buffer.from('fake-opus-bytes'),
       container: 'audio/webm',
       language: 'en',
     });
@@ -312,64 +177,10 @@ describe('the provider seam', () => {
     // Requirement 8.7: an empty transcript is the provider answering, not the provider failing.
     providers.script.transcription = { text: '', language: 'hi' };
     const silence = await providers.transcribe({
-      audioUrl: 'https://jamee-test.invalid/signed/silence.webm',
+      audioBytes: Buffer.from('fake-silent-bytes'),
       container: 'audio/webm',
       language: 'hi',
     });
     expect(silence.value.text).toBe('');
-  });
-});
-
-describe('the object fixture', () => {
-  const farmerA = '11111111-1111-4111-8111-111111111111';
-  const farmerB = '22222222-2222-4222-8222-222222222222';
-
-  it('builds references under the owning farmer prefix, in the right bucket', () => {
-    const store = objectStore();
-    const image = uploadedImage(store, farmerA);
-    const recording = uploadedRecording(store, farmerA);
-
-    expect(image.bucket).toBe(STORAGE_BUCKETS.cropImages);
-    expect(image.path.startsWith(`${farmerA}/`)).toBe(true);
-    expect(recording.bucket).toBe(STORAGE_BUCKETS.voiceMessages);
-    expect(store.has(image)).toBe(true);
-  });
-
-  it('answers the two questions the ownership check asks', async () => {
-    const store = objectStore();
-    const present = uploadedImage(store, farmerA);
-    const absent = buildStorageRef({
-      bucket: STORAGE_BUCKETS.cropImages,
-      userId: farmerB,
-      extension: 'jpg',
-    });
-
-    await expect(store.storage.from(present.bucket).exists(present.path)).resolves.toEqual({
-      data: true,
-      error: null,
-    });
-    await expect(store.storage.from(absent.bucket).exists(absent.path)).resolves.toEqual({
-      data: false,
-      error: null,
-    });
-
-    const signed = await store.storage.from(present.bucket).createSignedUrl(present.path, 600);
-    expect(signed.data?.signedUrl).toContain(present.path);
-    expect(store.signed[0]).toEqual({
-      bucket: present.bucket,
-      path: present.path,
-      expiresInSeconds: 600,
-    });
-  });
-
-  it('models a removed original and a failing probe', async () => {
-    const store = objectStore();
-    const image = uploadedImage(store, farmerA);
-
-    store.remove(image);
-    expect(store.has(image)).toBe(false);
-
-    store.failProbe = true;
-    await expect(store.storage.from(image.bucket).exists(image.path)).rejects.toThrow();
   });
 });

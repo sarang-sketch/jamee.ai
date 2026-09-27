@@ -1,19 +1,20 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { Buffer } from 'node:buffer';
+
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner, VisionCall } from '@/lib/ai/capabilities';
-import { DAILY_QUOTAS, STORAGE_BUCKETS } from '@/lib/config/verified';
+import { DAILY_QUOTAS } from '@/lib/config/verified';
+import type { DiagnosisInsert } from '@/lib/db/analysis';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import type { KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
 import { PROMPT_VERSION } from '@/lib/prompts';
 import { REJECTION_REASONS, languageSchema } from '@/lib/schemas';
-import type { RejectionReason, StorageRef } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
+import type { MediaRef, RejectionReason } from '@/lib/schemas';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
 import type { CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
 
 /**
  * **Property 7: Every rejection is attributable and its content is discarded.**
@@ -102,34 +103,18 @@ const DIAGNOSIS_ID = '55555555-5555-4555-8555-555555555555';
 const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
 const RESETS_AT = '2026-09-16T18:30:00.000Z';
 
-const IMAGE_REF: StorageRef = {
-  bucket: STORAGE_BUCKETS.cropImages,
-  path: `${USER}/2026/09/${OBJECT_ID}.jpg`,
-};
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
 
-const SIGNED_URL = `https://storage.test/${IMAGE_REF.path}?token=abc`;
+/** The bytes the owner-checked read yields, and the MIME type stored alongside them. */
+const IMAGE_BYTES = Buffer.from('jamee property harness: fake crop-image bytes');
+const IMAGE_MIME = 'image/jpeg';
 
 /**
- * A tripwire, not a stand-in: the service must reach every dependency through an injected seam, so
- * any read of the request client fails the test rather than opening a connection.
+ * A3, V34: the owner-checked media read yields the bytes the model is sent inline. Every dependency
+ * of `diagnose()` is injected below, so there is no Supabase stack to stand in for.
  */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(`the request client was used (read of "${String(property)}")`);
-    },
-  },
-) as unknown as SupabaseClient<Database>;
-
-const storageStub: StorageClientLike = {
-  storage: {
-    from: () => ({
-      exists: () => Promise.resolve({ data: true, error: null }),
-      createSignedUrl: () => Promise.resolve({ data: { signedUrl: SIGNED_URL }, error: null }),
-    }),
-  },
-};
+const readMedia = (): Promise<{ bytes: Buffer; mimeType: string }> =>
+  Promise.resolve({ bytes: IMAGE_BYTES, mimeType: IMAGE_MIME });
 
 /** Nothing is grounded on a rejected response, so a knowledge-base read here is a defect. */
 const unreachableKnowledge: KnowledgeReader = () => {
@@ -160,42 +145,23 @@ const counterRpc: CounterRpc = {
 
 interface Recorder {
   readonly deps: DiagnosisDeps;
-  readonly diagnoses: TablesInsert<'diagnoses'>[];
-  readonly usage: TablesInsert<'usage_logs'>[];
+  readonly diagnoses: DiagnosisInsert[];
+  readonly usage: UsageLogInsert[];
   readonly classifyCalls: VisionCall[];
   readonly generateCalls: number[];
 }
 
 /** One request's worth of seams, recording every row written and every gateway call made. */
 function recorder(modelSaid: string): Recorder {
-  const diagnoses: TablesInsert<'diagnoses'>[] = [];
-  const usage: TablesInsert<'usage_logs'>[] = [];
+  const diagnoses: DiagnosisInsert[] = [];
+  const usage: UsageLogInsert[] = [];
   const classifyCalls: VisionCall[] = [];
   const generateCalls: number[] = [];
 
   const store: DiagnosisStore = {
     insertDiagnosis: (row) => {
       diagnoses.push(row);
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T01:00:00.000Z',
-      };
-      return Promise.resolve(stored);
+      return Promise.resolve(DIAGNOSIS_ID);
     },
     insertUsageLog: (row) => {
       usage.push(row);
@@ -222,9 +188,8 @@ function recorder(modelSaid: string): Recorder {
     classifyCalls,
     generateCalls,
     deps: {
-      supabase: unreachableSupabase,
-      storage: storageStub,
       store,
+      readMedia,
       conversations,
       knowledge: unreachableKnowledge,
       models,
@@ -254,12 +219,10 @@ const OUTPUT_CORPUS = [
   OBJECT_ID,
   CONVERSATION_ID,
   DIAGNOSIS_ID,
-  IMAGE_REF.path,
-  SIGNED_URL,
+  IMAGE_REF.fileId,
   PROMPT_VERSION,
   RESETS_AT,
   ...REJECTION_REASONS,
-  ...Object.values(STORAGE_BUCKETS),
   'gemini',
   'validation_rejected',
   'inconclusive',
@@ -533,7 +496,7 @@ describe('Property 7 — every rejection is attributable', () => {
         const test = recorder(testCase.raw);
 
         const outcome = await diagnose(
-          { userId: USER, storageRef: IMAGE_REF, language: lang, channel: 'web' },
+          { userId: USER, image: IMAGE_REF, language: lang, channel: 'web' },
           test.deps,
         );
 
@@ -580,7 +543,7 @@ describe('Property 7 — the rejected content is discarded', () => {
         const test = recorder(testCase.raw);
 
         const outcome = await diagnose(
-          { userId: USER, storageRef: IMAGE_REF, language: lang, channel: 'web' },
+          { userId: USER, image: IMAGE_REF, language: lang, channel: 'web' },
           test.deps,
         );
 
@@ -620,7 +583,7 @@ describe('Property 7 — the rejected content is discarded', () => {
         const test = recorder(testCase.raw);
 
         const outcome = await diagnose(
-          { userId: USER, storageRef: IMAGE_REF, language: lang, channel: 'web' },
+          { userId: USER, image: IMAGE_REF, language: lang, channel: 'web' },
           test.deps,
         );
 
@@ -644,11 +607,11 @@ describe('Property 7 — the rejected content is discarded', () => {
         // the same thing in SQL; this is the boundary above it.
         expect(row).toMatchObject({
           status: 'unknown',
-          disease_name: null,
-          knowledge_id: null,
+          diseaseName: null,
+          knowledgeId: null,
           confidence: null,
           severity: 'none',
-          needs_expert: true,
+          needsExpert: true,
         });
       }),
       { numRuns: 250 },
@@ -661,7 +624,7 @@ describe('Property 7 — the rejected content is discarded', () => {
         const test = recorder(testCase.raw);
 
         const outcome = await diagnose(
-          { userId: USER, storageRef: IMAGE_REF, language: lang, channel: 'web' },
+          { userId: USER, image: IMAGE_REF, language: lang, channel: 'web' },
           test.deps,
         );
 

@@ -23,10 +23,13 @@ const serverOnlyStub = fileURLToPath(
  *
  *   npm run test:unit         fast, no I/O — schemas, catalogs, pure helpers, components
  *   npm run test:property     fast-check properties (providers stubbed at the adapter seam)
- *   npm run test:integration  real Postgres; skipped when JAMEE_TEST_DATABASE_URL is absent
+ *   npm run test:integration  real MongoDB via mongodb-memory-server in replica-set mode (V31)
  *
- * `npm run test` runs all three. The integration project is *gated, not failed*, when no
- * database URL is present — see tests/integration/database.ts.
+ * `npm run test` runs all three. Under Amendment A3 the integration project no longer gates on a
+ * `JAMEE_TEST_DATABASE_URL`/local-Supabase stack and no longer self-skips: it starts an in-memory
+ * replica set (needed for the link and payment multi-document transactions, V33), and a failed
+ * start fails the run loudly — a run that executed zero integration tests is a broken gate, not a
+ * pass (see tests/integration/mongo.ts).
  */
 export default defineConfig({
   plugins: [react()],
@@ -39,6 +42,15 @@ export default defineConfig({
   test: {
     // Zero test files in a project is not a failure — projects fill up over later tasks.
     passWithNoTests: true,
+    // Each integration file spins up its OWN `MongoMemoryReplSet` (a real MongoDB child process).
+    // Twenty of them started and stopped inside ONE long-lived worker fork accumulated native
+    // handles until the fork faulted (Windows 0xC0000409). `forks` with isolation gives each test
+    // FILE a fresh child process, so its replica set — and every handle the driver held — is
+    // reclaimed with the fork before the next file starts. Set at the root so `extends: true`
+    // merges it into every project (unit/property already run cleanly under forks); the per-project
+    // `test` config type does not accept `pool`, so this is its correct home.
+    pool: 'forks',
+    isolate: true,
     projects: [
       {
         extends: true,
@@ -64,8 +76,14 @@ export default defineConfig({
           name: 'integration',
           environment: 'node',
           include: ['tests/integration/**/*.test.ts'],
-          // Real Postgres round trips, and these run serially against one database.
+          // Real MongoDB round trips against a single-node `MongoMemoryReplSet` (Amendment A3, V31),
+          // run serially against one in-memory server per file.
           testTimeout: 30_000,
+          // The harness `beforeAll` starts a replica set, runs `setupDatabase`, and creates two
+          // farmers; the first run may also download the MongoDB binary. The default 10s hook
+          // timeout is too tight for that, so give hooks the same 120s the per-file `beforeAll`
+          // callbacks request explicitly (a belt-and-braces floor for any that forget).
+          hookTimeout: 120_000,
           fileParallelism: false,
         },
       },

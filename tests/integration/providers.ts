@@ -22,8 +22,9 @@ import { gatewayTranscriber, type Transcriber } from '@/services/voice.service';
  * Requirements: 17.5 (the testing report records the outcome of the image, chat, voice and WhatsApp
  *               scenarios), 5.1–5.6 (the two validation stages), 6.1–6.6 (the one inconclusive
  *               shape), 14.4 / 14.8 (the fallback matrix)
- * Design: "Integration tests — mocked providers, real Postgres": *"Providers are mocked at the
- *         adapter seam so the gateway, services, validation, persistence, and RLS are all real."*
+ * Design: "Integration tests — mocked providers, real MongoDB" (Amendment A3): *"Providers are
+ *         mocked at the adapter seam so the gateway, services, validation, persistence, and the
+ *         Data_Access_Layer's owner-scoping are all real."*
  *
  * =============================================================================
  * WHERE THE SEAM IS, AND WHY IT IS NOT THE GATEWAY
@@ -41,7 +42,8 @@ import { gatewayTranscriber, type Transcriber } from '@/services/voice.service';
  * Stubbing there leaves **everything above it real**: request-body construction and V9's size
  * ceiling in `groq.ts`, V11 error classification in both adapters, the shared-deadline arithmetic,
  * the minimum-remaining spend guard, chain order and the fallback loop in `gateway.ts`, the two
- * validation stages, `validateRephrased`, the knowledge-base reads, the inserts, and RLS.
+ * validation stages, `validateRephrased`, the knowledge-base reads, the inserts, and the
+ * Data_Access_Layer's owner-scoping.
  *
  * **A `CapabilityRunner` stub would have been easier and would have proved much less.** It is the
  * right seam for a *unit* test — `diagnosis.service.test.ts` uses it, because a service test should
@@ -397,10 +399,10 @@ export function promptTextOf(request: GeminiInteractionRequest): string {
   return textPartsOf(request.input);
 }
 
-/** The image parts of a logged Gemini vision request — Requirement 2.8's URL and MIME type. */
+/** The image parts of a logged Gemini vision request — under A3 the inline `data` form (V34). */
 export function imagePartsOf(
   request: GeminiInteractionRequest,
-): readonly { readonly uri: string; readonly mime_type: string }[] {
+): readonly Extract<GeminiContentPart, { type: 'image' }>[] {
   if (typeof request.input === 'string') return [];
   return request.input.filter(
     (part): part is Extract<GeminiContentPart, { type: 'image' }> => part.type === 'image',
@@ -483,7 +485,7 @@ function resolveTranscription(script: ProviderScript): TranscriptionPayload {
  *
  * ```ts
  * const providers = providerStubs({ vision: classificationText(CLASSIFICATIONS.tomatoHealthy) });
- * const outcome = await diagnose(input, { supabase: farmer.client, models: providers.models });
+ * const outcome = await diagnose(input, { models: providers.models });
  * expect(providers.calls.geminiVision).toHaveLength(1);
  * ```
  */

@@ -1571,13 +1571,13 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - **Validates: Amendment A2 decision 3; Requirements 22.9 (as inverted by A2), 22.11**
     - _Requirements: 21.5, 21.6, 21.7, 21.8, 22.5, 22.6, 22.7, 22.10, 22.11, 22.13, 22.14, 22.15, 22.16, 22.17_
 
-- [ ] 62. Update the integration suite for MongoDB and run it on `mongodb-memory-server` in replica-set mode
-  - [ ]* 62.1 Point the integration harness at `mongodb-memory-server` in replica-set mode
+- [x] 62. Update the integration suite for MongoDB and run it on `mongodb-memory-server` in replica-set mode
+  - [x]* 62.1 Point the integration harness at `mongodb-memory-server` in replica-set mode
     - Start it as a single-node replica set so the link and payment multi-document transactions work (V31, V33); point the Data_Access_Layer at it; mock providers at the adapter seam so the gateway, services, validation, persistence, and owner-scoping are real; retire the Supabase local-stack requirement and the `supabase status -o env` reads. Two farmers created through the Google path with no phone; the release-acceptance history assertion reads `web` and `telegram`
     - _Requirements: 12.1, 12.2, 17.5_
     - _Design: Integration tests; depends on V31, V33_
 
-  - [ ]* 62.2 Rewrite the channel, linking, payment, and isolation integration tests on MongoDB
+  - [x]* 62.2 Rewrite the channel, linking, payment, and isolation integration tests on MongoDB
     - Telegram text/photo/voice/unsupported/duplicate/timeout/rate-limit-fallback plus an unlinked sender and a **lapsed-window** sender; the `update_id` idempotency test; linking across valid/expired/consumed/unknown/no-payload/already-linked-elsewhere and two concurrent deliveries; payment across an abandoned checkout, a replayed webhook, a forged signature, a captured payment opening a lapsed sender, a recharge extending the window, and an unauthenticated flood; tenant isolation attempting cross-farmer reads (zero documents) and cross-farmer writes on the access collections (fail) across all collections and GridFS
     - _Requirements: 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 13.9, 14.4, 14.5, 21.6, 21.7, 21.8, 22.10, 22.13, 22.17, 22.19, 22.21_
 

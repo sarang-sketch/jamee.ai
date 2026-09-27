@@ -71,7 +71,7 @@ beforeEach(async () => {
 function uploadRequest(kind: string, bytes: Buffer, mimeType: string): Promise<Response> {
   const form = new FormData();
   form.append('kind', kind);
-  form.append('file', new Blob([bytes], { type: mimeType }), `upload.jpg`);
+  form.append('file', new Blob([new Uint8Array(bytes)], { type: mimeType }), `upload.jpg`);
   const request = new Request('https://jamee.test/api/media', { method: 'POST', body: form });
   return uploadRoute.POST(request as NextRequest);
 }

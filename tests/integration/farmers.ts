@@ -1,217 +1,147 @@
-import type { Language } from '@/lib/schemas';
-import type { ProfileRow } from '@/types/database';
+import { randomUUID } from 'node:crypto';
 
-import { anonClient, type TestClient } from './clients';
-import { requireSupabaseTestConfig, type SupabaseTestConfig } from './database';
+import type { Db } from 'mongodb';
+
+import type { ProfileDoc } from '@/lib/db/collections';
+import { COLLECTIONS } from '@/lib/db/names';
+import type { Language } from '@/lib/schemas';
 
 /**
- * A farmer with a real session, which is the fixture every tenant-isolation assertion rests on.
+ * A farmer, as Amendment A3 mints one: an Auth_User_Id the auth library assigns, a Google email,
+ * and a Profile the D8 bootstrap wrote — and NO phone.
  *
- * Requirements: 1.4 (a first session for a phone with no Profile produces one, keyed by the auth
- *               user id and carrying the E.164 number), 1.5 (the phone is the single cross-channel
- *               identity), 13.2 (an authenticated farmer reaches only their own rows)
- * Design: D8 (profile creation = an `auth.users` trigger plus an idempotent server-side upsert)
+ * Requirements: 1.4 (a first session for an Auth_User_Id with no Profile produces a Profile whose
+ *               `_id` is that id and whose `email` holds the Google_Email), 1.9 (no phone is
+ *               written, and phone takes part in no identity resolution), 13.1, 13.2 (each farmer
+ *               reaches only their own documents — proven by the tenant-isolation scenarios, which
+ *               need TWO farmers)
+ * Design: D8 (profile creation = the auth library's user-created hook PLUS an idempotent
+ *         server-side upsert through the Data_Access_Layer), D18 (the Data_Access_Layer is the
+ *         isolation boundary that replaced RLS), Amendment A3
  *
  * =============================================================================
- * HOW AN RLS-SCOPED SESSION IS MINTED, AND WHY THIS WAY
+ * WHAT CHANGED FROM THE SUPABASE HARNESS, AND WHY
  * =============================================================================
  *
- * RLS is written against `auth.uid()`, which is a claim on the request's JWT. There is no way to
- * fake one: a token has to be signed by the stack's own secret, so the harness has to obtain a real
- * one. Three routes exist against a local stack, and this is the one taken:
+ * The retired harness minted an RLS-scoped SESSION: it created an `auth.users` row, signed in with
+ * a password, and handed back a `SupabaseClient` whose every statement carried a JWT so Postgres's
+ * RLS decided the outcome. Under A3 there is no RLS and no session-bearing client — tenant
+ * isolation is the Data_Access_Layer (D18), and a farmer is just an Auth_User_Id that the
+ * owner-scoped accessors merge into every query. So a "farmer" here is a string id plus the
+ * documents a first Google sign-in leaves behind, and a scenario proves isolation by asking through
+ * `farmerData(theOtherFarmer.id)` and asserting zero documents — not by minting a second JWT.
  *
- *  1. **Service role creates the user, the user signs in with a password.** ← used here
- *     `auth.admin.createUser({ email, password, phone, email_confirm, phone_confirm })` followed by
- *     `auth.signInWithPassword({ email, password })` on an anon-key client. Two documented Auth
- *     endpoints, no SMS provider, no email delivery, and the resulting client is scoped exactly the
- *     way a browser client is after a farmer signs in.
- *  2. Phone OTP, the way production signs a farmer in (Requirement 1.1). Rejected: it needs a
- *     configured SMS provider, which `docs/DEPLOYMENT.md` step 2 records as the one paid dependency
- *     in the whole deployment. A harness that cannot run without a paid third party is a harness
- *     nobody runs. Real OTP delivery stays a human-tester item, which is where the design already
- *     puts it.
- *  3. Signing a JWT locally with the stack's secret. Rejected: it would put a second, hand-rolled
- *     notion of "a valid Jamee session" in the repository, and a test that mints tokens the Auth
- *     service would refuse can pass while production is broken.
+ * =============================================================================
+ * THE GOOGLE PATH, AS FAR AS IT MATTERS TO THE DATA
+ * =============================================================================
  *
- * **The email address is scaffolding, not identity.** Requirement 1.5 makes the *phone* the single
- * cross-channel identity, and that is what goes on the profile row — the trigger in
- * `0002_profiles.sql` copies `new.phone`, never the email. The email exists only because
- * password sign-in needs an identifier that does not involve an SMS provider. Every assertion about
- * identity should read `profiles.phone`.
+ * A real first sign-in does two things (D8): the auth library writes its own `user` (and Google
+ * `account`) records, and the D8 hook runs `bootstrapProfile`, which upserts the Profile through
+ * the Data_Access_Layer. The auth library owns the `user`/`account` collections (they are not in
+ * `scripts/db-setup.ts` — see `auth-adapter.ts`), so this fixture writes plausible `user` and
+ * Google `account` documents directly (there is no in-process Better Auth server to drive without a
+ * browser), then runs the SAME `bootstrapProfile` the hook runs, so the Profile row is written by
+ * production code and keyed by the same Auth_User_Id. That is the "or the same documents the
+ * bootstrap writes" path the task's brief allows, and it keeps every later assertion about the
+ * Profile an assertion about `bootstrapProfile`, not about the fixture.
+ *
+ * **The email is identity here, and the phone is absent by construction.** Under A3 the Profile's
+ * `email` holds the Google_Email (1.4) and there is NO phone column written (1.9) — the fixture
+ * never sets one, and `bootstrapProfile` never writes one, so a phone-reader check has nothing to
+ * find.
  */
 export interface TestFarmer {
-  /** `auth.users.id`, which is also `profiles.id` and the first segment of every storage path. */
+  /** The Auth_User_Id — `user._id` and `profiles._id`, and the tenant anchor of every owned row. */
   readonly id: string;
-  /** E.164. The single cross-channel identity (Requirement 1.5). */
-  readonly phone: string;
-  /** Sign-in scaffolding. Not identity — see the note above. */
+  /** The Google email the Profile carries (1.4). Identity here; there is no phone. */
   readonly email: string;
-  /** The session's access token, for a test that needs to build a request by hand. */
-  readonly accessToken: string;
-  /**
-   * RLS-scoped. Every statement made through this client carries this farmer's JWT, so the
-   * policies in the migrations are what decide the outcome — pass it as a service's `supabase`
-   * dependency to exercise the web path exactly as a route handler does.
-   */
-  readonly client: TestClient;
+  /** The farmer's language, as stored on the Profile (defaults to `en`). */
+  readonly language: Language;
 }
 
 export interface CreateFarmerOptions {
-  /** Defaults to a random E.164 number. Supply one to pin a WhatsApp-resolution assertion. */
-  readonly phone?: string;
-  /** Written to the profile after the trigger created it. Defaults to the column default, `en`. */
+  /** The Profile language written after the bootstrap. Defaults to the column default, `en`. */
   readonly language?: Language;
-  readonly displayName?: string;
+  /** A pinned Auth_User_Id, for a scenario that needs a stable id. Defaults to a random one. */
+  readonly id?: string;
+  /** A pinned Google email. Defaults to a random one. */
+  readonly email?: string;
 }
 
-/** Digits from `crypto.randomUUID()`, so no test needs a seeded random source. */
-function randomDigits(count: number): string {
-  let digits = '';
-  while (digits.length < count) digits += crypto.randomUUID().replace(/\D/g, '');
-  return digits.slice(0, count);
+/** The Better Auth `user` document, as far as this fixture writes it. The library owns this shape. */
+interface AuthUserDoc {
+  _id: string;
+  name: string;
+  email: string;
+  emailVerified: boolean;
+  image: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-/**
- * A random E.164 number: `+91` and ten digits, which is twelve digits total and inside the 8-to-15
- * range `profiles_phone_e164` enforces.
- *
- * Random rather than sequential because `profiles.phone` is UNIQUE and a run that failed before its
- * cleanup would otherwise poison every later run with a collision that looks like a policy error.
- */
-export function randomTestPhone(): string {
-  return `+91${randomDigits(10)}`;
-}
-
-function randomEmail(): string {
-  return `jamee-integration-${crypto.randomUUID()}@example.com`;
-}
-
-/**
- * A random sign-in password that stays inside bcrypt's input limit.
- *
- * =============================================================================
- * WHY THIS IS A FUNCTION AND NOT AN INTERPOLATION AT THE CALL SITE
- * =============================================================================
- *
- * GoTrue hashes passwords with **bcrypt, which refuses any input longer than 72 bytes** — and it
- * refuses it by panicking, so the admin create endpoint answers with a bare `500 Internal Server
- * Error` and `docker logs supabase_auth_jamee` is the only place the reason appears.
- *
- * This used to read `` `${crypto.randomUUID()}-${crypto.randomUUID()}` ``, which is 36 + 1 + 36 =
- * **73 bytes**: one byte over, so every `beforeAll` in the integration suite failed. Stripping the
- * hyphens leaves the two UUIDs' 32 hex digits each — **64 bytes**, eight under the limit, so a
- * future tweak has room. Landing exactly on 72 would invite the same bug straight back.
- *
- * Hex is ASCII, so byte length equals character length here; anything non-ASCII added later must be
- * measured with `Buffer.byteLength`, not `.length`. Per-farmer random rather than a shared constant
- * because `signInWithPassword` uses it immediately and concurrent suites must not interfere.
- *
- * Exported so `tests/unit/integration-harness.test.ts` can guard the real value on every `npm test`
- * rather than re-deriving the arithmetic and proving nothing.
- */
-export function randomTestPassword(): string {
-  return `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, '');
+/** The Better Auth Google `account` document. The library owns this shape. */
+interface AuthAccountDoc {
+  _id: string;
+  userId: string;
+  providerId: 'google';
+  accountId: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 /**
- * Create an auth user, confirm both identifiers, and return a client holding its session.
+ * Create a farmer: write the auth library's `user` + Google `account` records, run the D8
+ * `bootstrapProfile`, and set the language if one was requested.
  *
- * `admin` must be a service-role client: creating a user and confirming it are admin endpoints.
- *
- * The profile row is **not** inserted here. `0002_profiles.sql`'s `on_auth_user_created` trigger
- * writes it, and letting it do so is the point: a harness that inserted the row itself would make
- * every later assertion about Requirement 1.4 vacuous, and would hide a broken trigger — which
- * `0002` notes blocks signups entirely rather than degrading.
+ * `bootstrap` is passed in rather than imported so this module holds no `@/`-server dependency the
+ * setup script cannot resolve; the harness passes the dynamically-imported
+ * `bootstrapProfile`. The write goes through production code, so the Profile is exactly the row a
+ * first Google sign-in produces — keyed by the Auth_User_Id, carrying the Google email, no phone.
  */
 export async function createTestFarmer(
-  admin: TestClient,
+  db: Db,
+  bootstrap: (userId: string, email: string | null) => Promise<void>,
   options: CreateFarmerOptions = {},
-  config: SupabaseTestConfig = requireSupabaseTestConfig(),
 ): Promise<TestFarmer> {
-  const phone = options.phone ?? randomTestPhone();
-  const email = randomEmail();
-  // 64 ASCII bytes, under bcrypt's 72-byte ceiling — see randomTestPassword().
-  const password = randomTestPassword();
+  const id = options.id ?? `auth-user-${randomUUID()}`;
+  const email = options.email ?? `jamee-${randomUUID()}@example.test`;
+  const language: Language = options.language ?? 'en';
+  const now = new Date();
 
-  const created = await admin.auth.admin.createUser({
+  // The auth library's own records (D8). These are the documents a Google first sign-in creates;
+  // the library owns these collections, so the fixture writes them directly.
+  await db.collection<AuthUserDoc>('user').insertOne({
+    _id: id,
+    name: email.split('@')[0] ?? 'farmer',
     email,
-    password,
-    phone,
-    email_confirm: true,
-    phone_confirm: true,
+    emailVerified: true,
+    image: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.collection<AuthAccountDoc>('account').insertOne({
+    _id: `acct-${id}`,
+    userId: id,
+    providerId: 'google',
+    accountId: `google-${id}`,
+    createdAt: now,
+    updatedAt: now,
   });
 
-  if (created.error !== null || created.data.user === null) {
-    throw new Error(
-      `Could not create a test farmer (${phone}): ${created.error?.message ?? 'no user returned'}. ` +
-        'Read the status first, because it splits the causes. A 500 / "Internal Server Error" is ' +
-        'not a validation failure and usually means the Auth container itself panicked, or a ' +
-        'trigger on auth.users raised — the admin endpoint has no message for either, so the actual ' +
-        'reason lives in `docker logs supabase_auth_jamee` and that is where to look before ' +
-        'suspecting anything below. (One such panic was bcrypt refusing a password over 72 bytes; ' +
-        'see randomTestPassword().) For a non-500 failure, three causes are plausible: the ' +
-        "migrations were not applied, so the 0002 trigger's insert into public.profiles failed; " +
-        'this phone is already on another profile (it is UNIQUE); or the stack refuses a phone on ' +
-        'the admin create endpoint, which is fixed by enabling the phone provider under [auth.sms] ' +
-        'in supabase/config.toml. A phone is not optional — profiles.phone is NOT NULL and the ' +
-        'trigger copies it from the auth user.',
-    );
+  // The D8 bootstrap upsert — the SAME function the auth hook runs (Requirement 1.4). It writes
+  // `(_id, email)` and NO phone (1.9) through the Data_Access_Layer.
+  await bootstrap(id, email);
+
+  if (options.language !== undefined) {
+    await db
+      .collection<ProfileDoc>(COLLECTIONS.profiles)
+      .updateOne({ _id: id }, { $set: { language, updatedAt: new Date() } });
   }
 
-  const id = created.data.user.id;
-
-  const profileFields = {
-    ...(options.language === undefined ? {} : { language: options.language }),
-    ...(options.displayName === undefined ? {} : { display_name: options.displayName }),
-  };
-
-  if (Object.keys(profileFields).length > 0) {
-    const { error } = await admin.from('profiles').update(profileFields).eq('id', id);
-    if (error !== null) {
-      throw new Error(`Could not set profile fields for ${id}: ${error.message}`);
-    }
-  }
-
-  const client = anonClient(config);
-  const session = await client.auth.signInWithPassword({ email, password });
-
-  if (session.error !== null || session.data.session === null) {
-    throw new Error(
-      `Could not sign in as the test farmer ${id}: ${session.error?.message ?? 'no session returned'}. ` +
-        'Password sign-in must be enabled on the stack for the harness to mint an RLS-scoped ' +
-        'session — see the note at the top of tests/integration/farmers.ts.',
-    );
-  }
-
-  return { id, phone, email, accessToken: session.data.session.access_token, client };
+  return { id, email, language };
 }
 
-/**
- * Delete the auth user, which cascades.
- *
- * Every farmer-scoped table references `profiles(id) on delete cascade`, and `profiles.id`
- * references `auth.users(id) on delete cascade`, so one delete removes the conversations, messages,
- * diagnoses, counters and usage-log rows a test produced. `whatsapp_inbound.user_id` is
- * `on delete set null` by design (Requirement 11.5) — a test that writes one cleans it up itself.
- *
- * Tolerant of an already-absent user so a failed `beforeAll` cannot cascade into a failing
- * `afterAll` that hides it.
- */
-export async function deleteTestFarmer(admin: TestClient, farmer: TestFarmer): Promise<void> {
-  await farmer.client.auth.signOut({ scope: 'local' });
-  const { error } = await admin.auth.admin.deleteUser(farmer.id);
-  if (error !== null && !/not.*found/i.test(error.message)) {
-    throw new Error(`Could not delete the test farmer ${farmer.id}: ${error.message}`);
-  }
-}
-
-/**
- * The profile row as the service role sees it — i.e. whether it exists at all, independent of any
- * policy. Use the farmer's own client to assert what a *farmer* can read.
- */
-export async function profileOf(admin: TestClient, userId: string): Promise<ProfileRow | null> {
-  const { data, error } = await admin.from('profiles').select('*').eq('id', userId).maybeSingle();
-  if (error !== null) throw new Error(`Could not read profile ${userId}: ${error.message}`);
-  return data;
+/** The Profile row as the service role sees it — for an assertion about what the bootstrap wrote. */
+export async function profileOf(db: Db, userId: string): Promise<ProfileDoc | null> {
+  return db.collection<ProfileDoc>(COLLECTIONS.profiles).findOne({ _id: userId });
 }

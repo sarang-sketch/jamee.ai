@@ -1,18 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
 import * as fc from 'fast-check';
+import { ObjectId, type WithId } from 'mongodb';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CapabilityRunner } from '@/lib/ai/capabilities';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
-import { usageLogRow, type UsageFacts } from '@/lib/db/usage-log';
-import type {
-  ExistingInbound,
-  InboundReceivedRow,
-  TerminalInboundStatus,
-  WhatsappInboundStore,
-} from '@/lib/db/whatsapp-inbound';
+import type { MessageDoc } from '@/lib/db/collections';
+import { usageLogRow, type UsageFacts, type UsageLogInsert } from '@/lib/db/usage-log';
 import { AppError, isAppError } from '@/lib/errors';
 import type { TranscriptionResult } from '@/lib/groq';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
@@ -24,19 +18,17 @@ import {
   type Channel,
   type ChatInput,
   type Language,
+  type MediaRef,
   type Operation,
-  type StorageRef,
   type UsageOutcome,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
-import type { InboundContent, InboundMessage, SendReplyResult } from '@/lib/whatsapp';
-import { processInboundBatch, type WhatsappDispatchDeps } from '@/lib/whatsapp-dispatch';
 import {
   chatTurn,
   type ChatTurnDeps,
   type ChatWriteStore,
   type ContextStore,
+  type MessageInsert,
 } from '@/services/chat.service';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
@@ -44,13 +36,12 @@ import type { CounterRpc, QuotaContext } from '@/services/quota.service';
 import {
   transcribeAndAnswer,
   type ChatAnswerer,
+  type MediaRemover,
   type NestedChatOutcome,
-  type ObjectRemoveClient,
   type Transcriber,
   type VoiceDeps,
   type VoiceStore,
 } from '@/services/voice.service';
-import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
 
 /**
  * **Property 22: Every model operation leaves a complete audit row**
@@ -61,60 +52,59 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
  *
  * **Validates: Requirements 14.6, 14.7**
  *
+ * ### Amendment A1–A3 — restated for the MongoDB/GridFS substrate and the web + telegram channels
+ *
+ * Under Amendment A1 the WhatsApp channel and every WhatsApp module were removed (`channelSchema`
+ * is `web | telegram` only), so this property no longer drives `processInboundBatch` or the
+ * WhatsApp adapter's own two audit rows. Those two cases produced the `duplicate_ignored` outcome
+ * (a platform redelivery, Requirement 11.5) and a pre-flight soft-deadline `timeout`; the Telegram
+ * inbound path (`src/lib/telegram-dispatch.ts`, owned by a Telegram-side worker) is now what writes
+ * a `duplicate_ignored` row, so that outcome is asserted **there** rather than here. The
+ * non-vacuity guard below therefore checks the diagnosis/chat/voice services' own outcome set,
+ * which is every value the vocabulary can hold **except** `duplicate_ignored` — see the guard for
+ * why that exclusion is stated rather than silently narrowed.
+ *
+ * Under Amendment A3 the services read image and audio bytes from GridFS through the
+ * Data_Access_Layer (the `readMedia` seam) rather than minting a Supabase signed URL, and persist
+ * through the owner-scoped accessors — so the harness below injects `readMedia` and the wire-shaped
+ * `UsageLogInsert` writer, and there is no Supabase client, no storage bucket, and no signed-URL
+ * seam.
+ *
  * ### The column list is read out of the source, not copied into this file
  *
  * `usageLogRow()` in `src/lib/db/usage-log.ts` is the one row builder every audit write goes through,
  * and it writes **every** column on **every** row — explicit `null` rather than an omitted key, so a
- * database default can never stand in for a decision. Both column sets below are derived by calling
- * it:
+ * default can never stand in for a decision. Both column sets below are derived by calling it:
  *
  *  - `ALL_COLUMNS` — the keys it produces. Every row observed in this file must have exactly these
  *    keys, so a call site that hand-built a row and forgot one fails here, and a column added to the
  *    builder later is covered with no edit to this test.
  *  - `REQUIRED_COLUMNS` — the keys that are non-null when only `UsageFacts`'s **required** fields are
  *    supplied. That is the module's own type discipline read as data: a fact a caller may omit comes
- *    out `null`, and a fact it cannot omit comes out with a value. Those are the columns asserted
- *    non-null on every row.
+ *    out `null`, and a fact it cannot omit comes out with a value.
  *
- * The tie back to the requirement text is then asserted rather than assumed: the five facts
- * Requirement 14.6 names, and the fallback flag Requirement 14.7 names, must all be members of the
- * derived `REQUIRED_COLUMNS`. If `usageLogRow` ever stopped writing one, or made it optional, that
- * assertion fails before any property runs.
+ * ### Every operation kind and every reachable outcome, on real service paths
  *
- * ### Every operation kind and every outcome, on real paths
- *
- * Twenty-three cases drive the **real** services and the **real** WhatsApp pipeline — `diagnose()`,
- * `chatTurn()`, `transcribeAndAnswer()` and `processInboundBatch()` — one per audited path, including
- * the ones that are not model successes:
- *
- *  - the served answer, on all three operations;
- *  - the four ways an answer degrades: a stage-1 rejection, a refused rephrase, an exhausted chain
- *    and an expired budget;
- *  - the two honest non-answers: an unclear photo, and an empty transcript;
- *  - the referral, which is the one path that reaches no provider and therefore refunds;
- *  - a pre-provider storage failure, which is spent-nothing rather than spent;
- *  - both refusals — the daily decline (14.3) and the burst refusal (13.8, migration `0011`);
- *  - the WhatsApp adapter's own two rows: the pre-flight soft-deadline refusal and a redelivery.
- *
- * The **non-vacuity guard is the strongest available one**: the set of `outcome` values observed
- * across the run must equal `usageOutcomeSchema.options` exactly. Every value the vocabulary can hold
- * is produced by a real path in this file, so a value added to the schema without a path that writes
- * it fails the run — which is the failure the task calls out, an operation path that writes no row.
+ * The cases drive the **real** services — `diagnose()`, `chatTurn()`, `transcribeAndAnswer()` — one
+ * per audited path, including the ones that are not model successes: the served answer on all three
+ * operations; the four ways an answer degrades (a stage-1 rejection, a refused rephrase, an
+ * exhausted chain, an expired budget); the two honest non-answers (an unclear photo, an empty
+ * transcript); the referral, which reaches no provider and refunds; a pre-provider media-read
+ * failure, which is spent-nothing; and both refusals — the daily decline (14.3) and the burst
+ * refusal (13.8, migration `0011`).
  *
  * ### Requirement 14.7 is asserted in both directions
  *
  * The fallback flag is generated, and the same case is run with it `false` and `true`; a row for a
  * path that reached the gateway must carry the generated value, and a row for a path that reached no
- * provider at all must carry `false`. Both are asserted per case, so "records the fallback" cannot be
- * satisfied by a column that is always `true`, nor by one that is always `false`.
+ * provider at all must carry `false`.
  *
  * ### One request is not always one row
  *
- * `usage-log.ts` states the rule: a row covers one `operation`, so a diagnosis (two gateway calls,
- * one operation) is one row, and a voice request (transcription plus the nested chat answer, two
- * operations) is **two**. The voice success case therefore runs the **real** `chatTurn` as its nested
- * service and asserts two complete rows — a `voice` row and a `chat` row — against a single reserved
- * unit. A harness that stubbed the nested call would have quietly asserted the weaker claim.
+ * A diagnosis (two gateway calls, one operation) is one row; a voice request (transcription plus the
+ * nested chat answer, two operations) is **two**. The voice success case runs the **real** `chatTurn`
+ * as its nested service and asserts two complete rows — a `voice` row and a `chat` row — against a
+ * single reserved unit.
  */
 
 /* ========================================================================== */
@@ -124,8 +114,10 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
 const USER_ID = '8e2c4a6b-1d3f-4e5a-8b7c-9d0e1f2a3b4c';
 const CONVERSATION_ID = 'b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e';
 const DIAGNOSIS_ID = 'c2d3e4f5-a6b7-4c8d-8e9f-1a2b3c4d5e6f';
-const FARMER_MESSAGE_ID = 'd3e4f5a6-b7c8-4d9e-8f01-2b3c4d5e6f70';
-const ANSWER_MESSAGE_ID = 'e4f5a6b7-c8d9-4e0f-8123-3c4d5e6f7081';
+
+/** A stored `messages` `_id` per role, as ObjectId hex — the shape `insertTurn` returns now. */
+const FARMER_MESSAGE_OID = new ObjectId();
+const ANSWER_MESSAGE_OID = new ObjectId();
 
 /** Everything a caller may supply, so the key list is the full column set. */
 const FULL_FACTS: UsageFacts = {
@@ -178,17 +170,17 @@ const REQUIREMENT_14_6_COLUMNS = {
 /** Requirement 14.7's fact. */
 const REQUIREMENT_14_7_COLUMN = 'used_fallback';
 
-function columnOf(row: TablesInsert<'usage_logs'>, column: string): unknown {
+function columnOf(row: UsageLogInsert, column: string): unknown {
   return (row as unknown as Record<string, unknown>)[column];
 }
 
 /**
  * The completeness assertion, applied to every row this file observes.
  *
- * Two halves: the key set is exactly the builder's (so nothing was omitted and no database default
- * was relied on), and every column that cannot legitimately be null carries a value.
+ * Two halves: the key set is exactly the builder's (so nothing was omitted and no default was
+ * relied on), and every column that cannot legitimately be null carries a value.
  */
-function assertComplete(row: TablesInsert<'usage_logs'>, label: string): void {
+function assertComplete(row: UsageLogInsert, label: string): void {
   expect(Object.keys(row).sort(), `${label}: the row's column set`).toStrictEqual(ALL_COLUMNS);
 
   for (const column of REQUIRED_COLUMNS) {
@@ -264,16 +256,13 @@ const IN_SCOPE_QUESTION = `what should I do about ${CONDITION}`;
 /** No verified vocabulary at all, so the turn refers the farmer on and calls no model (4.7). */
 const OUT_OF_SCOPE_QUESTION = 'how much water does wheat need in summer';
 
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
+/** A3: the crop image and the recording are `{ fileId, kind }` Media_References, not storage paths. */
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
+const AUDIO_REF: MediaRef = { fileId: 'c'.repeat(24), kind: 'voice' };
+
+/** The bytes the owner-checked reads yield, and their stored MIME types. */
+const IMAGE_BYTES = Buffer.from('jamee property harness: fake crop-image bytes');
+const AUDIO_BYTES = Buffer.from('jamee property harness: fake voice bytes');
 
 const knowledge: KnowledgeReader = (names) =>
   Promise.resolve(KNOWLEDGE_ROWS.filter((row) => names.includes(row.disease_name)));
@@ -289,26 +278,36 @@ function conversationFor(userId: string, channel: Conversation['channel']): Conv
   };
 }
 
-function refFor(bucket: string, extension: 'jpg' | 'ogg'): StorageRef {
+/**
+ * A stored `messages` record, as the owner-scoped `insertChatTurn` returns it — a `WithId<MessageDoc>`
+ * whose `_id` is an ObjectId and whose `transcriptOf` is a `MediaRefDoc` or `null`. The chat write
+ * seam takes the string-shaped `MessageInsert` and returns this document shape.
+ */
+function messageRecordFor(row: MessageInsert, id: ObjectId): WithId<MessageDoc> {
   return {
-    bucket: bucket as StorageRef['bucket'],
-    path: `${USER_ID}/2026/09/${randomUUID()}.${extension}`,
-  };
-}
-
-function messageRowFor(row: TablesInsert<'messages'>, id: string): MessageRow {
-  return {
-    id,
-    conversation_id: row.conversation_id,
-    user_id: row.user_id,
+    _id: id,
+    ownerId: row.ownerId,
+    // The record's `conversationId` is not asserted here; a fresh ObjectId keeps this tolerant of a
+    // non-ObjectId conversation id in the input row (the input carries the request's own id shape).
+    conversationId: ObjectId.isValid(row.conversationId)
+      ? new ObjectId(row.conversationId)
+      : new ObjectId(),
     role: row.role,
     content: row.content,
     language: row.language,
     channel: row.channel,
-    input_kind: row.input_kind ?? 'text',
-    transcript_of: row.transcript_of ?? null,
-    created_at: '2026-09-16T06:17:42.000Z',
+    inputKind: row.inputKind,
+    transcriptOf:
+      row.transcriptOf === undefined
+        ? null
+        : { fileId: new ObjectId(row.transcriptOf.fileId), kind: row.transcriptOf.kind },
+    createdAt: new Date(CLOCK_MS),
   };
+}
+
+/** The owner-checked media read seam — yields the bytes the model is sent inline (A3, V34). */
+function readMediaOf(bytes: Buffer, mimeType: string) {
+  return (): Promise<{ bytes: Buffer; mimeType: string }> => Promise.resolve({ bytes, mimeType });
 }
 
 /** The counter, with the two behaviours the refusal cases need. */
@@ -340,25 +339,8 @@ const refusingBurst: BurstCheck = () =>
     }),
   );
 
-function storageStub(
-  options: { readonly signFails?: boolean } = {},
-): StorageClientLike & ObjectRemoveClient {
-  return {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: true, error: null }),
-        createSignedUrl: (path: string) =>
-          options.signFails === true
-            ? Promise.resolve({ data: null, error: { message: 'signing is unavailable' } })
-            : Promise.resolve({
-                data: { signedUrl: `https://storage.test/${path}?token=synthetic` },
-                error: null,
-              }),
-        remove: () => Promise.resolve({ data: [{ name: 'removed' }], error: null }),
-      }),
-    },
-  };
-}
+/** The owner-scoped media delete seam voice uses; here it always removes. */
+const removeStub: MediaRemover = () => Promise.resolve(true);
 
 /* ========================================================================== */
 /* The cases                                                                   */
@@ -375,7 +357,7 @@ const CASES = [
   'image_model_unclear',
   'image_chain_exhausted',
   'image_budget_expired',
-  'image_signed_url_failed',
+  'image_media_read_failed',
   'image_quota_declined',
   'image_burst_refused',
 
@@ -392,9 +374,6 @@ const CASES = [
   'voice_budget_expired',
   'voice_quota_declined',
   'voice_burst_refused',
-
-  'whatsapp_preflight_budget_expired',
-  'whatsapp_redelivery_ignored',
 ] as const;
 
 type CaseId = (typeof CASES)[number];
@@ -478,16 +457,11 @@ const EXPECTED: Readonly<Record<CaseId, readonly ExpectedRow[]>> = {
       carriesRequestFallback: true,
     },
   ],
-  image_signed_url_failed: [
-    {
-      operation: 'image',
-      outcome: 'provider_error',
-      provider: 'none',
-      quotaSpent: false,
-      rejectionReason: null,
-      carriesRequestFallback: false,
-    },
-  ],
+  // A3: the owner-checked media read returns `null` for a foreign/missing file, and the service
+  // throws `STORAGE_REF_FORBIDDEN` BEFORE the reserve and before any audit write — so this path
+  // writes no row at all (the pre-A3 signed-URL failure wrote a `provider_error` row because it
+  // happened after the reserve; there is no signed-URL mint under A3).
+  image_media_read_failed: [],
   image_quota_declined: [
     {
       operation: 'image',
@@ -641,35 +615,10 @@ const EXPECTED: Readonly<Record<CaseId, readonly ExpectedRow[]>> = {
       carriesRequestFallback: false,
     },
   ],
-
-  /** The WhatsApp adapter's own row (Requirement 3.7's reading of D11's soft deadline). */
-  whatsapp_preflight_budget_expired: [
-    {
-      operation: 'image',
-      outcome: 'timeout',
-      provider: 'none',
-      quotaSpent: false,
-      rejectionReason: null,
-      carriesRequestFallback: false,
-    },
-  ],
-  /** Requirement 11.5's row, written by the duplicate guard once the farmer is attributable. */
-  whatsapp_redelivery_ignored: [
-    {
-      operation: 'image',
-      outcome: 'duplicate_ignored',
-      provider: 'none',
-      quotaSpent: false,
-      rejectionReason: null,
-      carriesRequestFallback: false,
-    },
-  ],
 };
 
-/** Which channel a case can run on. The WhatsApp adapter's own rows are `whatsapp` by construction. */
-function channelsFor(caseId: CaseId): readonly Channel[] {
-  return caseId.startsWith('whatsapp_') ? ['whatsapp'] : ['web', 'whatsapp'];
-}
+/** Both service channels are exercised for every case. */
+const CASE_CHANNELS: readonly Channel[] = ['web', 'telegram'];
 
 /* ========================================================================== */
 /* Running one case                                                            */
@@ -692,7 +641,7 @@ function providerFailure(code: 'PROVIDERS_UNAVAILABLE' | 'DIAGNOSIS_TIMEOUT', us
 /* image                                                                       */
 /* -------------------------------------------------------------------------- */
 
-function diagnosisDeps(input: RunInput, rows: TablesInsert<'usage_logs'>[]): DiagnosisDeps {
+function diagnosisDeps(input: RunInput, rows: UsageLogInsert[]): DiagnosisDeps {
   const { caseId, usedFallback, provider } = input;
 
   const models: CapabilityRunner = {
@@ -730,28 +679,7 @@ function diagnosisDeps(input: RunInput, rows: TablesInsert<'usage_logs'>[]): Dia
   };
 
   const store: DiagnosisStore = {
-    insertDiagnosis: (row) => {
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T06:17:42.000Z',
-      };
-      return Promise.resolve(stored);
-    },
+    insertDiagnosis: () => Promise.resolve(DIAGNOSIS_ID),
     insertUsageLog: (row) => {
       rows.push(row);
       return Promise.resolve();
@@ -764,10 +692,16 @@ function diagnosisDeps(input: RunInput, rows: TablesInsert<'usage_logs'>[]): Dia
     create: (userId, channel) => Promise.resolve(conversationFor(userId, channel)),
   };
 
+  // A3: a foreign/missing file is one `null`, which the service maps to STORAGE_REF_FORBIDDEN
+  // before the reserve. Only the media-read-failed case returns `null`.
+  const readMedia = (): Promise<{ bytes: Buffer; mimeType: string } | null> =>
+    Promise.resolve(
+      caseId === 'image_media_read_failed' ? null : { bytes: IMAGE_BYTES, mimeType: 'image/jpeg' },
+    );
+
   return {
-    supabase: unreachableSupabase,
-    storage: storageStub({ signFails: caseId === 'image_signed_url_failed' }),
     store,
+    readMedia,
     conversations,
     knowledge,
     models,
@@ -785,7 +719,7 @@ function diagnosisDeps(input: RunInput, rows: TablesInsert<'usage_logs'>[]): Dia
 
 function chatDeps(
   input: RunInput,
-  rows: TablesInsert<'usage_logs'>[],
+  rows: UsageLogInsert[],
   options: { readonly nested?: boolean } = {},
 ): ChatTurnDeps {
   const { caseId, usedFallback, provider } = input;
@@ -816,8 +750,8 @@ function chatDeps(
   const writes: ChatWriteStore = {
     insertTurn: (turnRows) =>
       Promise.resolve([
-        messageRowFor(turnRows[0], FARMER_MESSAGE_ID),
-        messageRowFor(turnRows[1], ANSWER_MESSAGE_ID),
+        messageRecordFor(turnRows[0], FARMER_MESSAGE_OID),
+        messageRecordFor(turnRows[1], ANSWER_MESSAGE_OID),
       ]),
     insertUsageLog: (row) => {
       rows.push(row);
@@ -828,7 +762,6 @@ function chatDeps(
   };
 
   return {
-    supabase: unreachableSupabase,
     writes,
     store,
     knowledge,
@@ -847,7 +780,7 @@ function chatDeps(
 /* voice                                                                       */
 /* -------------------------------------------------------------------------- */
 
-function voiceDeps(input: RunInput, rows: TablesInsert<'usage_logs'>[]): VoiceDeps {
+function voiceDeps(input: RunInput, rows: UsageLogInsert[]): VoiceDeps {
   const { caseId, usedFallback } = input;
 
   const transcribe: Transcriber = () => {
@@ -890,13 +823,10 @@ function voiceDeps(input: RunInput, rows: TablesInsert<'usage_logs'>[]): VoiceDe
     },
   };
 
-  const storage = storageStub();
-
   return {
-    supabase: unreachableSupabase,
     chat,
-    storage,
-    deleter: storage,
+    readMedia: readMediaOf(AUDIO_BYTES, 'audio/ogg'),
+    remove: removeStub,
     store,
     transcribe,
     ...(caseId === 'voice_burst_refused' ? { burst: refusingBurst } : {}),
@@ -908,170 +838,20 @@ function voiceDeps(input: RunInput, rows: TablesInsert<'usage_logs'>[]): VoiceDe
 }
 
 /* -------------------------------------------------------------------------- */
-/* the WhatsApp adapter's own two rows                                         */
-/* -------------------------------------------------------------------------- */
-
-interface InboundHarness {
-  readonly deps: WhatsappDispatchDeps;
-  readonly rows: TablesInsert<'usage_logs'>[];
-  readonly stored: Map<string, { user_id: string | null; status: string; message_type: string }>;
-}
-
-function inboundHarness(
-  input: RunInput,
-  rows: TablesInsert<'usage_logs'>[],
-  options: { readonly expired: boolean },
-): InboundHarness {
-  const stored = new Map<string, { user_id: string | null; status: string; message_type: string }>();
-
-  const store: WhatsappInboundStore = {
-    async insertReceived(row: InboundReceivedRow) {
-      const wamid = row.provider_message_id;
-      if (stored.has(wamid)) {
-        return {
-          error: { code: '23505', message: 'duplicate key value violates unique constraint' },
-        };
-      }
-      stored.set(wamid, { user_id: null, status: row.status, message_type: row.message_type });
-      return { error: null };
-    },
-    async readExisting(providerMessageId: string) {
-      const row = stored.get(providerMessageId);
-      if (row === undefined) return { data: null, error: null };
-      const existing: ExistingInbound = {
-        user_id: row.user_id,
-        status: row.status as ExistingInbound['status'],
-        message_type: row.message_type,
-      };
-      return { data: existing, error: null };
-    },
-    async attachUser(providerMessageId: string, userId: string) {
-      const row = stored.get(providerMessageId);
-      if (row !== undefined) row.user_id = userId;
-      return { error: null };
-    },
-    async transitionFromReceived(providerMessageId: string, status: TerminalInboundStatus) {
-      const row = stored.get(providerMessageId);
-      if (row === undefined || row.status !== 'received') return { data: [], error: null };
-      row.status = status;
-      return { data: [{ status }], error: null };
-    },
-    async insertUsageLog(row: TablesInsert<'usage_logs'>) {
-      rows.push(row);
-      return { error: null };
-    },
-  };
-
-  const deps: WhatsappDispatchDeps = {
-    supabase: { __jameePropertyClient: true } as unknown as NonNullable<
-      WhatsappDispatchDeps['supabase']
-    >,
-    inbound: { store },
-    usage: {
-      insertUsageLog: async (row) => {
-        rows.push(row);
-      },
-    },
-    deadline: {
-      // Expired: the pre-flight gate refuses before any media fetch, any service and any reserve.
-      deadlineMs: options.expired ? CLOCK_MS - 1_000 : CLOCK_MS + 45_000,
-      now: () => CLOCK_MS,
-      platformDeadline: () => undefined,
-    },
-    profiles: {
-      async byPhone() {
-        return { data: { id: USER_ID, language: input.language }, error: null };
-      },
-    },
-    conversations: {
-      mostRecent: (userId, channel) => Promise.resolve(conversationFor(userId, channel)),
-      create: (userId, channel) => Promise.resolve(conversationFor(userId, channel)),
-    },
-    media: async () => ({
-      ok: true,
-      ref: refFor(STORAGE_BUCKETS.cropImages, 'jpg'),
-      kind: 'image',
-      mimeType: 'image/jpeg',
-      bytes: 120_000,
-    }),
-    diagnose: async (diagnoseInput) => ({
-      diagnosisId: DIAGNOSIS_ID,
-      conversationId: diagnoseInput.conversationId ?? CONVERSATION_ID,
-      result: {
-        status: 'identified',
-        diseaseName: CONDITION,
-        confidence: 0.86,
-        severity: 'moderate',
-        explanation: `${CONDITION} explanation`,
-        knowledge: {
-          symptoms: ['spots'],
-          causes: ['fungus'],
-          treatment: ['remove leaves'],
-          prevention: ['rotate'],
-          source: 'bulletin',
-        },
-        needsExpert: false,
-        language: diagnoseInput.language,
-      },
-      quota: { operation: 'image', used: 1, limit: 20, resetsAt: '2026-09-16T18:30:00.000Z' },
-      provider: input.provider,
-      usedFallback: input.usedFallback,
-    }),
-    send: async (): Promise<SendReplyResult> => ({
-      ok: true,
-      sentMessageId: 'wamid.OUT001',
-      bodyChars: 42,
-    }),
-  };
-
-  return { deps, rows, stored };
-}
-
-function inboundMessage(wamid: string): InboundMessage {
-  const content: InboundContent = { kind: 'image', mediaId: `media-${wamid}`, provisional: true };
-  return {
-    providerMessageId: wamid,
-    fromPhone: '919876543210',
-    timestamp: '1758000000',
-    rawType: 'image',
-    wabaId: '102290129340398',
-    phoneNumberId: '106540352242922',
-    displayPhoneNumber: '15550001111',
-    content,
-  };
-}
-
-/* -------------------------------------------------------------------------- */
 /* The dispatcher                                                             */
 /* -------------------------------------------------------------------------- */
 
 /** Run one case and return the audit rows it produced, sorted by operation for a stable comparison. */
-async function runCase(input: RunInput): Promise<readonly TablesInsert<'usage_logs'>[]> {
-  const rows: TablesInsert<'usage_logs'>[] = [];
+async function runCase(input: RunInput): Promise<readonly UsageLogInsert[]> {
+  const rows: UsageLogInsert[] = [];
   const { caseId, channel, language } = input;
-
-  if (caseId.startsWith('whatsapp_')) {
-    const wamid = `wamid.PROPERTY${randomUUID().slice(0, 8)}`;
-    const expired = caseId === 'whatsapp_preflight_budget_expired';
-    const harness = inboundHarness(input, rows, { expired });
-
-    await processInboundBatch([inboundMessage(wamid)], harness.deps);
-
-    if (caseId === 'whatsapp_redelivery_ignored') {
-      // The first delivery is the setup: it attaches the farmer, which is what makes the
-      // redelivery's row attributable. Only the second delivery's rows are the case's.
-      rows.length = 0;
-      await processInboundBatch([inboundMessage(wamid)], harness.deps);
-    }
-    return sorted(rows);
-  }
 
   const attempt = async (): Promise<void> => {
     if (caseId.startsWith('image_')) {
       await diagnose(
         {
           userId: USER_ID,
-          storageRef: refFor(STORAGE_BUCKETS.cropImages, 'jpg'),
+          image: IMAGE_REF,
           language,
           channel,
           conversationId: CONVERSATION_ID,
@@ -1097,7 +877,7 @@ async function runCase(input: RunInput): Promise<readonly TablesInsert<'usage_lo
     await transcribeAndAnswer(
       {
         userId: USER_ID,
-        storageRef: refFor(STORAGE_BUCKETS.voiceMessages, 'ogg'),
+        audio: AUDIO_REF,
         language,
         channel,
         conversationId: CONVERSATION_ID,
@@ -1120,9 +900,7 @@ async function runCase(input: RunInput): Promise<readonly TablesInsert<'usage_lo
   return sorted(rows);
 }
 
-function sorted(
-  rows: readonly TablesInsert<'usage_logs'>[],
-): readonly TablesInsert<'usage_logs'>[] {
+function sorted(rows: readonly UsageLogInsert[]): readonly UsageLogInsert[] {
   return [...rows].sort((left, right) => left.operation.localeCompare(right.operation));
 }
 
@@ -1139,7 +917,7 @@ const runArb: fc.Arbitrary<RunInput> = fc
     channelIndex: fc.nat({ max: 1 }),
   })
   .map(({ caseId, language, usedFallback, provider, channelIndex }) => {
-    const channels = channelsFor(caseId);
+    const channels = CASE_CHANNELS;
     return {
       caseId,
       language,
@@ -1249,14 +1027,21 @@ describe('Property 22: every audited operation leaves one complete row', () => {
     /* ── Non-vacuity ─────────────────────────────────────────────────────────── */
     expect([...exercised].sort()).toStrictEqual([...CASES].sort());
     /**
-     * The strongest guard available: **every** value the audit vocabulary can hold was produced by a
-     * real path in this run. A value added to `usageOutcomeSchema` with no path that writes it — or a
-     * path that stopped writing one — fails here.
+     * Every value the audit vocabulary can hold was produced by a real service path in this run —
+     * EXCEPT `duplicate_ignored`. That outcome is a platform redelivery (Requirement 11.5), which
+     * under Amendment A1 is written by the Telegram inbound path (`src/lib/telegram-dispatch.ts`,
+     * owned by a Telegram-side worker) rather than by any of the three services this file drives.
+     * Asserting the diagnosis/chat/voice services produce exactly the rest of the vocabulary keeps
+     * the guard strong — a value added to the schema with no path that writes it still fails here —
+     * while stating the one exclusion the A1 channel change made rather than silently narrowing it.
      */
-    expect([...outcomes].sort()).toStrictEqual([...usageOutcomeSchema.options].sort());
+    const SERVICE_OUTCOMES = usageOutcomeSchema.options.filter(
+      (outcome) => outcome !== 'duplicate_ignored',
+    );
+    expect([...outcomes].sort()).toStrictEqual([...SERVICE_OUTCOMES].sort());
     expect([...providers].sort()).toStrictEqual(['gemini', 'groq', 'none']);
     expect([...fallbacks].sort()).toStrictEqual([false, true]);
-    expect([...channels].sort()).toStrictEqual(['web', 'whatsapp']);
+    expect([...channels].sort()).toStrictEqual(['telegram', 'web']);
     expect([...operations].sort()).toStrictEqual(['chat', 'image', 'voice']);
   });
 
@@ -1271,11 +1056,11 @@ describe('Property 22: every audited operation leaves one complete row', () => {
       fc.asyncProperty(
         fc.record({
           language: fc.constantFrom<Language>('en', 'hi', 'mr'),
-          channel: fc.constantFrom<Channel>('web', 'whatsapp'),
+          channel: fc.constantFrom<Channel>('web', 'telegram'),
           transcriptionFellBack: fc.boolean(),
         }),
         async ({ language, channel, transcriptionFellBack }) => {
-          const rows: TablesInsert<'usage_logs'>[] = [];
+          const rows: UsageLogInsert[] = [];
           const input: RunInput = {
             caseId: 'voice_served_with_nested_chat',
             channel,
@@ -1301,7 +1086,7 @@ describe('Property 22: every audited operation leaves one complete row', () => {
           };
 
           /** The nested answer never falls back, whatever the transcription did. */
-          const nestedRows: TablesInsert<'usage_logs'>[] = rows;
+          const nestedRows: UsageLogInsert[] = rows;
           const chat: ChatAnswerer = async (chatInput, coverage) => {
             const result = await chatTurn(
               chatInput,
@@ -1323,7 +1108,7 @@ describe('Property 22: every audited operation leaves one complete row', () => {
           await transcribeAndAnswer(
             {
               userId: USER_ID,
-              storageRef: refFor(STORAGE_BUCKETS.voiceMessages, 'ogg'),
+              audio: AUDIO_REF,
               language,
               channel,
               conversationId: CONVERSATION_ID,
@@ -1353,7 +1138,7 @@ describe('Property 22: every audited operation leaves one complete row', () => {
      * against `counters` is a comparison per request, which is the rule `usage-log.ts` states and the
      * reason this is asserted next to the row count rather than left implicit.
      */
-    const rows: TablesInsert<'usage_logs'>[] = [];
+    const rows: UsageLogInsert[] = [];
     let increments = 0;
 
     const rpc: CounterRpc = {
@@ -1367,7 +1152,7 @@ describe('Property 22: every audited operation leaves one complete row', () => {
 
     const input: RunInput = {
       caseId: 'voice_served_with_nested_chat',
-      channel: 'whatsapp',
+      channel: 'telegram',
       language: 'en',
       usedFallback: false,
       provider: 'gemini',
@@ -1391,9 +1176,9 @@ describe('Property 22: every audited operation leaves one complete row', () => {
     await transcribeAndAnswer(
       {
         userId: USER_ID,
-        storageRef: refFor(STORAGE_BUCKETS.voiceMessages, 'ogg'),
+        audio: AUDIO_REF,
         language: 'en',
-        channel: 'whatsapp',
+        channel: 'telegram',
         conversationId: CONVERSATION_ID,
         durationSeconds: 6.5,
         mimeType: 'audio/ogg',

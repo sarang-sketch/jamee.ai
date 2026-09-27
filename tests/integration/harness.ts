@@ -1,118 +1,108 @@
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
-import { VERIFIED_CONDITIONS } from '@/lib/schemas';
-import { buildStorageRef } from '@/lib/storage';
-import { adminCounterRpc, type QuotaOptions } from '@/services/quota.service';
-import type { DiagnosisRow, DiseaseKnowledgeRow } from '@/types/database';
+import type { Db } from 'mongodb';
 
-import { serviceRoleClient, type TestClient } from './clients';
-import {
-  SUPABASE_API_URL_VAR,
-  requireSupabaseTestConfig,
-  type SupabaseTestConfig,
-} from './database';
-import {
-  createTestFarmer,
-  deleteTestFarmer,
-  type CreateFarmerOptions,
-  type TestFarmer,
-} from './farmers';
-import { objectStore, type TestObjectStore } from './objects';
+import { VERIFIED_CONDITIONS } from '@/lib/schemas';
+import type { DiseaseKnowledgeDoc } from '@/lib/db/collections';
+import { COLLECTIONS } from '@/lib/db/names';
+
+import { createTestFarmer, type CreateFarmerOptions, type TestFarmer } from './farmers';
+import { mediaFixture, type MediaFixture } from './objects';
+import { clearDatabase, startMongo, stopMongo, type MongoHarness } from './mongo';
 import { providerStubs, type ProviderScript, type ProviderStubs } from './providers';
 
 /**
- * One call that produces everything a scenario needs, and one call that removes it again.
+ * One call that produces everything a scenario needs against a real single-node
+ * `MongoMemoryReplSet` (V31, V33), and one call that resets it — the Amendment A3 successor to the
+ * Supabase harness.
  *
- * Requirements: 13.1 / 13.2 (RLS enabled, and each farmer restricted to their own rows), 4.1 / 4.2
- *               (exactly the five verified conditions, each with a source), 17.5 (the scenario
- *               matrix the testing report records)
- * Design: "Integration tests — mocked providers, real Postgres"
+ * Requirements: 13.1, 13.2 (owner-scoping is the Data_Access_Layer, and each farmer reaches only
+ *               their own documents — proven with TWO farmers), 4.1, 4.2 (exactly the five verified
+ *               conditions, each seeded with a source), 17.5 (the scenario matrix the testing
+ *               report records), 12.1, 12.2 (a farmer created through the Google path)
+ * Design: "Integration tests — mocked providers, real MongoDB"; D8, D17, D18, D19; Amendment A3
  *
  * =============================================================================
  * WHAT IS REAL HERE
  * =============================================================================
  *
- * Everything except three provider SDK calls and the Storage object surface. Concretely: Postgres,
- * every migration, every RLS policy, PostgREST, Auth and the sessions it issues, the quota counter
- * functions, the gateway's chain order / deadline / fallback loop, both adapters' request bodies and
- * error classification, both validation stages, the knowledge-base reads, `validateRephrased`, and
- * every insert. `tests/integration/providers.ts` says where the provider seam is and why it is not
- * higher; `tests/integration/objects.ts` says why Storage is the exception.
+ * Everything except the three provider SDK calls. Concretely: a real MongoDB (an in-memory
+ * replica set, so the link and payment multi-document transactions run — V33), every collection
+ * validator and index and the five-condition seed from `setupDatabase`, the whole
+ * Data_Access_Layer with its owner-scoped accessors, GridFS media through the real media DAL, the
+ * gateway's chain order / deadline / fallback loop, both validation stages, `validateRephrased`,
+ * the knowledge-base reads, and every insert. `tests/integration/providers.ts` says where the
+ * provider seam is and why it is not higher; `tests/integration/objects.ts` says why the media is a
+ * real GridFS write rather than a faked object store.
  *
  * =============================================================================
- * THE SHAPE A SCENARIO TEST TAKES (tasks 29.2 – 29.5)
+ * WHY MODULES ARE IMPORTED DYNAMICALLY, AFTER MONGODB_URI IS SET
+ * =============================================================================
+ *
+ * `src/lib/db/client.ts` reads `MONGODB_URI` through `serverEnv` and caches ONE `MongoClient` on
+ * `globalThis` on first use. So the harness points `MONGODB_URI` at the in-memory replica set
+ * BEFORE any module that reaches `getDb()` / `getMongoClient()` is imported, and imports the DAL,
+ * the media store, and the D8 bootstrap DYNAMICALLY afterwards — exactly the discipline every
+ * wave-5 mongo test uses (`data-access.test.ts`, `access-flow.test.ts`). A static import at the top
+ * of a scenario file would cache a client pointed at a real Atlas cluster from `.env.local` instead.
+ * So a scenario calls `startHarness()` in `beforeAll` and does its own dynamic service imports there
+ * too; this module only guarantees `MONGODB_URI` is set before it returns.
+ *
+ * =============================================================================
+ * THE SHAPE A SCENARIO TEST TAKES
  * =============================================================================
  *
  * ```ts
- * import { expect, it } from 'vitest';
- * import { diagnose } from '@/services/diagnosis.service';
- * import { describeIntegration } from './database';
- * import { uploadedImage } from './objects';
- * import { CLASSIFICATIONS, classificationText } from './providers';
+ * import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  * import { startHarness, type Harness } from './harness';
  *
- * describeIntegration('image scenarios', () => {
- *   let harness: Harness;
- *   beforeAll(async () => { harness = await startHarness(); });
- *   afterAll(async () => { await harness.cleanup(); });
+ * let harness: Harness;
+ * type Diagnosis = typeof import('@/services/diagnosis.service');
+ * let diagnosis: Diagnosis;
  *
- *   it('grounds a clear diseased crop in the knowledge-base row of that name', async () => {
- *     const { farmerA, objects, providers, quota } = harness;
- *     providers.script.vision = classificationText(CLASSIFICATIONS.tomatoEarlyBlight);
+ * beforeAll(async () => {
+ *   harness = await startHarness();
+ *   diagnosis = await import('@/services/diagnosis.service'); // AFTER startHarness set MONGODB_URI
+ * });
+ * afterAll(async () => { await harness.cleanup(); });
  *
- *     const outcome = await diagnose(
- *       {
- *         userId: farmerA.id,
- *         storageRef: uploadedImage(objects, farmerA.id),
- *         language: 'en',
- *         channel: 'web',
- *       },
- *       { supabase: farmerA.client, storage: objects, models: providers.models, quota },
- *     );
- *
- *     expect(outcome.result.status).toBe('identified');
- *     // The row is readable by its owner and by nobody else — the whole point of two farmers.
- *     const mine = await farmerA.client.from('diagnoses').select('*').eq('id', outcome.diagnosisId);
- *     const theirs = await harness.farmerB.client
- *       .from('diagnoses')
- *       .select('*')
- *       .eq('id', outcome.diagnosisId);
- *     expect(mine.data).toHaveLength(1);
- *     expect(theirs.data).toHaveLength(0);
- *   });
+ * it('grounds a clear diseased crop and shows nobody else the row', async () => {
+ *   const { farmerA, farmerB, objects, providers } = harness;
+ *   const image = await objects.image(farmerA.id);
+ *   const outcome = await diagnosis.diagnose(
+ *     { userId: farmerA.id, image, language: 'en', channel: 'web' },
+ *     { models: providers.models },
+ *   );
+ *   expect(outcome.result.status).toBe('identified');
+ *   // The whole reason there are two farmers: B sees nothing of A's.
+ *   const forB = await harness.farmerReads(farmerB.id).findDiagnoses();
+ *   expect(forB).toEqual([]);
  * });
  * ```
  *
  * Two conventions worth keeping in every scenario:
  *
- *  - **`supabase: farmerX.client`** for the web path and **`supabase: harness.admin`** for the
- *    WhatsApp path. That single argument is the difference the design draws between "RLS is a second
- *    boundary behind the service's own check" and "the application check is the only boundary", so
- *    passing the wrong one silently tests the wrong channel.
- *  - **Assert the cross-farmer read.** A scenario that only checks its own rows would pass against a
- *    database with RLS switched off.
+ *  - **`channel: 'web'`** for the web path and **`channel: 'telegram'`** for the messaging path.
+ *    That single field is the difference the design draws between the two channels, and it is
+ *    written to every persisted row (Requirement 16.5).
+ *  - **Assert the cross-farmer read.** A scenario that only checks its own rows would pass against
+ *    a Data_Access_Layer with the owner merge removed; the isolation claim is the second farmer
+ *    reading zero documents.
  */
 export interface Harness {
-  readonly config: SupabaseTestConfig;
-  /** RLS-bypassing. Seeds, inspects and cleans up. Also the WhatsApp path's `supabase`. */
-  readonly admin: TestClient;
+  readonly db: Db;
+  readonly replSet: MongoHarness['replSet'];
   readonly farmerA: TestFarmer;
   readonly farmerB: TestFarmer;
   readonly providers: ProviderStubs;
-  readonly objects: TestObjectStore;
+  /** Real GridFS media, owned and read through the Data_Access_Layer (D17, D18). */
+  readonly objects: MediaFixture;
   /**
-   * The five rows as the migrations seeded them, for a test that grounds an assertion in the same
-   * content the service read. Never written to by the harness.
+   * The five seeded conditions as `setupDatabase` wrote them, for a scenario that grounds an
+   * assertion in the same content the service read. Never written to by the harness.
    */
-  readonly knowledge: readonly DiseaseKnowledgeRow[];
-  /**
-   * The counter RPC bound to this harness's service-role client.
-   *
-   * Passed explicitly rather than left to default so the quota path holds no second admin client and
-   * reads no environment variable of its own. The functions themselves are the real
-   * `counter_try_increment` / `counter_decrement` from `0007`, so quota atomicity is real here.
-   */
-  readonly quota: QuotaOptions;
-  /** Deletes both farmers, which cascades to everything they produced. */
+  readonly knowledge: readonly DiseaseKnowledgeDoc[];
+  /** Drop every non-system collection and re-seed the knowledge base — a per-test reset. */
+  reset(): Promise<void>;
+  /** Stop the client and the replica set. */
   cleanup(): Promise<void>;
 }
 
@@ -124,202 +114,114 @@ export interface StartHarnessOptions {
 }
 
 /**
- * Assert the migrations were applied, and hand back the knowledge-base rows they seeded.
- *
- * **The harness never inserts knowledge rows.** Requirement 4.3 makes `disease_knowledge` the only
- * source of agricultural content a farmer reads, so a fixture that seeded its own agronomy would
- * make every grounding assertion in every scenario meaningless — the test would confirm that the
- * service repeated the test's own sentences. The migrations own that content, and this function's
- * only job is refusing to run against a database where they were not applied.
- *
- * The five checks mirror `0010`'s own closing assertions plus `scripts/check-deployment.ts` (task
- * 28.4), one layer down: exactly five rows, exactly the five names, a non-empty `source` on each
- * (Requirement 4.2), no treatment content on `Tomato Healthy` (Requirement 3.4), and the `0007`
- * counter functions reachable.
+ * Assert the five conditions are seeded, and hand back the rows. The harness NEVER inserts
+ * knowledge rows itself — Requirement 4.3 makes `disease_knowledge` the only agricultural content a
+ * farmer reads, so a fixture that seeded its own agronomy would make every grounding assertion
+ * confirm the fixture rather than the service. `setupDatabase` owns that content; this only refuses
+ * to run against a database where the seed did not land.
  */
-export async function assertMigrationsApplied(
-  admin: TestClient,
-): Promise<readonly DiseaseKnowledgeRow[]> {
-  const { data, error } = await admin.from('disease_knowledge').select('*');
+async function assertKnowledgeSeeded(db: Db): Promise<readonly DiseaseKnowledgeDoc[]> {
+  const rows = await db
+    .collection<DiseaseKnowledgeDoc>(COLLECTIONS.diseaseKnowledge)
+    .find({})
+    .toArray();
 
-  if (error !== null || data === null) {
+  if (rows.length !== VERIFIED_CONDITIONS.length) {
     throw new Error(
-      `Could not read disease_knowledge: ${error?.message ?? 'no rows returned'}. Apply the ` +
-        'migrations first — `npx supabase db reset` runs supabase/migrations in order.',
+      `disease_knowledge holds ${rows.length} rows, expected exactly ${VERIFIED_CONDITIONS.length} ` +
+        '(Requirement 4.1). setupDatabase did not seed the five conditions.',
     );
   }
-
-  if (data.length !== VERIFIED_CONDITIONS.length) {
-    throw new Error(
-      `disease_knowledge holds ${data.length} rows, expected exactly ${VERIFIED_CONDITIONS.length} ` +
-        '(Requirement 4.1). Run `npx supabase db reset` so 0010_seed_disease_knowledge.sql is applied.',
-    );
-  }
-
-  const names = new Set(data.map((row) => row.disease_name));
+  const names = new Set(rows.map((row) => row.diseaseName));
   const missing = VERIFIED_CONDITIONS.filter((condition) => !names.has(condition));
   if (missing.length > 0) {
-    throw new Error(
-      `disease_knowledge is missing ${missing.join(', ')} (Requirement 4.1). The seeded content and ` +
-        'the application\'s five verified conditions have drifted apart.',
-    );
+    throw new Error(`disease_knowledge is missing ${missing.join(', ')} (Requirement 4.1).`);
   }
-
-  const sourceless = data.filter((row) => row.source.trim() === '').map((row) => row.disease_name);
+  const sourceless = rows.filter((row) => row.source.trim() === '').map((row) => row.diseaseName);
   if (sourceless.length > 0) {
-    throw new Error(
-      `disease_knowledge rows with a blank source: ${sourceless.join(', ')} (Requirement 4.2).`,
-    );
+    throw new Error(`disease_knowledge rows with a blank source: ${sourceless.join(', ')} (Requirement 4.2).`);
   }
-
-  const healthy = data.find((row) => row.disease_name === 'Tomato Healthy');
-  if (healthy !== undefined && healthy.treatment.length > 0) {
-    throw new Error(
-      'Tomato Healthy carries treatment content (Requirement 3.4). The seed row and the ' +
-        'healthy_has_no_treatment constraint disagree, which should not be possible.',
-    );
-  }
-
-  // 0007. `counter_used` reads through `coalesce(..., 0)`, so an unknown farmer is 0 rather than an
-  // error — which makes it a read-only probe that the quota functions exist at all.
-  const probe = await admin.rpc('counter_used', {
-    p_user: crypto.randomUUID(),
-    p_operation: 'image',
-    p_window_kind: 'day',
-    p_window_key: '1970-01-01',
-  });
-  if (probe.error !== null) {
-    throw new Error(
-      `counter_used is not callable: ${probe.error.message}. 0007_counters_and_quota_fn.sql was ` +
-        'not applied, so every quota reserve in every scenario would fail.',
-    );
-  }
-
-  return data;
+  return rows;
 }
 
 /**
- * Two farmers, a service-role client, the seeded knowledge base, and the provider stubs.
+ * Start the replica set, point `MONGODB_URI` at it, set up the database, and create two farmers
+ * through the Google path.
  *
  * Two farmers rather than one because tenant isolation is the assertion a unit test cannot make:
- * Requirements 13.1 and 13.2 are about what happens when *another* farmer's session asks, and there
- * is no way to ask that question with one session.
+ * Requirements 13.1 and 13.2 are about what happens when ANOTHER farmer's scope reads, and there is
+ * no way to ask that with one farmer. The DAL, the media store, and the D8 bootstrap are imported
+ * DYNAMICALLY here, after `MONGODB_URI` is set, so their cached client connects to the harness.
  *
- * `NEXT_PUBLIC_SUPABASE_URL` is set in the process when it was derived rather than configured, so
- * that any application default path a scenario reaches — `createAdminClient()` inside a service's
- * default store, for one — points at the same stack the harness is using rather than at nothing.
+ * A failed replica-set start throws loudly from `startMongo` (never skips — the A3 broken-gate
+ * rule); a failure creating the second farmer tears the whole harness down rather than leaking the
+ * replica set into later runs.
  */
 export async function startHarness(options: StartHarnessOptions = {}): Promise<Harness> {
-  const config = requireSupabaseTestConfig();
-  if (process.env[SUPABASE_API_URL_VAR] === undefined) {
-    process.env[SUPABASE_API_URL_VAR] = config.apiUrl;
-  }
+  const mongo = await startMongo();
+  process.env.MONGODB_URI = mongo.replSet.getUri();
 
-  const admin = serviceRoleClient(config);
-  const knowledge = await assertMigrationsApplied(admin);
+  // Dynamic imports AFTER MONGODB_URI is set — the cached client connects to the harness.
+  const { setupDatabase } = await import('@/lib/db/setup');
+  const media = await import('@/lib/db/media');
+  const { bootstrapProfile } = await import('@/lib/auth/bootstrap');
 
-  const farmerA = await createTestFarmer(admin, options.farmerA ?? {}, config);
-  let farmerB: TestFarmer;
   try {
-    farmerB = await createTestFarmer(admin, options.farmerB ?? {}, config);
+    await setupDatabase(mongo.db);
+    const knowledge = await assertKnowledgeSeeded(mongo.db);
+
+    const farmerA = await createTestFarmer(mongo.db, bootstrapProfile, options.farmerA ?? {});
+    const farmerB = await createTestFarmer(mongo.db, bootstrapProfile, options.farmerB ?? {});
+
+    const objects = mediaFixture(media.writeMedia, media.readMediaForOwner);
+    const providers = providerStubs(options.providers ?? {});
+
+    return {
+      db: mongo.db,
+      replSet: mongo.replSet,
+      farmerA,
+      farmerB,
+      providers,
+      objects,
+      knowledge,
+
+      async reset() {
+        await clearDatabase(mongo.db);
+        // Re-seed the knowledge base (farmer-agnostic, read-only) AND re-create the two farmers
+        // with their same ids/emails, so a per-test reset leaves the same starting world
+        // `beforeAll` built — `clearDatabase` wipes the auth `user`/`account` and `profiles`
+        // collections too, so a reset that only re-seeded knowledge would leave the farmers gone.
+        await setupDatabase(mongo.db);
+        await createTestFarmer(mongo.db, bootstrapProfile, {
+          id: farmerA.id,
+          email: farmerA.email,
+          language: farmerA.language,
+        });
+        await createTestFarmer(mongo.db, bootstrapProfile, {
+          id: farmerB.id,
+          email: farmerB.email,
+          language: farmerB.language,
+        });
+      },
+
+      async cleanup() {
+        await stopMongo(mongo);
+      },
+    };
   } catch (error) {
-    // Otherwise a failure creating the second farmer leaks the first one into every later run.
-    await deleteTestFarmer(admin, farmerA);
+    await stopMongo(mongo);
     throw error;
   }
-
-  return {
-    config,
-    admin,
-    farmerA,
-    farmerB,
-    providers: providerStubs(options.providers ?? {}),
-    objects: objectStore(),
-    knowledge,
-    quota: { rpc: adminCounterRpc(admin) },
-
-    async cleanup(): Promise<void> {
-      await deleteTestFarmer(admin, farmerA);
-      await deleteTestFarmer(admin, farmerB);
-    },
-  };
 }
 
 /** The seeded row for one condition, for a scenario that grounds an assertion in its sentences. */
 export function knowledgeRow(
   harness: Harness,
-  condition: DiseaseKnowledgeRow['disease_name'],
-): DiseaseKnowledgeRow {
-  const row = harness.knowledge.find((entry) => entry.disease_name === condition);
+  condition: DiseaseKnowledgeDoc['diseaseName'],
+): DiseaseKnowledgeDoc {
+  const row = harness.knowledge.find((entry) => entry.diseaseName === condition);
   if (row === undefined) {
     throw new Error(`No seeded disease_knowledge row for ${condition}.`);
   }
   return row;
-}
-
-/**
- * Write one `identified` diagnosis for a farmer with the service-role client.
- *
- * **This is not a shortcut around the service, and a scenario suite should not use it.** Tasks
- * 29.2–29.5 produce their rows by calling `diagnose()`, because the row a service writes is part of
- * what they are asserting. This exists for the assertions that need a row to *exist* before any
- * service runs — the tenant-isolation checks, where what matters is that farmer B cannot read it and
- * not how it got there.
- *
- * Every agricultural sentence comes from the seeded row, so the fixture authors no agronomy of its
- * own (Requirement 4.3).
- */
-export async function seedDiagnosis(
-  harness: Harness,
-  farmer: TestFarmer,
-  condition: DiseaseKnowledgeRow['disease_name'] = 'Tomato Early Blight',
-): Promise<DiagnosisRow> {
-  const row = knowledgeRow(harness, condition);
-
-  const conversation = await harness.admin
-    .from('conversations')
-    .insert({ user_id: farmer.id, channel: 'web' })
-    .select('*')
-    .single();
-
-  if (conversation.error !== null || conversation.data === null) {
-    throw new Error(
-      `Could not seed a conversation for ${farmer.id}: ${conversation.error?.message ?? 'no row'}`,
-    );
-  }
-
-  const image = buildStorageRef({
-    bucket: STORAGE_BUCKETS.cropImages,
-    userId: farmer.id,
-    extension: 'jpg',
-  });
-
-  const diagnosis = await harness.admin
-    .from('diagnoses')
-    .insert({
-      user_id: farmer.id,
-      conversation_id: conversation.data.id,
-      status: 'identified',
-      disease_name: row.disease_name,
-      knowledge_id: row.id,
-      confidence: 0.9,
-      severity: row.default_severity,
-      explanation: `${row.disease_name}\n${row.symptoms[0] ?? ''}`,
-      language: 'en',
-      needs_expert: false,
-      channel: 'web',
-      image_bucket: STORAGE_BUCKETS.cropImages,
-      image_path: image.path,
-      model_provider: 'gemini',
-    })
-    .select('*')
-    .single();
-
-  if (diagnosis.error !== null || diagnosis.data === null) {
-    throw new Error(
-      `Could not seed a diagnosis for ${farmer.id}: ${diagnosis.error?.message ?? 'no row'}`,
-    );
-  }
-
-  return diagnosis.data;
 }

@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+
 import * as fc from 'fast-check';
 import type Groq from 'groq-sdk';
 import { describe, expect, it } from 'vitest';
@@ -273,7 +275,9 @@ interface Harness {
 }
 
 const VISION_INPUT: VisionCall = {
-  imageUrl: 'https://storage.invalid/crop-images/farmer/leaf.jpg?token=stub',
+  // Amendment A3, V34: the image travels inline as base64 bytes, not by a Supabase signed URL —
+  // this is the Full_Size_Image the analysis read from GridFS through the Data_Access_Layer.
+  imageBase64: Buffer.from('jamee property harness: fake crop-image bytes').toString('base64'),
   imageMimeType: 'image/jpeg',
   prompt: 'Classify the condition visible on this crop.',
   responseSchema: { type: 'object' } satisfies JsonSchema,

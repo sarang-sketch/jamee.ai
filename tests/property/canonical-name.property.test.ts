@@ -1,10 +1,11 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { Buffer } from 'node:buffer';
+
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner, TextCall } from '@/lib/ai/capabilities';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
-import { REPHRASE_REJECTED_REASON } from '@/lib/db/usage-log';
+import type { DiagnosisInsert } from '@/lib/db/analysis';
+import { REPHRASE_REJECTED_REASON, type UsageLogInsert } from '@/lib/db/usage-log';
 import { AppError } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
@@ -17,14 +18,13 @@ import {
   type DiagnosisResult,
   type IdentifiedResult,
   type Language,
+  type MediaRef,
   type Severity,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
 import type { CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
 
 /**
  * ### Property 13: The canonical disease name is language-invariant
@@ -73,17 +73,24 @@ import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
  * NO PROVIDER, NO DATABASE
  * =============================================================================
  *
- * Every seam of `diagnose()` is injected: storage, the counter RPC, the conversation store, the
- * knowledge reader, the persistence store and the capability runner. The request client itself is a
- * proxy that throws on any read, so a service reaching past its dependencies fails loudly instead of
- * quietly making the fixtures irrelevant.
+ * Every seam of `diagnose()` is injected: the owner-checked media read, the counter RPC, the
+ * conversation store, the knowledge reader, the persistence store and the capability runner. Under
+ * Amendment A3 the service reads bytes from GridFS through the Data_Access_Layer rather than minting
+ * a signed URL, so the media seam is `readMedia` (a function returning `{ bytes, mimeType }`), and
+ * there is no Supabase stack to stub at all — a service reaching past its injected dependencies has
+ * nothing to reach.
  */
 
 /* ========================================================================== */
 /* Fixtures                                                                    */
 /* ========================================================================== */
 
-const CROP_IMAGES = STORAGE_BUCKETS.cropImages;
+/** A3: the analysis input is a `{ fileId, kind }` Media_Reference, not a bucket/path storage ref. */
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
+
+/** The bytes the owner-checked read yields, and the MIME type stored alongside them. */
+const IMAGE_BYTES = Buffer.from('jamee property harness: fake crop-image bytes');
+const IMAGE_MIME = 'image/jpeg';
 
 const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
 const DIAGNOSIS_ID = '55555555-5555-4555-8555-555555555555';
@@ -195,7 +202,7 @@ function nonEmptyFieldsOf(entry: KnowledgeEntry): readonly KbField[] {
 /* ========================================================================== */
 
 const farmerIdArb = fc.uuid();
-const channelArb = fc.constantFrom<Channel>('web', 'whatsapp');
+const channelArb = fc.constantFrom<Channel>('web', 'telegram');
 const severityArb = fc.constantFrom<Severity>('low', 'moderate', 'high');
 const confidenceArb = fc.integer({ min: 7001, max: 9999 }).map((raw) => raw / 10_000);
 
@@ -328,20 +335,9 @@ function providerBehaviour(
 interface Recorded {
   /** What the text seam was handed, and what it answered. */
   readonly requests: string[];
-  readonly diagnosisRows: TablesInsert<'diagnoses'>[];
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly diagnosisRows: DiagnosisInsert[];
+  readonly usageRows: UsageLogInsert[];
 }
-
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
 
 interface Harness {
   readonly deps: DiagnosisDeps;
@@ -357,18 +353,9 @@ function harness(options: {
 }): Harness {
   const recorded: Recorded = { requests: [], diagnosisRows: [], usageRows: [] };
 
-  const storage: StorageClientLike = {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: true, error: null }),
-        createSignedUrl: (path: string) =>
-          Promise.resolve({
-            data: { signedUrl: `https://storage.test/${path}?token=abc` },
-            error: null,
-          }),
-      }),
-    },
-  };
+  // A3, V34: the owner-checked read yields the bytes the model is sent inline — no signed URL.
+  const readMedia = (): Promise<{ bytes: Buffer; mimeType: string }> =>
+    Promise.resolve({ bytes: IMAGE_BYTES, mimeType: IMAGE_MIME });
 
   const rpc: CounterRpc = {
     tryIncrement: () => Promise.resolve(1),
@@ -404,30 +391,11 @@ function harness(options: {
   };
 
   const store: DiagnosisStore = {
-    insertDiagnosis: (row: TablesInsert<'diagnoses'>) => {
+    insertDiagnosis: (row: DiagnosisInsert) => {
       recorded.diagnosisRows.push(row);
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T01:00:00.000Z',
-      };
-      return Promise.resolve(stored);
+      return Promise.resolve(DIAGNOSIS_ID);
     },
-    insertUsageLog: (row: TablesInsert<'usage_logs'>) => {
+    insertUsageLog: (row: UsageLogInsert) => {
       recorded.usageRows.push(row);
       return Promise.resolve();
     },
@@ -447,9 +415,8 @@ function harness(options: {
   return {
     recorded,
     deps: {
-      supabase: unreachableSupabase,
-      storage,
       store,
+      readMedia,
       conversations,
       knowledge,
       models,
@@ -524,10 +491,7 @@ describe('Property 13: the canonical disease name is language-invariant', () => 
             const outcome = await diagnose(
               {
                 userId: caller,
-                storageRef: {
-                  bucket: CROP_IMAGES,
-                  path: `${caller}/2026/09/${scenario.objectId}.jpg`,
-                },
+                image: IMAGE_REF,
                 language,
                 channel,
               },
@@ -558,7 +522,7 @@ describe('Property 13: the canonical disease name is language-invariant', () => 
           // with the answer that was returned.
           const persisted = run.recorded.diagnosisRows[0];
           if (persisted === undefined) throw new Error('no diagnosis row was persisted');
-          expect(persisted.disease_name, label).toBe(condition);
+          expect(persisted.diseaseName, label).toBe(condition);
           expect(persisted.language, label).toBe(run.language);
 
           const audit = run.recorded.usageRows[0];
@@ -618,7 +582,7 @@ describe('Property 13: the canonical disease name is language-invariant', () => 
         );
         expect(names, `${kind} / ${condition}`).toStrictEqual([condition, condition, condition]);
 
-        const persistedNames = runs.map((run) => run.recorded.diagnosisRows[0]?.disease_name);
+        const persistedNames = runs.map((run) => run.recorded.diagnosisRows[0]?.diseaseName);
         expect(new Set(persistedNames).size, `${kind} / ${condition}`).toBe(1);
 
         // And the localization is real: three languages, three different renderings. Without this

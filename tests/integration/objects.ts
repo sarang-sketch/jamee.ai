@@ -1,254 +1,107 @@
-import { STORAGE_BUCKETS, type StorageBucket } from '@/lib/config/verified';
-import { buildStorageRef, type StorageClientLike } from '@/lib/storage';
-import type { StorageRef } from '@/lib/schemas';
-import type { MediaUploadClientLike } from '@/lib/whatsapp';
-import type { ObjectRemoveClient } from '@/services/voice.service';
+import { Buffer } from 'node:buffer';
+
+import type { MediaKind } from '@/lib/db/names';
+import type { MediaRef } from '@/lib/schemas';
 
 /**
- * Uploaded objects, as the two questions the services actually ask about them.
+ * Uploaded media, as Amendment A3 stores it: real GridFS files in the one Jamee media bucket, owned
+ * by `metadata.ownerId` and told apart by `metadata.kind` (D17). Not a Supabase-Storage double.
  *
- * Requirements: 2.5 / 2.6 (a reference outside the farmer's own prefix, or naming the wrong bucket,
- *               is refused before anything is spent), 2.8 (the provider receives a signed,
- *               time-limited URL and never the bytes)
- * Design: D1 (upload to Storage from the browser, then post a reference)
+ * Requirements: 2.5, 2.6 (a file's bytes are read only by the Farmer who owns it, proven before
+ *               anything is spent — the owner is part of the GridFS query, so a stranger's read and
+ *               a missing file are indistinguishable), 2.8 (under A3 the bytes reach the model
+ *               inline, read from GridFS — there is no signed URL), 8.9, 8.11 (a voice original is
+ *               deleted through the owner-scoped Data_Access_Layer once its transcript is durable)
+ * Design: D17 (one GridFS bucket distinguished by `metadata.kind`), D18 (the media DAL under
+ *         `src/lib/db/**` is the only holder of the driver and the bucket), Amendment A3
  *
  * =============================================================================
- * THE ONE SUPABASE SURFACE THE HARNESS FAKES, AND WHY THAT IS HONEST
+ * WHY THE FIXTURE WRITES REAL GRIDFS RATHER THAN FAKING AN OBJECT STORE
  * =============================================================================
  *
- * Postgres, PostgREST, Auth and RLS are all real in this harness. Storage is not: the services reach
- * it through narrow structural types — `StorageClientLike`'s `exists` and `createSignedUrl`,
- * `ObjectRemoveClient`'s `remove`, `MediaUploadClientLike`'s `upload` — and this module implements
- * those four methods over a `Set` of paths.
+ * The retired harness faked Supabase Storage: it implemented `exists` / `createSignedUrl` /
+ * `remove` / `upload` over a `Set` of paths, because under Supabase the services took a
+ * `StorageClientLike` and asked it for a signed URL that the stubbed provider then never fetched.
+ * Under A3 the analysis and voice services read the bytes THEMSELVES, from GridFS, through
+ * `readMediaBytesForOwner` in the Data_Access_Layer — there is no signed URL and no injectable
+ * storage seam. So the honest fixture is a real GridFS file: `writeMedia(ownerId, kind, mime,
+ * bytes)` puts one in the harness's in-memory replica set, stamped with the owner, and returns the
+ * Media_Reference (`{ fileId, kind }`) a scenario hands to `diagnose()` / `transcribeAndAnswer()`.
+ * The service then reads it back through the real owner-scoped read, so the ownership check, the
+ * `metadata.ownerId` filter, and the retention delete are all the production ones.
  *
- * What that keeps real is everything the requirements put on this path. `assertOwnership()` runs for
- * real, so the prefix comparison, the bucket comparison and `storageRefSchema`'s path grammar all
- * decide the outcome — including `exists()`'s three-way result, which is why absence is modelled as
- * `data: false` and a probe failure as a throw. What it drops is Storage's own path policies from
- * `0009_storage_buckets_policies.sql`, which are asserted by `scripts/check-deployment.ts` against a
- * live project instead.
- *
- * The alternative — uploading real bytes to the local Storage service — is available and needs no
- * change here: pass the farmer's own `client` as a service's `storage` dependency, since
- * `SupabaseClient` satisfies `StorageClientLike` structurally. It is not what the harness does by
- * default because it would make every scenario depend on a fixture image and on the signed-URL
- * expiry clock, to assert a boundary the provider stub never crosses: the URL is handed to a stubbed
- * SDK call that does not fetch it.
+ * The media DAL is `server-only` and lives under `src/lib/db/**`, so it is imported DYNAMICALLY by
+ * the harness (after `MONGODB_URI` is pointed at the replica set) and threaded in here as
+ * `writeMedia`, rather than imported at the top of this module — the same discipline every wave-5
+ * mongo test uses so the cached client connects to the harness.
  */
-/**
- * One `createSignedUrl` call.
- *
- * The expiry is recorded in the unit the API takes — **seconds**, per V3 — because that unit is the
- * one thing about signed URLs this codebase has to keep saying out loud, and a scenario asserting
- * Requirement 2.8's time limit should be reading a number rather than trusting a name.
- */
-export interface SignedUrlRequest {
-  readonly bucket: string;
-  readonly path: string;
-  readonly expiresInSeconds: number;
-}
 
-/** One `remove()` call, as the API takes it: bucket-relative paths, never `bucket/path` (V22). */
-export interface RemoveRequest {
-  readonly bucket: string;
-  readonly paths: readonly string[];
-}
+/** The `writeMedia` seam, structurally matched to `@/lib/db/media`'s export so a signature drift breaks here. */
+export type WriteMedia = (
+  ownerId: string,
+  kind: MediaKind,
+  mimeType: string,
+  bytes: Buffer,
+  sourceRef?: string | null,
+) => Promise<{ fileId: { toHexString(): string }; kind: MediaKind }>;
 
-/** One `upload()` call — the WhatsApp media path's service-role write (Requirements 10.4, 10.6). */
-export interface UploadRequest {
-  readonly bucket: string;
-  readonly path: string;
-  readonly bytes: number;
-  readonly contentType: string | undefined;
-}
+/** The `readMediaForOwner` seam, for a fixture assertion that a farmer's own file is (or is not) present. */
+export type ReadMediaForOwner = (
+  ownerId: string,
+  fileId: string,
+) => Promise<{ readonly bytes: Buffer; readonly mimeType: string; readonly length: number } | null>;
 
 /**
- * The four methods the services call on `storage.from(bucket)`, in one surface.
- *
- * `remove` and `upload` were added when the scenario suites needed them, and they belong **here**
- * rather than in each suite: `VoiceDeps.deleter` needs `storage.from(bucket).remove(paths)` and
- * `storeInboundMedia`'s client needs `storage.from(bucket).upload(...)`, so a store that offered
- * removal only as a top-level `remove(ref)` helper forced every voice or WhatsApp-media scenario to
- * compose a local bridge object. Four suites composing the same bridge four times is four chances to
- * bridge it slightly differently — and one of them getting the bucket narrowing wrong would aim a
- * delete at a bucket the harness does not model, which is a silent pass rather than a failure.
+ * A media fixture bound to the harness's dynamically-imported media DAL. Every method writes or
+ * reads a REAL GridFS file in the harness database.
  */
-/**
- * `remove` and `upload` as the production types declare them, rather than retyped here.
- *
- * Derived so a signature change in `voice.service.ts` or `whatsapp.ts` breaks **this file** instead
- * of breaking a scenario with a message about an incompatible argument — which is the difference
- * between "the harness is out of date" and "the test is wrong".
- */
-type RemoveSeam = ReturnType<ObjectRemoveClient['storage']['from']>;
-type UploadSeam = ReturnType<MediaUploadClientLike['storage']['from']>;
-
-interface TestBucket extends RemoveSeam, UploadSeam {
-  exists(path: string): Promise<{ data: boolean; error: unknown }>;
-  createSignedUrl(
-    path: string,
-    expiresIn: number,
-  ): Promise<{ data: { signedUrl: string }; error: null } | { data: null; error: unknown }>;
+export interface MediaFixture {
+  /**
+   * Write one owned GridFS file and return the Media_Reference a service reads. `bytes` defaults to
+   * a small deterministic buffer — the provider is stubbed, so the actual bytes are never analysed;
+   * what matters is that the file exists, is owned, and carries the MIME type.
+   */
+  write(
+    ownerId: string,
+    kind: MediaKind,
+    mimeType: string,
+    bytes?: Buffer,
+  ): Promise<MediaRef>;
+  /** A `crop-image` (`image/jpeg`) owned by the farmer, present in GridFS. */
+  image(ownerId: string): Promise<MediaRef>;
+  /** A `voice` (`audio/ogg`) recording owned by the farmer, present in GridFS. */
+  recording(ownerId: string): Promise<MediaRef>;
+  /** Whether `ownerId` can still read `ref` — i.e. the owner-scoped read finds it. */
+  ownerCanRead(ownerId: string, ref: MediaRef): Promise<boolean>;
 }
 
 /**
- * Satisfies `StorageClientLike` (the read seam), `ObjectRemoveClient` (`VoiceDeps.deleter`, the
- * retention sweep) and `MediaUploadClientLike` (`storeInboundMedia`) at once.
+ * Build the fixture over the harness's media DAL functions.
  *
- * Stated as one interface rather than by extending all three, because they each declare a `storage`
- * property and TypeScript refuses an interface that extends conflicting members of the same name.
- * The three imports above are what keep this honest: `remove`'s and `upload`'s shapes are read off
- * the production types, so a signature change there breaks this file rather than a scenario.
+ * ```ts
+ * const media = await import('@/lib/db/media');
+ * const objects = mediaFixture(media.writeMedia, media.readMediaForOwner);
+ * const image = await objects.image(farmerA.id);
+ * const outcome = await diagnose({ userId: farmerA.id, image, language: 'en', channel: 'web' }, deps);
+ * ```
  */
-export interface TestObjectStore extends StorageClientLike {
-  storage: { from(bucket: string): TestBucket };
-  /** Record an object as present, so the ownership check finds it. */
-  put(ref: StorageRef): StorageRef;
-  /** Forget it, e.g. to reproduce a retention sweep having deleted the original. */
-  remove(ref: StorageRef): void;
-  has(ref: StorageRef): boolean;
-  /** Every `createSignedUrl` call, in order. */
-  readonly signed: SignedUrlRequest[];
-  /** Every `remove()` call, in order — including one for a path that was already gone. */
-  readonly removed: RemoveRequest[];
-  /** Every `upload()` call, in order. */
-  readonly uploaded: UploadRequest[];
-  /** Set to make the existence probe throw — Requirement 15.6's `INTERNAL_ERROR` branch. */
-  failProbe: boolean;
-  /** Set to make `remove()` report an error — Requirement 8.9's `remove_failed` disposition. */
-  failRemove: boolean;
-}
-
-const keyOf = (bucket: string, path: string): string => `${bucket}/${path}`;
-
-/**
- * A signed URL that looks like the real thing and resolves to nothing.
- *
- * Shaped after Supabase's `/storage/v1/object/sign/...?token=...` because the string reaches the
- * provider request body, and a scenario asserting "the provider was given a signed URL for the
- * farmer's own object" should be reading a plausible value rather than a sentinel.
- */
-function signedUrlFor(bucket: string, path: string): string {
-  return `https://jamee-integration.invalid/storage/v1/object/sign/${bucket}/${path}?token=integration`;
-}
-
-export function objectStore(): TestObjectStore {
-  const present = new Set<string>();
-  const signed: SignedUrlRequest[] = [];
-  const removed: RemoveRequest[] = [];
-  const uploaded: UploadRequest[] = [];
-
-  const store: TestObjectStore = {
-    failProbe: false,
-    failRemove: false,
-    signed,
-    removed,
-    uploaded,
-
-    put(ref) {
-      present.add(keyOf(ref.bucket, ref.path));
-      return ref;
-    },
-
-    remove(ref) {
-      present.delete(keyOf(ref.bucket, ref.path));
-    },
-
-    has(ref) {
-      return present.has(keyOf(ref.bucket, ref.path));
-    },
-
-    storage: {
-      from(bucket: string) {
-        return {
-          exists(path: string) {
-            if (store.failProbe) {
-              return Promise.reject(new Error('jamee integration harness: existence probe refused'));
-            }
-            return Promise.resolve({ data: present.has(keyOf(bucket, path)), error: null });
-          },
-          createSignedUrl(path: string, expiresIn: number) {
-            signed.push({ bucket, path, expiresInSeconds: expiresIn });
-            if (!present.has(keyOf(bucket, path))) {
-              return Promise.resolve({
-                data: null,
-                error: new Error('jamee integration harness: object not found'),
-              });
-            }
-            return Promise.resolve({
-              data: { signedUrl: signedUrlFor(bucket, path) },
-              error: null,
-            });
-          },
-          remove(paths: string[]) {
-            removed.push({ bucket, paths: [...paths] });
-            if (store.failRemove) {
-              return Promise.resolve({
-                data: null,
-                error: new Error('jamee integration harness: remove refused'),
-              });
-            }
-            for (const path of paths) present.delete(keyOf(bucket, path));
-            // `data` is the removed list rather than `null`, matching the real API closely enough
-            // that a caller reading it sees what it asked to delete. V22 leaves the
-            // already-absent case unresolved and nothing here depends on the answer: the deleter
-            // classifies absence before `remove()` is reached.
-            return Promise.resolve({ data: [...paths], error: null });
-          },
-          upload(
-            path: string,
-            body: Uint8Array,
-            options?: { readonly contentType?: string; readonly upsert?: boolean },
-          ) {
-            const key = keyOf(bucket, path);
-            // `upsert: false` is what the production upload sends, and refusing an existing path is
-            // the behaviour it relies on to turn an impossible collision into a loud error rather
-            // than a silent overwrite of a farmer's object.
-            if (present.has(key) && options?.upsert !== true) {
-              return Promise.resolve({
-                data: null,
-                error: new Error('jamee integration harness: object already exists'),
-              });
-            }
-            uploaded.push({
-              bucket,
-              path,
-              bytes: body.byteLength,
-              contentType: options?.contentType,
-            });
-            present.add(key);
-            return Promise.resolve({ data: { path }, error: null });
-          },
-        };
-      },
-    },
+export function mediaFixture(writeMedia: WriteMedia, readMediaForOwner: ReadMediaForOwner): MediaFixture {
+  const write = async (
+    ownerId: string,
+    kind: MediaKind,
+    mimeType: string,
+    bytes: Buffer = Buffer.from(`${kind}-${ownerId}-bytes`),
+  ): Promise<MediaRef> => {
+    const ref = await writeMedia(ownerId, kind, mimeType, bytes);
+    return { fileId: ref.fileId.toHexString(), kind };
   };
 
-  return store;
-}
-
-/**
- * A valid reference under a farmer's own prefix, already recorded as present.
- *
- * Built with the application's own `buildStorageRef()` rather than a hand-written string, so a path
- * convention change (`{user_id}/{YYYY}/{MM}/{uuid}.{ext}`) breaks the fixture in one place instead of
- * silently producing a path that `storageRefSchema` refuses.
- */
-export function uploadedObject(
-  store: TestObjectStore,
-  userId: string,
-  bucket: StorageBucket,
-  extension: string,
-): StorageRef {
-  return store.put(buildStorageRef({ bucket, userId, extension }));
-}
-
-/** A crop image in `crop-images`, present and owned by this farmer. */
-export function uploadedImage(store: TestObjectStore, userId: string): StorageRef {
-  return uploadedObject(store, userId, STORAGE_BUCKETS.cropImages, 'jpg');
-}
-
-/** A recording in `voice-messages`, present and owned by this farmer. */
-export function uploadedRecording(store: TestObjectStore, userId: string): StorageRef {
-  return uploadedObject(store, userId, STORAGE_BUCKETS.voiceMessages, 'webm');
+  return {
+    write,
+    image: (ownerId) => write(ownerId, 'crop-image', 'image/jpeg'),
+    recording: (ownerId) => write(ownerId, 'voice', 'audio/ogg'),
+    async ownerCanRead(ownerId, ref) {
+      return (await readMediaForOwner(ownerId, ref.fileId)) !== null;
+    },
+  };
 }

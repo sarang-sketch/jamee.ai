@@ -1,10 +1,11 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { Buffer } from 'node:buffer';
+
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner, TextCall } from '@/lib/ai/capabilities';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
-import { REPHRASE_REJECTED_REASON } from '@/lib/db/usage-log';
+import type { DiagnosisInsert } from '@/lib/db/analysis';
+import { REPHRASE_REJECTED_REASON, type UsageLogInsert } from '@/lib/db/usage-log';
 import { AppError } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
@@ -21,14 +22,13 @@ import {
   type DiagnosisResult,
   type IdentifiedResult,
   type Language,
+  type MediaRef,
   type Severity,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
 import type { CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
 
 /**
  * ### Property 10: Identified results are grounded only in the matching knowledge base entry
@@ -111,10 +111,15 @@ import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
 /* Fixtures                                                                    */
 /* ========================================================================== */
 
-const CROP_IMAGES = STORAGE_BUCKETS.cropImages;
-
 const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
 const DIAGNOSIS_ID = '55555555-5555-4555-8555-555555555555';
+
+/** A3: the analysis input is a `{ fileId, kind }` Media_Reference, not a bucket/path storage ref. */
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
+
+/** The bytes the owner-checked read yields, and the MIME type stored alongside them. */
+const IMAGE_BYTES = Buffer.from('jamee property harness: fake crop-image bytes');
+const IMAGE_MIME = 'image/jpeg';
 
 /** 2026-09-15T19:30:00Z. Fixed so the run owns its clock and never reads the wall clock. */
 const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
@@ -225,7 +230,7 @@ function nonEmptyFieldsOf(entry: KnowledgeEntry): readonly KbField[] {
 
 const farmerIdArb = fc.uuid();
 const languageArb = fc.constantFrom<Language>(...SUPPORTED_LANGUAGES);
-const channelArb = fc.constantFrom<Channel>('web', 'whatsapp');
+const channelArb = fc.constantFrom<Channel>('web', 'telegram');
 const severityArb = fc.constantFrom<Severity>('low', 'moderate', 'high');
 
 /**
@@ -389,25 +394,10 @@ interface Recorded {
   readonly rephraseRequests: string[];
   /** Every name set the knowledge reader was asked for. */
   readonly knowledgeReads: VerifiedCondition[][];
-  readonly diagnosisRows: TablesInsert<'diagnoses'>[];
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly diagnosisRows: DiagnosisInsert[];
+  readonly usageRows: UsageLogInsert[];
   counts: { classify: number; generate: number };
 }
-
-/**
- * A tripwire, not a stand-in: every seam is injected, so a read of the request client means the
- * service reached past its dependencies and nothing recorded below can be trusted.
- */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
 
 interface Harness {
   readonly deps: DiagnosisDeps;
@@ -430,18 +420,10 @@ function harness(options: {
     counts: { classify: 0, generate: 0 },
   };
 
-  const storage: StorageClientLike = {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: true, error: null }),
-        createSignedUrl: (path: string) =>
-          Promise.resolve({
-            data: { signedUrl: `https://storage.test/${path}?token=abc` },
-            error: null,
-          }),
-      }),
-    },
-  };
+  // A3, V34: the owner-checked read yields the bytes the model is sent inline. Every seam is
+  // injected, so there is no Supabase stack to stand in for.
+  const readMedia = (): Promise<{ bytes: Buffer; mimeType: string }> =>
+    Promise.resolve({ bytes: IMAGE_BYTES, mimeType: IMAGE_MIME });
 
   const rpc: CounterRpc = {
     tryIncrement: () => Promise.resolve(1),
@@ -482,30 +464,11 @@ function harness(options: {
   };
 
   const store: DiagnosisStore = {
-    insertDiagnosis: (row: TablesInsert<'diagnoses'>) => {
+    insertDiagnosis: (row: DiagnosisInsert) => {
       recorded.diagnosisRows.push(row);
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T01:00:00.000Z',
-      };
-      return Promise.resolve(stored);
+      return Promise.resolve(DIAGNOSIS_ID);
     },
-    insertUsageLog: (row: TablesInsert<'usage_logs'>) => {
+    insertUsageLog: (row: UsageLogInsert) => {
       recorded.usageRows.push(row);
       return Promise.resolve();
     },
@@ -527,9 +490,8 @@ function harness(options: {
   return {
     recorded,
     deps: {
-      supabase: unreachableSupabase,
-      storage,
       store,
+      readMedia,
       conversations,
       knowledge,
       models,
@@ -645,7 +607,7 @@ describe('Property 10: identified results are grounded only in the matching know
         const outcome = await diagnose(
           {
             userId: caller,
-            storageRef: { bucket: CROP_IMAGES, path: `${caller}/2026/09/${scenario.objectId}.jpg` },
+            image: IMAGE_REF,
             language,
             channel,
           },
@@ -672,8 +634,8 @@ describe('Property 10: identified results are grounded only in the matching know
 
         const persisted = test.recorded.diagnosisRows[0];
         if (persisted === undefined) throw new Error('no diagnosis row was persisted');
-        expect(persisted.disease_name, label).toBe(condition);
-        expect(persisted.knowledge_id, label).toBe(entry.id);
+        expect(persisted.diseaseName, label).toBe(condition);
+        expect(persisted.knowledgeId, label).toBe(entry.id);
         expect(persisted.explanation, label).toBe(result.explanation);
 
         // The whole of what a farmer reads names this condition and no other.

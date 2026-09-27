@@ -1,9 +1,10 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { Buffer } from 'node:buffer';
+
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner, TextCall, VisionCall } from '@/lib/ai/capabilities';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
+import type { DiagnosisInsert } from '@/lib/db/analysis';
 import { AppError } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
@@ -13,15 +14,13 @@ import {
   VERIFIED_CONDITIONS,
   type Channel,
   type Language,
+  type MediaRef,
   type Severity,
-  type StorageRef,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
 import type { CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, TablesInsert } from '@/types/database';
 
 /**
  * ### Property 12: A healthy classification carries no treatment content
@@ -286,14 +285,15 @@ const TREATMENT_HEADINGS: readonly string[] = SUPPORTED_LANGUAGES.map(
 /* ========================================================================== */
 
 const FARMER = '11111111-1111-4111-8111-111111111111';
-const OBJECT = '22222222-2222-4222-8222-222222222222';
 const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
 const DIAGNOSIS_ID = '55555555-5555-4555-8555-555555555555';
 
-const STORAGE_REF: StorageRef = {
-  bucket: STORAGE_BUCKETS.cropImages,
-  path: `${FARMER}/2026/09/${OBJECT}.jpg`,
-};
+/** A3: the analysis input is a `{ fileId, kind }` Media_Reference, not a bucket/path storage ref. */
+const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };
+
+/** The bytes the owner-checked read yields, and the MIME type stored alongside them. */
+const IMAGE_BYTES = Buffer.from('jamee property harness: fake crop-image bytes');
+const IMAGE_MIME = 'image/jpeg';
 
 /** 2026-09-15T19:30:00Z is 2026-09-16T01:00 in Asia/Kolkata — the far side of the +05:30 offset. */
 const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
@@ -303,7 +303,7 @@ const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
 /* ========================================================================== */
 
 const languageArb = fc.constantFrom<Language>(...SUPPORTED_LANGUAGES);
-const channelArb = fc.constantFrom<Channel>('web', 'whatsapp');
+const channelArb = fc.constantFrom<Channel>('web', 'telegram');
 
 /**
  * The severity the model claims. All four, including `high`, because that is the response
@@ -389,27 +389,16 @@ function rephraseArb(entry: KnowledgeEntry): fc.Arbitrary<RephraseResponse> {
 /* ========================================================================== */
 
 /**
- * A tripwire, not a stand-in: every seam is supplied below, so a read of the request client means
- * the service reached past its dependencies and nothing captured here can be trusted.
+ * A3, V34: the owner-checked media read yields the bytes the model is sent inline. Every seam of
+ * `diagnose()` is injected below, so there is no Supabase stack to stand in for.
  */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
-
 interface Captured {
   /** The prompts the classification call carried. */
   readonly visionCalls: VisionCall[];
   /** The rephrase requests. Requirement 4.5's "supply the row, ask for a rephrase". */
   readonly textCalls: TextCall[];
-  /** Every `diagnoses` row the service tried to write. */
-  readonly inserted: TablesInsert<'diagnoses'>[];
+  /** Every `diagnoses` document the service tried to write. */
+  readonly inserted: DiagnosisInsert[];
 }
 
 interface Harness {
@@ -425,18 +414,8 @@ function harness(options: {
 }): Harness {
   const captured: Captured = { visionCalls: [], textCalls: [], inserted: [] };
 
-  const storage: StorageClientLike = {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: true, error: null }),
-        createSignedUrl: (path: string) =>
-          Promise.resolve({
-            data: { signedUrl: `https://storage.test/${path}?token=abc` },
-            error: null,
-          }),
-      }),
-    },
-  };
+  const readMedia = (): Promise<{ bytes: Buffer; mimeType: string }> =>
+    Promise.resolve({ bytes: IMAGE_BYTES, mimeType: IMAGE_MIME });
 
   const rpc: CounterRpc = {
     tryIncrement: () => Promise.resolve(1),
@@ -481,28 +460,9 @@ function harness(options: {
   };
 
   const store: DiagnosisStore = {
-    insertDiagnosis: (row: TablesInsert<'diagnoses'>) => {
+    insertDiagnosis: (row: DiagnosisInsert) => {
       captured.inserted.push(row);
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T01:00:00.000Z',
-      };
-      return Promise.resolve(stored);
+      return Promise.resolve(DIAGNOSIS_ID);
     },
     insertUsageLog: () => Promise.resolve(),
     ownsConversation: () => Promise.resolve(true),
@@ -522,9 +482,8 @@ function harness(options: {
   return {
     captured,
     deps: {
-      supabase: unreachableSupabase,
-      storage,
       store,
+      readMedia,
       conversations,
       knowledge,
       models,
@@ -583,7 +542,7 @@ describe('Property 12: a healthy classification carries no treatment content', (
           });
 
           const outcome = await diagnose(
-            { userId: FARMER, storageRef: STORAGE_REF, language, channel },
+            { userId: FARMER, image: IMAGE_REF, language, channel },
             test.deps,
           );
 
@@ -648,9 +607,9 @@ describe('Property 12: a healthy classification carries no treatment content', (
           expect(test.captured.inserted, label).toHaveLength(1);
           const row = test.captured.inserted[0];
           expect(row?.status, label).toBe('identified');
-          expect(row?.disease_name, label).toBe(HEALTHY_CONDITION);
+          expect(row?.diseaseName, label).toBe(HEALTHY_CONDITION);
           expect(row?.severity, label).toBe('none');
-          expect(row?.knowledge_id, label).toBe(TOMATO_HEALTHY.id);
+          expect(row?.knowledgeId, label).toBe(TOMATO_HEALTHY.id);
           // The stored explanation is the served one — nothing is stripped for display only, so a
           // later render of this row cannot recover treatment content the response omitted.
           expect(row?.explanation, label).toBe(result.explanation);
@@ -707,7 +666,7 @@ describe('Property 12: a healthy classification carries no treatment content', (
           });
 
           const outcome = await diagnose(
-            { userId: FARMER, storageRef: STORAGE_REF, language, channel },
+            { userId: FARMER, image: IMAGE_REF, language, channel },
             test.deps,
           );
 
