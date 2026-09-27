@@ -297,6 +297,20 @@ export const mediaRefSchema = z.object({
 });
 export type MediaRef = z.infer<typeof mediaRefSchema>;
 
+/**
+ * A Jamee entity id on the wire — a MongoDB ObjectId as its canonical 24-character lowercase hex.
+ *
+ * Amendment A3 note: under Supabase these ids were uuids and the request/response contracts used
+ * `z.uuid()`. Under MongoDB every collection's `_id` is an ObjectId and the Data_Access_Layer
+ * resolves an id with `toObjectId()` (a 24-hex parse) — so `conversationId`, `diagnosisId` and the
+ * message ids that cross the API boundary are ObjectId hex, NOT uuids. A leftover `z.uuid()` on
+ * those fields rejected every real id: `diagnose` returns an ObjectId-hex `conversationId`, and the
+ * chat/voice request schemas then refused to accept it (`CONVERSATION_NOT_FOUND` before the service
+ * ran). This schema is the substrate-correct successor to `z.uuid()` for those ids. The wire type
+ * is still `string`, so no exported name or signature changes.
+ */
+export const dbIdSchema = z.string().regex(OBJECT_ID_HEX_REGEX, 'id must be a 24-character hex ObjectId');
+
 /* ========================================================================== */
 /* Quota status, echoed on every successful response                            */
 /* ========================================================================== */
@@ -341,13 +355,13 @@ export const diagnoseRequestSchema = z.object({
     .refine((r) => r.kind === 'thumbnail', { error: "thumbnail reference must name a 'thumbnail' file" })
     .optional(),
   language: languageSchema,
-  conversationId: z.uuid().optional(),
+  conversationId: dbIdSchema.optional(),
 });
 export type DiagnoseRequest = z.infer<typeof diagnoseRequestSchema>;
 
 export const diagnoseResponseSchema = z.object({
-  diagnosisId: z.uuid(),
-  conversationId: z.uuid(),
+  diagnosisId: dbIdSchema,
+  conversationId: dbIdSchema,
   result: diagnosisResultSchema,
   quota: quotaStatusSchema,
 });
@@ -355,7 +369,7 @@ export type DiagnoseResponse = z.infer<typeof diagnoseResponseSchema>;
 
 /** The answer payload, shared by `/api/chat` and `/api/voice` so the two cannot drift. */
 export const chatAnswerSchema = z.object({
-  messageId: z.uuid(),
+  messageId: dbIdSchema,
   content: z.string().min(1),
   language: languageSchema,
   /** Which knowledge-base rows fed this answer. Empty for an out-of-scope referral. */
@@ -373,15 +387,15 @@ export type ChatAnswer = z.infer<typeof chatAnswerSchema>;
  * subject-less follow-up against.
  */
 export const chatRequestSchema = z.object({
-  conversationId: z.uuid(),
+  conversationId: dbIdSchema,
   message: z.string().min(1).max(1000),
   language: languageSchema,
 });
 export type ChatRequest = z.infer<typeof chatRequestSchema>;
 
 export const chatResponseSchema = z.object({
-  conversationId: z.uuid(),
-  farmerMessageId: z.uuid(),
+  conversationId: dbIdSchema,
+  farmerMessageId: dbIdSchema,
   answer: chatAnswerSchema,
   quota: quotaStatusSchema,
 });
@@ -404,7 +418,7 @@ export const voiceRequestSchema = z.object({
     error: "audio reference must name a 'voice' file",
   }),
   language: languageSchema,
-  conversationId: z.uuid(),
+  conversationId: dbIdSchema,
   durationSeconds: z.number().positive().max(MAX_AUDIO_SECONDS),
   /**
    * The container `MediaRecorder` actually selected, read back from `MediaRecorder.mimeType`.
@@ -421,7 +435,7 @@ export const voiceResponseSchema = z.object({
   /** Requirement 8.6 — the transcript AND the answer are both returned. */
   transcript: z.string(),
   answer: chatAnswerSchema,
-  conversationId: z.uuid(),
+  conversationId: dbIdSchema,
   quota: quotaStatusSchema,
 });
 export type VoiceResponse = z.infer<typeof voiceResponseSchema>;

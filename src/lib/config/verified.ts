@@ -47,20 +47,25 @@ export const GEMINI_API_SURFACE = 'interactions' as const;
  * prompt (design: *Constrained vision classification*, "The prompt is a request; the schema
  * is the enforcement").
  *
- * `thinkingLevel: 'minimal'` carries two jobs at once and is not a performance tweak:
+ * `thinkingLevel: 'low'` carries two jobs at once and is not a performance tweak:
  *  - **Latency.** V6 records that Gemini 3.x has thinking enabled by default, which is why
  *    `vision-classify` gets the largest per-attempt ceiling in the budget table.
  *  - **Determinism, for D7.** U-V7 could not confirm that `temperature` is accepted on the
  *    Interactions API `generation_config` — two official pages say it is, the reference
  *    field list omits it. So D7's channel-parity argument does not rest on temperature
- *    alone: `thinking_level: 'minimal'` plus a fixed `seed` are the documented levers, and
+ *    alone: `thinking_level: 'low'` plus a fixed `seed` are the documented levers, and
  *    `GEMINI_TEMPERATURE` below is applied only if the pinned SDK's types accept it.
+ *
+ * NOTE: the value is `'low'`, the LOWEST level the live model accepts. The model
+ * `gemini-3.8-flash` rejects `'minimal'` with HTTP 400 ("'minimal' is not a supported thinking
+ * level for this model. Allowed values are: high, low, medium."), so `'low'` is the smallest
+ * valid choice and preserves the latency/determinism intent above.
  */
 export const GEMINI_GENERATION = {
   /** Lowest documented value. Applied only where the SDK accepts it — see U-V7. */
   temperature: 0,
-  /** V7: `minimal` | `low` | `medium` | `high`. */
-  thinkingLevel: 'minimal',
+  /** V7: `low` | `medium` | `high` (the live model rejects `minimal`). `low` is the lowest accepted. */
+  thinkingLevel: 'low',
   /** V7: fixed seed, for reproducibility across two runs of the same image (D7). */
   seed: 7,
   /** Classification output is one small JSON object; a rephrase is 4–6 short sentences. */
