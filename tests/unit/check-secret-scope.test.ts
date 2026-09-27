@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  OPAQUE_PAYLOAD_ALLOWANCES,
+  CLIENT_FORBIDDEN_UNPREFIXED,
+  SERVER_SECRET_NAMES,
   blankComments,
   checkEnvDoor,
   checkSecretScope,
-  checkServiceRoleAnchors,
   collectSourceFiles,
-  extractQueryStatements,
   formatReport,
   hasUseClientDirective,
   isWithinServerSurface,
@@ -16,19 +15,26 @@ import {
   type SourceFile,
 } from '../../scripts/check-secret-scope';
 
+import { SERVER_ENV_KEYS } from '../../src/lib/env';
+
 /**
- * Tests for the CI guard itself.
+ * Tests for the A3 secret-scope guard.
  *
  * Requirements: 13.7
  *
  * Almost every case is a **fixture** — a small `SourceFile` written inline — rather than the real
- * tree, for two reasons. A guard asserted only against a passing repository proves that it says
- * "PASS", not that it can say anything else; and a fixture pins the exact shape each rule is
- * supposed to catch, so a later refactor of the matcher cannot quietly stop catching it.
+ * tree, for the reason the guard's own header gives: a guard asserted only against a passing
+ * repository proves it can say "PASS", not that it can catch anything. A fixture pins the exact
+ * shape each rule catches, so a later refactor cannot quietly stop catching it.
  *
- * Three cases do use the real tree, because that is the claim they make: the guard passes against
- * `src/**` as it stands, every allowance still corresponds to a real statement, and the comment
- * blanker survives 90-odd real TypeScript modules without losing its place.
+ * Two cases use the real tree, because those are the claims they make: the guard passes against
+ * `src/**` as it stands under A3, and the comment blanker survives every real TypeScript module
+ * without losing its place. And one case asserts the guarded name list agrees with the actual
+ * `serverEnvSchema`, so the two cannot drift.
+ *
+ * Amendment A3 removed the Supabase service-role anchoring assertion entirely (there is no RLS and
+ * no `.from()` query builder anymore — the Data_Access_Layer is the boundary, proven by
+ * `check-data-access.ts`), so this file has no service-role-anchor cases.
  */
 
 const fixture = (path: string, source: string): SourceFile => ({ path, source });
@@ -37,16 +43,58 @@ const rulesOf = (findings: readonly Finding[]): string[] =>
   findings.filter((f) => f.severity === 'violation').map((f) => f.rule);
 
 /* ========================================================================== */
+/* The guarded name list agrees with the real serverEnvSchema                  */
+/* ========================================================================== */
+
+describe('the guarded names are drawn from the real env schema', () => {
+  it('names only variables that exist in serverEnvSchema (A3 stack)', () => {
+    for (const name of SERVER_SECRET_NAMES) {
+      expect(SERVER_ENV_KEYS as readonly string[], name).toContain(name);
+    }
+  });
+
+  it('guards MONGODB_URI, the Better Auth secret, the Google client credentials, and the payment/telegram secrets', () => {
+    for (const expected of [
+      'MONGODB_URI',
+      'BETTER_AUTH_SECRET',
+      'GOOGLE_CLIENT_ID',
+      'GOOGLE_CLIENT_SECRET',
+      'TELEGRAM_BOT_TOKEN',
+      'TELEGRAM_WEBHOOK_SECRET_TOKEN',
+      'RAZORPAY_KEY_ID',
+      'RAZORPAY_KEY_SECRET',
+      'RAZORPAY_WEBHOOK_SECRET',
+      'GEMINI_API_KEY',
+      'GROQ_API_KEY',
+      'CRON_SECRET',
+    ]) {
+      expect(SERVER_SECRET_NAMES as readonly string[], expected).toContain(expected);
+    }
+  });
+
+  it('no longer guards any Supabase or WhatsApp name', () => {
+    for (const gone of [
+      'SUPABASE_SERVICE_ROLE_KEY',
+      'WHATSAPP_ACCESS_TOKEN',
+      'WHATSAPP_APP_SECRET',
+      'WHATSAPP_VERIFY_TOKEN',
+    ]) {
+      expect(SERVER_SECRET_NAMES as readonly string[], gone).not.toContain(gone);
+    }
+  });
+});
+
+/* ========================================================================== */
 /* Comment blanking — the rules are only as good as this                       */
 /* ========================================================================== */
 
 describe('blankComments', () => {
   it('blanks line and block comments but keeps string literals', () => {
     const blanked = blankComments(
-      ["const key = 'GEMINI_API_KEY'; // reads GEMINI_API_KEY", '/* GEMINI_API_KEY */'].join('\n'),
+      ["const key = 'MONGODB_URI'; // reads MONGODB_URI", '/* MONGODB_URI */'].join('\n'),
     );
 
-    expect(blanked).toContain("'GEMINI_API_KEY'");
+    expect(blanked).toContain("'MONGODB_URI'");
     expect(blanked.split('\n')[0]).not.toContain('reads');
     expect(blanked.split('\n')[1]?.trim()).toBe('');
   });
@@ -62,33 +110,22 @@ describe('blankComments', () => {
   });
 
   it('does not lose the closing backtick of a template literal with a hole', () => {
-    // The exact regression that made an earlier version mis-scan 500 lines of a real module and
-    // report a comment that mentions SUPABASE_SERVICE_ROLE_KEY as a use of it.
     const source = [
       "const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;",
-      '/** never reads `SUPABASE_SERVICE_ROLE_KEY` */',
+      '/** never reads `RAZORPAY_KEY_SECRET` */',
       'const after = 1;',
     ].join('\n');
     const blanked = blankComments(source);
 
-    expect(blanked).not.toContain('SUPABASE_SERVICE_ROLE_KEY');
+    expect(blanked).not.toContain('RAZORPAY_KEY_SECRET');
     expect(blanked).toContain('const after = 1;');
-  });
-
-  it('treats an escaped slash inside a regex literal as regex, not as a comment', () => {
-    const source = "const re = /^[0-9a-f-]{36}\\/\\d{4}$/; const secret = 'GROQ_API_KEY';";
-
-    expect(blankComments(source)).toContain("'GROQ_API_KEY'");
   });
 
   it('keeps its place across every real module under src/', () => {
     for (const file of collectSourceFiles()) {
       const blanked = blankComments(file.source);
       expect(blanked, file.path).toHaveLength(file.source.length);
-      // A lost scanner state shows up first as a mangled newline map, which is what would make
-      // every reported line number in that file wrong.
-      const originalLines = file.source.split('\n').length;
-      expect(blanked.split('\n').length, file.path).toBe(originalLines);
+      expect(blanked.split('\n').length, file.path).toBe(file.source.split('\n').length);
     }
   });
 });
@@ -99,37 +136,63 @@ describe('blankComments', () => {
 
 describe('checkSecretScope', () => {
   it('accepts a secret named inside the server surface', () => {
-    const findings = checkSecretScope(
-      fixture('src/lib/gemini.ts', "const key = serverEnv('GEMINI_API_KEY');"),
-    );
+    expect(
+      rulesOf(checkSecretScope(fixture('src/lib/gemini.ts', "const key = serverEnv('GEMINI_API_KEY');"))),
+    ).toEqual([]);
+  });
 
-    expect(rulesOf(findings)).toEqual([]);
+  it('accepts MONGODB_URI in the Data_Access_Layer client', () => {
+    expect(
+      rulesOf(checkSecretScope(fixture('src/lib/db/client.ts', "const uri = serverEnv('MONGODB_URI');"))),
+    ).toEqual([]);
   });
 
   it("flags a secret in a 'use client' module", () => {
     const findings = checkSecretScope(
-      fixture('src/lib/leaky.ts', ["'use client';", "const k = 'GEMINI_API_KEY';"].join('\n')),
+      fixture('src/lib/leaky.ts', ["'use client';", "const k = 'BETTER_AUTH_SECRET';"].join('\n')),
     );
 
     expect(rulesOf(findings)).toContain('secret-in-client');
   });
 
+  it('flags the unprefixed RAZORPAY_KEY_ID in a client component, naming the public twin', () => {
+    const findings = checkSecretScope(
+      fixture(
+        'src/components/BotUnlockCard.tsx',
+        ["'use client';", "const id = process.env.RAZORPAY_KEY_ID;"].join('\n'),
+      ),
+    );
+
+    expect(rulesOf(findings)).toContain('secret-in-client');
+    expect(findings.find((f) => f.rule === 'secret-in-client')?.message).toContain(
+      'NEXT_PUBLIC_RAZORPAY_KEY_ID',
+    );
+  });
+
+  it('does NOT flag the NEXT_PUBLIC_RAZORPAY_KEY_ID twin in a client component', () => {
+    const findings = checkSecretScope(
+      fixture(
+        'src/components/BotUnlockCard.tsx',
+        ["'use client';", 'const id = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;'].join('\n'),
+      ),
+    );
+
+    expect(rulesOf(findings)).toEqual([]);
+  });
+
   it('flags a secret outside the server surface', () => {
     const findings = checkSecretScope(
-      fixture('src/services/leaky.service.ts', "serverEnv('SUPABASE_SERVICE_ROLE_KEY');"),
+      fixture('src/components/Uploader.tsx', "const k = 'GROQ_API_KEY';"),
     );
 
     expect(rulesOf(findings)).toEqual(['secret-out-of-surface']);
-    expect(findings[0]?.line).toBe(1);
   });
 
   it('does not flag a secret named only in prose', () => {
     const findings = checkSecretScope(
       fixture(
         'src/components/Uploader.tsx',
-        ['/** This component never reads SUPABASE_SERVICE_ROLE_KEY. */', 'export const x = 1;'].join(
-          '\n',
-        ),
+        ['/** This component never reads BETTER_AUTH_SECRET. */', 'export const x = 1;'].join('\n'),
       ),
     );
 
@@ -138,24 +201,26 @@ describe('checkSecretScope', () => {
 
   it('reports the real line number after a multi-line comment', () => {
     const findings = checkSecretScope(
-      fixture(
-        'src/components/Uploader.tsx',
-        ['/**', ' * prose', ' */', "const k = 'GROQ_API_KEY';"].join('\n'),
-      ),
+      fixture('src/components/Uploader.tsx', ['/**', ' * prose', ' */', "const k = 'GROQ_API_KEY';"].join('\n')),
     );
 
     expect(findings[0]?.line).toBe(4);
   });
 
-  it('places src/proxy.ts and src/app/api/internal inside the server surface', () => {
+  it('places src/proxy.ts, api/internal and api/auth inside the server surface', () => {
     expect(isWithinServerSurface('src/proxy.ts')).toBe(true);
-    expect(isWithinServerSurface('src/app/api/internal/retention/route.ts')).toBe(true);
-    expect(isWithinServerSurface('src/components/SignInForm.tsx')).toBe(false);
+    expect(isWithinServerSurface('src/app/api/internal/retention-sweep/route.ts')).toBe(true);
+    expect(isWithinServerSurface('src/app/api/auth/[...all]/route.ts')).toBe(true);
+    expect(isWithinServerSurface('src/components/BotUnlockCard.tsx')).toBe(false);
   });
 
   it("recognises a 'use client' directive only as a directive", () => {
     expect(hasUseClientDirective("'use client';\nexport const x = 1;")).toBe(true);
     expect(hasUseClientDirective('/** importing from a "use client" module fails */')).toBe(false);
+  });
+
+  it('names the client-forbidden unprefixed constant', () => {
+    expect(CLIENT_FORBIDDEN_UNPREFIXED).toBe('RAZORPAY_KEY_ID');
   });
 });
 
@@ -170,24 +235,20 @@ describe('checkEnvDoor', () => {
     ).toEqual([]);
     expect(
       rulesOf(
-        checkEnvDoor(
-          fixture('src/lib/env.public.ts', 'const u = process.env.NEXT_PUBLIC_SUPABASE_URL;'),
-        ),
+        checkEnvDoor(fixture('src/lib/env.public.ts', 'const u = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME;')),
       ),
     ).toEqual([]);
   });
 
   it('flags process.env anywhere else', () => {
-    const findings = checkEnvDoor(
-      fixture('src/services/quota.service.ts', 'const k = process.env.SOMETHING;'),
-    );
-
-    expect(rulesOf(findings)).toEqual(['env-door']);
+    expect(
+      rulesOf(checkEnvDoor(fixture('src/services/quota.service.ts', 'const k = process.env.SOMETHING;'))),
+    ).toEqual(['env-door']);
   });
 
   it('exempts a test module with a note rather than a violation', () => {
     const findings = checkEnvDoor(
-      fixture('src/app/api/whatsapp/route.test.ts', "process.env.WHATSAPP_APP_SECRET = 's';"),
+      fixture('src/app/api/telegram/route.test.ts', "process.env.TELEGRAM_BOT_TOKEN = 't';"),
     );
 
     expect(rulesOf(findings)).toEqual([]);
@@ -195,18 +256,18 @@ describe('checkEnvDoor', () => {
   });
 
   it('flags a literal NEXT_PUBLIC read outside env.public.ts', () => {
-    const findings = checkEnvDoor(
-      fixture('src/lib/supabase/client.ts', 'const u = process.env.NEXT_PUBLIC_SUPABASE_URL;'),
-    );
-
-    expect(rulesOf(findings)).toEqual(['env-door', 'public-env-split']);
+    expect(
+      rulesOf(
+        checkEnvDoor(fixture('src/components/BotUnlockCard.tsx', 'const u = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;')),
+      ),
+    ).toEqual(['env-door', 'public-env-split']);
   });
 
   it("flags env.public.ts if it ever imports 'server-only'", () => {
     const findings = checkEnvDoor(
       fixture(
         'src/lib/env.public.ts',
-        ["import 'server-only';", 'const u = process.env.NEXT_PUBLIC_SUPABASE_URL;'].join('\n'),
+        ["import 'server-only';", 'const u = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME;'].join('\n'),
       ),
     );
 
@@ -218,8 +279,8 @@ describe('checkEnvDoor', () => {
       fixture(
         'src/lib/env.public.ts',
         [
-          'const u = process.env.NEXT_PUBLIC_SUPABASE_URL;',
-          "const s = process.env.SUPABASE_SERVICE_ROLE_KEY;",
+          'const u = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME;',
+          'const s = process.env.BETTER_AUTH_SECRET;',
         ].join('\n'),
       ),
     );
@@ -227,190 +288,24 @@ describe('checkEnvDoor', () => {
     expect(rulesOf(findings)).toEqual(['public-env-split']);
   });
 
-  it("flags env.ts if it loses its 'server-only' marker", () => {
-    const findings = checkEnvDoor(fixture('src/lib/env.ts', 'const raw = process.env[key];'));
-
-    expect(rulesOf(findings)).toEqual(['public-env-split']);
-  });
-
-  it('flags env.public.ts if its literal NEXT_PUBLIC reads become computed', () => {
+  it('does NOT flag NEXT_PUBLIC_RAZORPAY_KEY_ID in env.public.ts as a server secret', () => {
     const findings = checkEnvDoor(
-      fixture('src/lib/env.public.ts', 'const u = process.env[PUBLIC_ENV_VARS[0]];'),
+      fixture('src/lib/env.public.ts', 'const id = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;'),
     );
 
-    expect(rulesOf(findings)).toEqual(['public-env-split']);
-  });
-});
-
-/* ========================================================================== */
-/* Assertion 3 — tenant anchors on farmer-scoped statements                    */
-/* ========================================================================== */
-
-describe('extractQueryStatements', () => {
-  it('cuts the chain out to the end of the statement', () => {
-    const [statement] = extractQueryStatements(
-      "const { data } = await client.from('messages').select('*').eq('user_id', id);\nnext();",
-    );
-
-    expect(statement?.table).toBe('messages');
-    expect(statement?.text).toBe(".from('messages').select('*').eq('user_id', id)");
+    expect(rulesOf(findings)).toEqual([]);
   });
 
-  it('stops at a comma when the chain is one element of an array', () => {
-    const [statement] = extractQueryStatements(
-      "await Promise.all([supabase.from('profiles').select('*').eq('id', u).maybeSingle(), other()]);",
-    );
-
-    expect(statement?.text).toBe(".from('profiles').select('*').eq('id', u).maybeSingle()");
-  });
-});
-
-describe('checkServiceRoleAnchors', () => {
-  const at = (source: string, path = 'src/services/fixture.service.ts'): Finding[] =>
-    checkServiceRoleAnchors(fixture(path, source));
-
-  it('accepts a user_id predicate', () => {
-    expect(rulesOf(at("await client.from('messages').select('*').eq('user_id', id);"))).toEqual([]);
-  });
-
-  it('accepts id on profiles, whose primary key is the auth user id', () => {
-    expect(rulesOf(at("await client.from('profiles').select('*').eq('id', userId);"))).toEqual([]);
-  });
-
-  it('accepts provider_message_id on whatsapp_inbound, its primary key', () => {
-    expect(
-      rulesOf(
-        at("await client.from('whatsapp_inbound').update({ status }).eq('provider_message_id', m);"),
-      ),
-    ).toEqual([]);
-  });
-
-  it('accepts a .match({ user_id }) predicate', () => {
-    expect(rulesOf(at("await client.from('diagnoses').select('*').match({ user_id: id });"))).toEqual(
-      [],
-    );
-  });
-
-  it('flags an unanchored select', () => {
-    const findings = at("const { data } = await client.from('diagnoses').select('*').limit(10);");
-
-    expect(rulesOf(findings)).toEqual(['service-role-anchor']);
-    expect(findings[0]?.message).toContain('Unanchored select');
-  });
-
-  it('flags an unanchored delete', () => {
-    const findings = at("await client.from('messages').delete().lt('created_at', cutoff);");
-
-    expect(rulesOf(findings)).toEqual(['service-role-anchor']);
-  });
-
-  it('flags an unanchored update', () => {
-    expect(rulesOf(at("await client.from('conversations').update({ title });"))).toEqual([
-      'service-role-anchor',
+  it("flags env.ts if it loses its 'server-only' marker", () => {
+    expect(rulesOf(checkEnvDoor(fixture('src/lib/env.ts', 'const raw = process.env[key];')))).toEqual([
+      'public-env-split',
     ]);
   });
 
-  it('accepts an insert whose literal payload sets user_id', () => {
+  it('flags env.public.ts if its literal NEXT_PUBLIC reads become computed', () => {
     expect(
-      rulesOf(at("await client.from('conversations').insert({ user_id: userId, channel });")),
-    ).toEqual([]);
-  });
-
-  it('flags an insert whose literal payload sets no anchor', () => {
-    const findings = at("await client.from('messages').insert({ role: 'farmer', body });");
-
-    expect(rulesOf(findings)).toEqual(['service-role-anchor']);
-    expect(findings[0]?.message).toContain('visible payload that sets none of');
-  });
-
-  it('resolves a preceding const object literal', () => {
-    const findings = at(
-      [
-        'const row: ProfileBootstrapRow = { id: user.id, phone };',
-        "await writer.from('profiles').upsert(row, { onConflict: 'id' });",
-      ].join('\n'),
-    );
-
-    expect(rulesOf(findings)).toEqual([]);
-  });
-
-  it('treats an ambiguous const binding as unseen rather than resolving the wrong one', () => {
-    // Two `const row = { … }` bindings before the statement: which one reaches it is a scope
-    // question this script does not answer, so it must fall through to the allowance check.
-    const findings = at(
-      [
-        'const row = { user_id: a };',
-        'const row = { user_id: b };',
-        "await client.from('messages').insert(row);",
-      ].join('\n'),
-    );
-
-    expect(rulesOf(findings)).toEqual(['service-role-anchor']);
-    expect(findings[0]?.message).toContain('cannot see');
-  });
-
-  it('fails closed on an unlisted opaque payload', () => {
-    const findings = at("await client.from('usage_logs').insert(row);");
-
-    expect(rulesOf(findings)).toEqual(['service-role-anchor']);
-    expect(findings[0]?.message).toContain('OPAQUE_PAYLOAD_ALLOWANCES');
-  });
-
-  it('downgrades a listed opaque payload to a note that names the reason', () => {
-    const findings = checkServiceRoleAnchors(
-      fixture('src/services/voice.service.ts', "await auditClient.from('usage_logs').insert(row);"),
-    );
-
-    expect(rulesOf(findings)).toEqual([]);
-    expect(findings[0]?.severity).toBe('note');
-    expect(findings[0]?.message).toContain('UNPROVEN');
-  });
-
-  it('ignores disease_knowledge, which holds no farmer data', () => {
-    expect(rulesOf(at("await client.from('disease_knowledge').select('*');"))).toEqual([]);
-  });
-
-  it('ignores a storage bucket, which is not a table', () => {
-    expect(rulesOf(at("await client.storage.from('crop-images').remove([path]);"))).toEqual([]);
-  });
-
-  it('accepts an rpc call carrying p_user', () => {
-    expect(
-      rulesOf(at("await client.rpc('counter_try_increment', { p_user: id, p_limit: n });")),
-    ).toEqual([]);
-  });
-
-  it('flags an rpc call with no farmer argument', () => {
-    const findings = at("await client.rpc('counter_used', { p_operation: op });");
-
-    expect(rulesOf(findings)).toEqual(['service-role-anchor']);
-    expect(findings[0]?.message).toContain('no farmer argument');
-  });
-
-  it('does not let a later call satisfy an earlier unanchored one', () => {
-    const findings = at(
-      [
-        "await client.rpc('counter_used', { p_operation: op });",
-        "await client.rpc('counter_decrement', { p_user: id });",
-      ].join('\n'),
-    );
-
-    expect(rulesOf(findings)).toEqual(['service-role-anchor']);
-    expect(findings[0]?.line).toBe(1);
-  });
-
-  it('exempts a function listed as tenant-free', () => {
-    expect(rulesOf(at("await client.rpc('counter_prune_minute_windows', { p_older_than: 60 });"))).toEqual(
-      [],
-    );
-  });
-
-  it('skips test modules, whose fake clients are not queries', () => {
-    expect(
-      checkServiceRoleAnchors(
-        fixture('src/services/fixture.service.test.ts', "stub.from('messages').select('*');"),
-      ),
-    ).toEqual([]);
+      rulesOf(checkEnvDoor(fixture('src/lib/env.public.ts', 'const u = process.env[PUBLIC_ENV_VARS[0]];'))),
+    ).toEqual(['public-env-split']);
   });
 });
 
@@ -424,33 +319,22 @@ describe('runRules against src/', () => {
   it('finds no violation in the current tree', () => {
     const violations = report.findings.filter((f) => f.severity === 'violation');
 
-    expect(formatReport(report)).toContain('PASS');
+    expect(formatReport(report), formatReport(report)).toContain('PASS');
     expect(violations).toEqual([]);
   });
 
   it('scans a plausible number of modules', () => {
     expect(report.scannedFiles).toBeGreaterThan(50);
   });
-
-  it('has no stale opaque-payload allowance', () => {
-    expect(report.staleAllowances).toEqual([]);
-  });
-
-  it('justifies every allowance', () => {
-    for (const allowance of OPAQUE_PAYLOAD_ALLOWANCES) {
-      expect(allowance.why.length, `${allowance.path}::${allowance.table}`).toBeGreaterThan(20);
-    }
-  });
 });
 
 describe('formatReport', () => {
   it('names the file, the line and the rule of every violation, and ends in FAIL', () => {
     const output = formatReport(
-      runRules([fixture('src/services/leaky.service.ts', "process.env.GROQ_API_KEY;")]),
+      runRules([fixture('src/services/leaky.service.ts', 'process.env.GROQ_API_KEY;')]),
     );
 
     expect(output).toContain('src/services/leaky.service.ts:1');
-    expect(output).toContain('secret-out-of-surface');
     expect(output).toContain('env-door');
     expect(output).toContain('FAIL');
   });

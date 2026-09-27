@@ -14,7 +14,7 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:property": "vitest run --project property",
-    "check:deployment": "node --experimental-strip-types scripts/check-deployment.ts",
+    "check:deployment": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/check-deployment.ts",
     "check:secret-scope": "node --experimental-strip-types scripts/check-secret-scope.ts",
     "check:shared-implementation": "node --experimental-strip-types scripts/check-shared-implementation.ts",
     "check:data-access": "node --experimental-strip-types scripts/check-data-access.ts",

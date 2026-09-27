@@ -1581,13 +1581,13 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - Telegram text/photo/voice/unsupported/duplicate/timeout/rate-limit-fallback plus an unlinked sender and a **lapsed-window** sender; the `update_id` idempotency test; linking across valid/expired/consumed/unknown/no-payload/already-linked-elsewhere and two concurrent deliveries; payment across an abandoned checkout, a replayed webhook, a forged signature, a captured payment opening a lapsed sender, a recharge extending the window, and an unauthenticated flood; tenant isolation attempting cross-farmer reads (zero documents) and cross-farmer writes on the access collections (fail) across all collections and GridFS
     - _Requirements: 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 13.9, 14.4, 14.5, 21.6, 21.7, 21.8, 22.10, 22.13, 22.17, 22.19, 22.21_
 
-- [ ] 63. Update the deployment package, the documentation, and the CI guards
+- [x] 63. Update the deployment package, the documentation, and the CI guards
   - [x] 63.1 Rewrite `docs/DEPLOYMENT.md` as the ten A3 steps
     - Create the Atlas M0 cluster and record `MONGODB_URI`, noting the accepted `0.0.0.0/0` academic trade-off and the M0 limits (V32); choose the auth library by reading `node_modules/next/dist/docs` first (V35, D18a), configure Google + MongoDB adapter, register callback redirects, record the library/Google secrets — no SMS provider; run `npm run db:setup` and assert count = 5, the GridFS bucket, and the indexes/validators across all collections; obtain provider keys and record model identifiers and inline-byte limits (V34); create the Telegram bot (BotFather) and generate the secret token; create the Razorpay account, register the webhook, subscribe to captured/failed events, and record **test mode** (O22-3 resolved by A3); deploy to Vercel with all variables and confirm `maxDuration`; `setWebhook` and confirm a no-secret-token POST returns 401; smoke-test the acceptance sequence pay→link→photo; record the ₹20 price, the retention arithmetic against the shared ~512 MB M0 budget, and that the Payment_Provider adds no fixed/recurring cost
     - _Requirements: 17.1, 17.3, 22.4, 22.25, 22.26_
     - _Depends on: V16, V19, V27, V30, V32, V34, V35_
 
-  - [ ] 63.2 Regenerate `docs/API.md`
+  - [x] 63.2 Regenerate `docs/API.md`
     - Generate from `src/lib/schemas.ts` so it cannot drift; add `/api/media` (upload + owner-checked serve), `/api/telegram`, `/api/link/token` (POST+DELETE), `/api/payment/order`, and `/api/payment/webhook`; document the two webhook routes and the multipart Media_Endpoint by their authentication mechanism in place of a request schema; keep the quota-semantics note
     - _Requirements: 17.2, 17.4_
 
@@ -1599,7 +1599,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - `.env.example`: `MONGODB_URI`, the auth library secret and Google client id/secret, the Telegram and Razorpay names, `RETENTION_SWEEP_SECRET`, and the two public names — no Supabase names, no `BOT_UNLOCK_PRICE`/`LINK_TOKEN_TTL_MINUTES`. `about-project.md`: MongoDB Atlas + GridFS backend, Google sign-in via the in-app auth library, Telegram gated behind a weekly ₹20 recharge while the web app stays free, and the zero-standing-cost claim (SMS removed; the payment fee is per-transaction out of a farmer's money)
     - _Requirements: 1.10, 17.1, 17.2, 22.17, 22.26_
 
-  - [ ] 63.5 Update the CI guards for MongoDB
+  - [x] 63.5 Update the CI guards for MongoDB
     - `scripts/check-secret-scope.ts`: replace the Supabase secret names with `MONGODB_URI`, the auth library secret, `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, and keep the Telegram/Razorpay/retention names, asserting they appear only under `src/lib/**` server modules and `src/app/api/**` and never in a `'use client'` file, and that the unprefixed `RAZORPAY_KEY_ID` never appears in a client component; `scripts/check-shared-implementation.ts` unchanged in intent (Telegram adapter, no service→entitlement import, `profiles.phone` reader-free — now outside `scripts/db-setup.ts`); `scripts/check-data-access.ts` (from 52.3) is the new third structural guard; update `scripts/check-deployment.ts` to assert MongoDB collections/indexes/validators and the GridFS bucket instead of Supabase RLS/buckets
     - _Requirements: 1.9, 3.8, 7.7, 13.7, 16.1, 16.2, 16.3, 16.4, 17.6, 22.17, 22.23_
     - _Design: Static architecture check (CI); D18_

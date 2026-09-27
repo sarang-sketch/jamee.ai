@@ -18,6 +18,7 @@ import { ERROR_SPECS } from '@/lib/errors';
 import {
   ERROR_CODES,
   chatAnswerSchema,
+  channelSchema,
   chatRequestSchema,
   chatResponseSchema,
   diagnoseRequestSchema,
@@ -28,10 +29,11 @@ import {
   inconclusiveResultSchema,
   knowledgePayloadSchema,
   languageSchema,
+  mediaKindSchema,
+  mediaRefSchema,
   operationSchema,
   quotaStatusSchema,
   severitySchema,
-  storageRefSchema,
   verifiedConditionSchema,
   voiceRequestSchema,
   voiceResponseSchema,
@@ -39,47 +41,36 @@ import {
 } from '@/lib/schemas';
 
 /**
- * `docs/API.md` cannot drift, and this file is the mechanism.
+ * `docs/API.md` cannot drift, and this file is the mechanism (task 63.2).
  *
- * Requirements: 17.4 (the Deployment_Package includes API documentation describing each API_Layer
- *               endpoint with the HTTP method, the request body schema, the response body schema and
- *               the error codes)
- * Task: 28.2
+ * Requirements: 17.4 (the Deployment_Package documents each endpoint with the HTTP method, the
+ *               request/response body schemas, and the error codes)
  *
  * ### Why a test and not a generator
  *
- * Task 28.2 says the document is "generated from `src/lib/schemas.ts` so the document cannot drift",
- * and the strongest reading of that is `scripts/generate-api-docs.ts` plus a CI check that the
- * committed file matches a fresh run. **That reading is not available here, for a mechanical
- * reason.** The three existing guards run as `node --experimental-strip-types scripts/*.ts`, and
- * under that loader:
+ * The three `scripts/check-*.ts` guards and `scripts/db-setup.ts` run as
+ * `node --experimental-strip-types scripts/*.ts`, under which `src/lib/schemas.ts` fails at module
+ * load (it imports `@/lib/config/verified`, and Node resolves neither the `@/*` alias nor a tsconfig
+ * `paths` entry) and `src/lib/errors.ts` additionally begins with the bare `server-only` specifier
+ * only Next/Vite alias. A generator that cannot import the schemas would have to *parse* them as
+ * text — a second, weaker model of the contract, i.e. the drift the task is trying to prevent,
+ * relocated. A Vitest test has no such problem: `vitest.config.ts` maps `@` to `src/` and stubs
+ * `server-only`, so this file imports the REAL schemas, `ERROR_SPECS` and verified constants and
+ * compares the document against them.
  *
- *  - `src/lib/schemas.ts` fails at module load, because it imports `@/lib/config/verified` and Node
- *    resolves neither the `@/*` alias nor a tsconfig `paths` entry (verified: the import throws
- *    `ERR_MODULE_NOT_FOUND` for `@/lib`);
- *  - `src/lib/errors.ts` additionally begins with `import 'server-only'`, a bare specifier that only
- *    Next.js and Vite alias.
+ * ### Amendment A3
  *
- * `scripts/check-deployment.ts` records the same constraint in its own header and imports nothing
- * from `src/` for the same reason. A generator that cannot import the schemas would have to *parse*
- * them as text, which is a second, weaker model of the contract — precisely the drift the task is
- * trying to prevent, relocated.
- *
- * A Vitest test has no such problem: `vitest.config.ts` maps `@` to `src/` and stubs `server-only`,
- * so this file imports **the real schemas, the real `ERROR_SPECS` and the real verified constants**
- * and compares the document against them. That satisfies "cannot drift" the way the task means it —
- * the check is real, it runs in `npm test`, and it fails on any divergence in either direction.
+ * The storage-path contract is gone: `storageRefSchema` retired and `mediaRefSchema`
+ * (`{ fileId, kind }`) replaced it, so the field and enum tables bind to the Media_Reference now.
+ * The channel enum is `web, telegram`. The two webhook routes are documented by their
+ * authentication mechanism rather than a request schema, and there is no GET webhook handshake to
+ * document — so the endpoint code anchors are the A3 route set, not the retired WhatsApp pair.
  *
  * ### What is checked
  *
- * Every assertion below binds a table in the document to a value in the code, and the binding is an
- * HTML comment anchor (`<!-- fields:chatRequestSchema -->`) rather than a heading, so re-wording a
- * heading cannot silently detach a table from its schema. Set comparisons run in **both**
- * directions: a field added to a schema and not to the document fails, and so does a documented
- * field that no longer exists.
- *
- * Prose is deliberately not checked. The `Type` and `Notes` columns are prose and can still go
- * stale; the shapes, statuses, flags, enum members and numbers cannot.
+ * Every assertion binds a table to a value in the code through an HTML-comment anchor
+ * (`<!-- fields:chatRequestSchema -->`), so re-wording a heading cannot detach a table from its
+ * schema. Set comparisons run in both directions. Prose (the `Type`/`Notes` columns) is not checked.
  */
 
 /* ========================================================================== */
@@ -90,15 +81,8 @@ const REPO_ROOT = resolve(__dirname, '..', '..');
 const DOC_PATH = join(REPO_ROOT, 'docs', 'API.md');
 const DOC = readFileSync(DOC_PATH, 'utf8');
 
-/** A markdown row split into trimmed cells, with backticks stripped. */
 type Row = readonly string[];
 
-/**
- * A cell may legitimately contain a pipe — `'crop-images' \| 'voice-messages'` is a union type, and
- * `GET \| POST` is two verbs on one route — and markdown escapes it as `\|`. Splitting on a raw `|`
- * would shift every later column of that row, so the escaped form is parked on a character that
- * cannot appear in the document and restored afterwards.
- */
 const ESCAPED_PIPE = '\u0000';
 
 function cells(line: string): Row {
@@ -111,13 +95,6 @@ function cells(line: string): Row {
     .map((cell) => cell.trim().replace(/`/g, '').replaceAll(ESCAPED_PIPE, '|'));
 }
 
-/**
- * The table immediately following an anchor comment.
- *
- * The header row and the `---` separator are dropped, so what comes back is the body. A missing
- * anchor is an explicit failure rather than an empty result, because "the table is gone" and "the
- * table is empty" must not read the same.
- */
 function tableAfter(anchor: string): Row[] {
   const marker = `<!-- ${anchor} -->`;
   const at = DOC.indexOf(marker);
@@ -142,7 +119,6 @@ function tableAfter(anchor: string): Row[] {
   return rows.slice(1); // drop the header
 }
 
-/** Every anchor the document actually carries, so an orphan anchor is visible. */
 function anchorsInDoc(prefix: string): string[] {
   return [...DOC.matchAll(/<!--\s*([^\s]+)\s*-->/g)]
     .map((match) => match[1] ?? '')
@@ -153,7 +129,6 @@ function anchorsInDoc(prefix: string): string[] {
 /* Endpoint completeness — the route table names every route module            */
 /* ========================================================================== */
 
-/** Every `route.ts` under `src/app`, as a repository-relative POSIX path. */
 function routeModules(): string[] {
   const base = join(REPO_ROOT, 'src', 'app');
   return readdirSync(base, { recursive: true, withFileTypes: true })
@@ -170,7 +145,6 @@ function sourceOf(routeModule: string): string {
 
 const HTTP_VERBS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
 
-/** The HTTP verbs a route module exports, however it exports them. */
 function exportedVerbs(source: string): string[] {
   const found = new Set<string>();
   for (const match of source.matchAll(
@@ -199,16 +173,12 @@ describe('docs/API.md documents every endpoint that exists', () => {
   });
 
   /**
-   * The `session` label is a claim about the code, so it is checked against the code: a
-   * session-authenticated route is one built from `authenticatedRoute`, and nothing else may be
-   * labelled that way. This is the same property `authenticated-route.test.ts` asserts from the
-   * other side — it fails a farmer-facing handler exported in any other form — restated here so the
-   * document cannot describe an auth model the route does not implement.
-   *
-   * Matched on the **import statement** rather than on the identifier anywhere in the file. The
-   * WhatsApp and retention-sweep routes both explain in their headers that they are deliberately not
-   * wrapped in `authenticatedRoute`, so a substring search finds the word in exactly the two files
-   * whose prose says they do not use it.
+   * The `session` label is a claim about the code. A session-authenticated route is one built from
+   * `authenticatedRoute`; every other auth mechanism (better-auth's own catch-all, the Telegram
+   * secret token, the payment signature, the cron bearer, the media owner-check) is labelled by its
+   * mechanism and must NOT import the wrapper. Matched on the import statement rather than the
+   * identifier anywhere, so a header that names the wrapper in prose (the telegram/webhook/sweep
+   * routes explain they are deliberately not wrapped) is not mistaken for a use.
    */
   const IMPORTS_WRAPPER = /^import\s*\{[^}]*\bauthenticatedRoute\b[^}]*\}\s*from/m;
 
@@ -249,15 +219,8 @@ describe('docs/API.md records the real maxDuration of every route that declares 
 /* Field tables — both directions                                              */
 /* ========================================================================== */
 
-/**
- * Anchor name → the schema its table is generated from.
- *
- * Keyed by the export name so a reader can go from the document straight to the declaration. The
- * one dotted key is the error envelope's inner object: the wire shape is `{ error: { … } }`, and the
- * table documents the fields under `error`.
- */
 const FIELD_SCHEMAS = {
-  storageRefSchema,
+  mediaRefSchema,
   quotaStatusSchema,
   identifiedResultSchema,
   inconclusiveResultSchema,
@@ -273,12 +236,6 @@ const FIELD_SCHEMAS = {
   voiceResponseSchema,
 } as const;
 
-/**
- * Whether a field is optional, asked of the schema rather than read from the document.
- *
- * `undefined` is the only value that distinguishes an optional field from a required one across
- * every shape used here — including `z.null()`, which is required and rejects `undefined`.
- */
 function isOptional(field: ZodType): boolean {
   return field.safeParse(undefined).success;
 }
@@ -296,8 +253,6 @@ describe('docs/API.md field tables match the schemas', () => {
     const shape = schema.shape as Record<string, ZodType>;
     const rows = tableAfter(`fields:${name}`);
 
-    // Both directions: a field missing from the table fails, and so does a table row for a field
-    // the schema no longer has.
     expect(rows.map((row) => row[0]).sort()).toEqual(Object.keys(shape).sort());
 
     for (const row of rows) {
@@ -323,7 +278,8 @@ const ENUM_OPTIONS: Record<string, readonly string[]> = {
   severitySchema: severitySchema.options,
   operationSchema: operationSchema.options,
   verifiedConditionSchema: verifiedConditionSchema.options,
-  'storageRefSchema.shape.bucket': storageRefSchema.shape.bucket.options,
+  mediaKindSchema: mediaKindSchema.options,
+  channelSchema: channelSchema.options,
 };
 
 describe('docs/API.md states the real permitted values', () => {
@@ -408,10 +364,8 @@ describe('docs/API.md documents every error code exactly as the taxonomy declare
 });
 
 /**
- * The bodiless non-2xx responses. The point of the assertion is the third column: the status is a
- * literal in two of those three route handlers, and the taxonomy is supposed to be the one place an
- * HTTP code for the condition is written down. If someone changes `ERROR_SPECS`, the number in the
- * document stops matching.
+ * The bodiless non-2xx responses. The point is the third column: the status is a literal in those
+ * route handlers, and the taxonomy is the one place the HTTP code for the condition is written down.
  */
 describe('docs/API.md bodiless responses take their status from ERROR_SPECS', () => {
   it.each(tableAfter('bodiless'))('%s', (_response, status, code) => {
@@ -421,13 +375,17 @@ describe('docs/API.md bodiless responses take their status from ERROR_SPECS', ()
   });
 });
 
-/** The per-endpoint code tables, keyed by the anchor suffix. */
+/** The per-endpoint code tables, keyed by the anchor suffix — the A3 route set. */
 const ENDPOINT_CODE_ANCHORS = [
   'codes:diagnose',
   'codes:chat',
   'codes:voice',
-  'codes:whatsapp-get',
-  'codes:whatsapp-post',
+  'codes:media-upload',
+  'codes:media-serve',
+  'codes:link-token',
+  'codes:payment-order',
+  'codes:payment-webhook',
+  'codes:telegram',
   'codes:retention-sweep',
   'codes:auth-callback',
 ] as const;
@@ -455,10 +413,10 @@ describe('docs/API.md per-endpoint error tables agree with the taxonomy', () => 
 });
 
 /* ========================================================================== */
-/* The quota-semantics note (task 24.2)                                        */
+/* The quota-semantics note (task 24.2, restated for Telegram)                 */
 /* ========================================================================== */
 
-describe('docs/API.md carries the quota-semantics note task 24.2 produced', () => {
+describe('docs/API.md carries the quota-semantics note', () => {
   it('states that a retry after an error spends a new unit', () => {
     expect(DOC).toContain('### Retrying after an error spends a new unit');
     expect(DOC).toContain('Every accepted request takes its own unit.');
@@ -471,8 +429,10 @@ describe('docs/API.md carries the quota-semantics note task 24.2 produced', () =
     }
   });
 
-  it('records the WhatsApp exception and the daily decline', () => {
+  it('records the Telegram update_id duplicate exception and the daily decline', () => {
+    // Amendment A3: the WhatsApp provider_message_id exception is now the Telegram update_id one.
     expect(DOC).toContain("outcome: 'duplicate_ignored'");
+    expect(DOC).toContain('update_id');
     expect(DOC).toContain('details: { limit, used, resetsAt }');
   });
 });

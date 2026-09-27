@@ -1,64 +1,52 @@
 # =============================================================================
-# Jamee — CI release gates (Requirement 17.8, task 28.6)
+# Jamee — CI release gates (Requirement 17.8, task 63.5 / Amendment A3)
 # =============================================================================
 #
 # WHAT THIS GATES. Requirement 17.8 makes "compiles under TypeScript strict mode with no type
-# errors" a release gate, and the design says it is "enforced in CI". Task 28.6 names the full
-# gate set: `tsc --noEmit`, the unit/property/integration suites, `scripts/check-secret-scope.ts`,
-# `scripts/check-shared-implementation.ts`, and the accessibility scan.
+# errors" a release gate, and the design says it is "enforced in CI". Amendment A3's gate set is:
+# `tsc --noEmit`, lint, the three static guards (`check:secret-scope`, `check:shared-implementation`,
+# `check:data-access`), the unit/property/integration suites, the accessibility scan (inside the
+# unit suite), and `next build`.
 #
-# WHEN IT RUNS. Every `push` to any branch and every `pull_request`. Plus `workflow_dispatch` so a
-# release can be gated on demand without a commit.
+# WHEN IT RUNS. Every `push` to any branch and every `pull_request`. Plus `workflow_dispatch`.
 #
-# HOW IT BLOCKS — READ THIS. A failing workflow run reports failure, but GitHub does not refuse a
-# merge on that alone. Making these gates actually block requires a branch protection rule (or
-# ruleset) on the default branch listing BOTH job names below as required status checks:
+# HOW IT BLOCKS — READ THIS. A failing run reports failure, but GitHub does not refuse a merge on
+# that alone. Making these gates actually block requires a branch-protection rule (or ruleset) on
+# the default branch listing BOTH job names below as required status checks:
 #
 #     Static, unit and property gates
-#     Integration suite (real Supabase stack)
+#     Integration suite (mongodb-memory-server)
 #
-# That is a repository setting, not something a workflow file can assert. Until it is enabled,
-# these are advisory checks, not gates. Whoever sets up the repository owns that step.
+# That is a repository setting, not something a workflow file can assert. Until it is enabled these
+# are advisory checks, not gates. Whoever sets up the repository owns that step.
 #
 # NODE VERSION. `package.json` engines is `^22.12.0 || >=24.0.0`. CI pins the 24 line, because:
 #   - it satisfies the `>=24.0.0` half of engines and matches the development machine;
-#   - `scripts/check-*.ts` run under `node --experimental-strip-types`, which is REQUIRED on 22.12
-#     and an accepted no-op on 24, so a 24 run exercises the flag-free semantics the scripts will
-#     have long-term while the same command line still works on 22;
-#   - Node 24 is what `supabase/setup-cli` installs when a runner has no Node, so the integration
-#     job stays on one runtime.
+#   - `scripts/check-*.ts` and `scripts/db-setup.ts` run under `node --experimental-strip-types`,
+#     REQUIRED on 22.12 and an accepted no-op on 24, so a 24 run exercises the flag-free semantics
+#     the scripts will have long-term while the same command line still works on 22.
 # GAP, stated rather than hidden: the LOWER bound of engines (22.12) is NOT exercised here. A
-# regression that only appears on Node 22 would pass this workflow. Widening to a 22/24 matrix is
-# the fix if the project decides to keep supporting 22; it doubles the run and buys nothing for the
-# release itself, since the release runs on one runtime.
+# regression that only appears on Node 22 would pass. A 22/24 matrix is the fix if the project keeps
+# supporting 22; it doubles the run and buys nothing for the release, which runs on one runtime.
 #
-# SECRETS. None. `npm run build` was verified to succeed with ZERO environment configured — every
-# page and route handler is dynamic and `src/lib/env.ts` validates on first use, so nothing reads a
-# variable at build time. No placeholder credentials are set anywhere in this file. The only keys
-# that appear at all are the Supabase CLI's fixed local-stack demo keys, which are identical on
-# every machine and are not credentials.
+# SECRETS. None. `npm run build` succeeds with ZERO environment configured — every page and route
+# handler is dynamic and `src/lib/env.ts` validates on first use, so nothing reads a variable at
+# build time. Under Amendment A3 there is no Supabase CLI, no local stack, and no demo keys of any
+# kind in this file: the integration suite runs entirely in-process against `mongodb-memory-server`.
 #
-# DELIBERATELY NOT A GATE — `npm run check:deployment`. Task 28.4 built it and recommended against
-# including it here, and that recommendation stands: it asserts facts about a LIVE deployment (a
-# real Supabase project, a deployed HTTPS origin, `psql`, and `CRON_SECRET`) and exits 1 on an
-# unconfigured machine by design. Wiring it here would either fail every run or require real
-# project credentials in CI. Its home is `docs/DEPLOYMENT.md` steps 3 and 7, run by an operator
-# against the deployment it describes.
+# DELIBERATELY NOT A GATE — `npm run check:deployment`. It asserts facts about a LIVE deployment (a
+# real MongoDB Atlas cluster, a deployed HTTPS origin, and the Telegram `getWebhookInfo` surface)
+# and SKIPS every part whose input is absent, so on an unconfigured runner it would assert nothing.
+# Its home is `docs/DEPLOYMENT.md`, run by an operator against the deployment it describes.
 #
-# THE ACCESSIBILITY SCAN IS GATED BY THE "Unit suite" STEP. Task 26.3 landed it as
-# `tests/unit/accessibility.test.tsx`, which runs in the vitest `unit` project — so `npm run
-# test:unit` above is what fails a build on an accessibility violation, and no separate step is
-# needed. The detect-and-warn step that used to stand in for it now reports which engine is
-# installed instead of warning about a missing one.
+# THE ACCESSIBILITY SCAN IS GATED BY THE "Unit suite" STEP. `tests/unit/accessibility.test.tsx`
+# runs in the vitest `unit` project, so `npm run test:unit` is what fails a build on an
+# accessibility violation, and no separate step runs a scan of its own. An automated scan is not
+# WCAG conformance — the scan prints its own limits on every run (no contrast under jsdom, the
+# detail screen unscanned, the manual screen-reader pass still outstanding).
 #
-# What that step CANNOT report, and what no CI job can: an automated scan is not WCAG conformance.
-# The scan itself prints its own limits on every run (contrast is not evaluated under jsdom, the
-# diagnosis detail screen is not scanned, and full conformance still needs the manual screen-reader
-# pass tracked in task 30.1). Read that output rather than the tick.
-#
-# ACTION PINS. GitHub-authored actions are pinned to a major tag, which is the version GitHub itself
-# documents and which picks up security patches without an edit. The Supabase CLI is pinned to an
-# exact version — see the comment on that step.
+# ACTION PINS. GitHub-authored actions are pinned to a major tag, which is the version GitHub
+# documents and which picks up security patches without an edit.
 
 name: Release gates
 
@@ -84,8 +72,9 @@ jobs:
   # ---------------------------------------------------------------------------
   # Job 1 — everything that needs no external service.
   #
-  # Ordered cheapest-signal-first: the two static guards and the type check fail in seconds and
-  # cover Requirement 17.8 directly, so a broken build is reported before the test suites run.
+  # Ordered cheapest-signal-first: the type check and the three static guards fail in seconds and
+  # cover Requirement 17.8 and the architecture rules directly, so a broken build is reported
+  # before the test suites run.
   # ---------------------------------------------------------------------------
   gates:
     name: Static, unit and property gates
@@ -105,27 +94,30 @@ jobs:
       - name: Install dependencies from the lockfile
         run: npm ci
 
-      # Requirement 17.8, stated literally. This is THE release gate the requirement names, which
-      # is why it runs first.
+      # Requirement 17.8, stated literally. THE release gate the requirement names, so it runs first.
       - name: Type check — tsc --noEmit under strict mode
         run: npm run typecheck
 
       - name: Lint
         run: npm run lint
 
-      # Requirements 13.7 / 13.4 and the service-role anchoring rules.
-      #
-      # This guard and the type check are coupled: `check:secret-scope` reports insert payloads
-      # passed as a parameter as UNPROVEN and defers their `user_id` to the type system, so the
-      # guard's own output says `npm run typecheck` is what proves those rows carry a tenant. Both
-      # must be gates or neither proves anything. They are.
-      - name: Guard — secret scope and service-role anchoring
+      # Requirement 13.7. Under A3 this guards MONGODB_URI, the Better Auth secret, the Google
+      # client credentials, and the Telegram/Razorpay/Gemini/Groq/CRON secrets — server-only, never
+      # in a 'use client' module, and the unprefixed RAZORPAY_KEY_ID never in a client component.
+      - name: Guard — secret scope
         run: npm run check:secret-scope
 
-      # Requirements 3.8, 7.7, 16.1–16.4. The single-implementation claims are structural, so the
-      # design verifies them with this static check rather than a property test.
-      - name: Guard — single shared implementation and layering
+      # Requirements 3.8, 7.7, 16.1–16.4, 22.17, 1.9. The single-implementation claims, the
+      # entitlement-gate isolation, and profiles.phone reader-freedom are structural, so the design
+      # verifies them with this static check rather than a property test.
+      - name: Guard — single shared implementation, entitlement isolation, phone reader-freedom
         run: npm run check:shared-implementation
+
+      # Requirement 13.7 / D18. Tenant isolation is application-enforced under A3: the mongodb driver
+      # and the raw handle may live only under src/lib/db/**. This is the guard that proves it, the
+      # sibling of check:secret-scope.
+      - name: Guard — data-access-layer boundary
+        run: npm run check:data-access
 
       - name: Unit suite
         run: npm run test:unit
@@ -134,37 +126,22 @@ jobs:
         run: npm run test:property
 
       # Last because it is the slowest and everything above is a stricter signal. It also re-runs
-      # the type check inside `next build`, which is a free cross-check of the gate above.
+      # the type check inside `next build`, a free cross-check of the gate above.
       - name: Production build
         run: npm run build
 
       # -----------------------------------------------------------------------
-      # The accessibility scan named in task 28.6 EXISTS, and the "Unit suite" step above is what
-      # gates it.
-      #
-      # Task 26.3 landed it as `tests/unit/accessibility.test.tsx`, inside the vitest `unit`
-      # project: an axe violation on any scanned screen fails that step. So this step still wires
-      # no scan of its own — running one here would be a second implementation of 26.3's job.
-      #
-      # What it does instead is assert the two facts whose absence would make that gate disappear
-      # with nothing in this workflow turning red:
-      #
-      #   1. an accessibility engine is still a declared dependency, and
-      #   2. the scan file is still where the unit project's glob picks it up.
-      #
-      # Both are failures rather than warnings now. This was a warn-only step for as long as there
-      # was nothing to check; a scan that has been deleted is a lost gate, not a note.
-      #
-      # It cannot assert conformance, and neither can any other job here. The scan prints its own
-      # limits on every run — no contrast evaluation under jsdom, the diagnosis detail screen
-      # unscanned, and the manual screen-reader pass in task 30.1 still outstanding.
+      # The accessibility scan EXISTS and the "Unit suite" step above gates it.
+      # `tests/unit/accessibility.test.tsx` runs in the vitest `unit` project: an axe violation on
+      # any scanned screen fails that step. This step wires no scan of its own — it asserts the two
+      # facts whose absence would make that gate disappear with nothing turning red.
       # -----------------------------------------------------------------------
       - name: Assert the accessibility scan is present and gated
         run: |
           set -euo pipefail
 
           if ! grep -Eq '"(axe-core|jest-axe|vitest-axe|@axe-core/[a-z0-9-]+|pa11y|pa11y-ci)"[[:space:]]*:' package.json; then
-            echo "::error title=No accessibility engine::Task 26.3's scan needs one and package.json declares none, so the 'Unit suite' step cannot be gating accessibility. Restore the dependency or, if the scan was removed deliberately, say so here instead of leaving a green run that looks like coverage."
+            echo "::error title=No accessibility engine::The scan needs one and package.json declares none, so the 'Unit suite' step cannot be gating accessibility. Restore the dependency or say so here instead of leaving a green run that looks like coverage."
             exit 1
           fi
 
@@ -173,79 +150,62 @@ jobs:
             exit 1
           fi
 
-          echo "::notice title=Accessibility scan is gated by the unit suite::tests/unit/accessibility.test.tsx runs axe-core over the sign-in, diagnose, chat, voice and history screens in all three languages, and fails the 'Unit suite' step on a violation. It is NOT WCAG conformance: contrast is not evaluated under jsdom, the diagnosis detail screen is not scanned, and full conformance still requires the manual screen-reader pass tracked in task 30.1, which no CI job can perform."
+          echo "::notice title=Accessibility scan is gated by the unit suite::tests/unit/accessibility.test.tsx runs axe-core over the sign-in, diagnose, chat, voice and history screens in all three languages, and fails the 'Unit suite' step on a violation. It is NOT WCAG conformance: contrast is not evaluated under jsdom, the diagnosis detail screen is not scanned, and full conformance still requires the manual screen-reader pass tracked in task 30.1."
 
       - name: Record what this run did and did not gate
         if: always()
         run: |
           {
-            echo '## Jamee release gates'
+            echo '## Jamee release gates (Amendment A3)'
             echo
             echo "Node \`${NODE_VERSION}\` · no environment configured · no secrets used"
             echo
             echo '### Gated here'
             echo '- `tsc --noEmit` (strict) — Requirement 17.8'
             echo '- `eslint .`'
-            echo '- `check:secret-scope` — Requirements 13.4, 13.7'
-            echo '- `check:shared-implementation` — Requirements 3.8, 7.7, 16.1–16.4'
+            echo '- `check:secret-scope` — Requirement 13.7'
+            echo '- `check:shared-implementation` — Requirements 3.8, 7.7, 16.1–16.4, 22.17, 1.9'
+            echo '- `check:data-access` — Requirement 13.7 / D18 (the Data_Access_Layer boundary)'
             echo '- unit suite · property suite'
-            echo '- **accessibility scan** — `tests/unit/accessibility.test.tsx`, inside the unit suite (task 26.3)'
+            echo '- **accessibility scan** — `tests/unit/accessibility.test.tsx`, inside the unit suite'
             echo '- `next build`'
             echo
             echo '### Gated in the second job'
-            echo '- integration suite, against a real Supabase stack, with an assertion that it actually executed'
+            echo '- integration suite, in-process against mongodb-memory-server, with an assertion that it actually executed'
             echo
             echo '### NOT gated, and why'
-            echo '- **WCAG conformance** — the scan above is automated only: no contrast evaluation under jsdom, the diagnosis detail screen unscanned, and no screen reader involved'
-            echo '- **`check:deployment`** — needs a live deployment and real credentials; belongs to `docs/DEPLOYMENT.md` steps 3 and 7'
+            echo '- **WCAG conformance** — the scan above is automated only'
+            echo '- **`check:deployment`** — needs a live Atlas cluster and a deployed origin; belongs to `docs/DEPLOYMENT.md`'
             echo '- **Node 22.12** — the lower bound of `engines`; CI runs the 24 line only'
-            echo '- **manual validation** — SMS OTP delivery, hi/mr transcription quality, WhatsApp from a handset, screen-reader pass (`docs/TESTING_REPORT.md`)'
+            echo '- **manual validation** — Google sign-in on a device, hi/mr transcription quality, Telegram end to end, one real checkout, screen-reader pass (`docs/TESTING_REPORT.md`)'
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # Job 2 — the integration suite, against a real stack.
+  # Job 2 — the integration suite, in-process against mongodb-memory-server.
   #
-  # WHY A SEPARATE JOB. The suite needs Postgres, Auth, PostgREST and Storage all running.
-  # `tests/integration/database.ts` is explicit that a bare Postgres is not enough: RLS is
-  # evaluated against `auth.uid()`, which only exists when a request carries a session JWT the Auth
-  # service minted. So a `services: postgres:...` container could not run this suite — it takes the
-  # local Supabase stack, which means Docker, which means its own job.
+  # WHY A SEPARATE JOB. The suite starts a MongoDB replica set through `mongodb-memory-server`
+  # (V31), which downloads a real MongoDB binary on first run. Isolating it keeps that cost off the
+  # fast static/unit job and lets it cache the binary independently.
   #
-  # WHY `needs: gates`. Spinning the stack up costs minutes of image pulls. There is no value in
-  # paying that for a tree that does not type check.
+  # WHY A REPLICA SET. The linking consume-and-bind and the payment grant-plus-extend run inside
+  # multi-document transactions (D19), and MongoDB transactions require a replica set (V33).
+  # `tests/integration/mongo.ts` starts a single-node one; there is no external Postgres, no Docker,
+  # and no local Supabase stack anymore.
   #
-  # WHY IT IS NOT ALLOWED TO SELF-SKIP. `npm test` runs three projects and the integration project
-  # reports as SKIPPED when `JAMEE_TEST_DATABASE_URL` is absent — by design, so a developer with no
-  # database still gets a green run. That design is right locally and wrong in CI: a skipped suite
-  # would show a green tick that means "did not run". Two things prevent it here. The job sets the
-  # variable from the stack it just started, and the final step reads the run's JSON report and
-  # FAILS when zero tests executed. A broken stack setup therefore fails loudly instead of passing
-  # as coverage.
+  # WHY `needs: gates`. No value in paying the binary download for a tree that does not type check.
   #
-  # HONEST STATUS OF THIS JOB. It has never executed — no git remote is configured, so no GitHub
-  # Actions run exists to confirm it. Every step follows the sequence `tests/integration/database.ts`
-  # documents for a local stack, and that sequence HAS now been walked by hand: the suite passed
-  # 104/104 across 9 files against a live local stack in `5d4aca2`. So the steps are known-good
-  # locally and unproven on a runner; those are different claims.
+  # WHY IT IS NOT ALLOWED TO SELF-SKIP. `tests/integration/mongo.ts` always tries to start the
+  # server and RETHROWS on a failed binary download rather than skipping (the harness is explicit
+  # that a skipped suite is a broken gate, not coverage). The final step below also reads the run's
+  # JSON report and FAILS when zero tests executed, so a download or startup problem shows up as a
+  # red job rather than a false green.
   #
-  # The first-run adjustment this comment used to anticipate is already applied. `tests/integration/
-  # farmers.ts` notes that some stacks refuse a phone on the admin create endpoint until the phone
-  # provider is enabled under `[auth.sms]`, and the now-committed `supabase/config.toml` sets
-  # `[auth.sms] enable_signup = true` (with the Twilio provider left disabled, so nothing is ever
-  # sent). If a phone-refusal still surfaces here, the fix belongs with task 29.1, which owns the
-  # harness and its documented setup. The zero-tests assertion below is what guarantees any setup
-  # problem shows up as a red job rather than a false green.
-  #
-  # WHAT IT COVERS TODAY. Nine files, 104 tests. `harness.test.ts` (task 29.1 — RLS tenant
-  # isolation, the five seeded conditions, the profile trigger), `release-acceptance.test.ts`
-  # (task 31.1), and the four per-channel scenario suites tasks 29.2 to 29.5 added —
-  # `image-scenarios`, `chat-scenarios`, `voice-scenarios`, `whatsapp-scenarios` — so the
-  # requirements' scenario matrix is now gated here rather than pending. They needed no workflow
-  # edit: the project glob already includes `tests/integration/**`, which was the point of wiring
-  # this job before they landed.
+  # THE BINARY CACHE. `mongodb-memory-server` downloads its binary to `~/.cache/mongodb-binaries`
+  # (its default on Linux). Caching that directory across runs turns a ~30s first-run download into
+  # a cache hit. The cache key is keyed on the lockfile so a version bump re-downloads.
   # ---------------------------------------------------------------------------
   integration:
-    name: Integration suite (real Supabase stack)
+    name: Integration suite (mongodb-memory-server)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: gates
@@ -263,84 +223,19 @@ jobs:
       - name: Install dependencies from the lockfile
         run: npm ci
 
-      # Pinned rather than `latest`. The CLI pins the container image tags it starts, so a fixed CLI
-      # version means a fixed stack — which is what a gate needs. Bump it deliberately.
-      - name: Install the Supabase CLI
-        uses: supabase/setup-cli@v1
+      # Cache the downloaded MongoDB binary so only the first run pays the download. Keyed on the
+      # lockfile: bumping mongodb-memory-server changes the binary and re-downloads.
+      - name: Cache the mongodb-memory-server binary
+        uses: actions/cache@v4
         with:
-          version: 2.117.0
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            mongodb-binaries-${{ runner.os }}-
 
-      # The repository ships `supabase/migrations` AND `supabase/config.toml` — the config was
-      # committed in `5d4aca2`, so on a normal checkout this step takes its first branch and
-      # `supabase init` never runs. The `else` is kept rather than deleted: it is the branch this
-      # step was written for, it costs nothing, and it keeps the job working on a checkout where the
-      # config is absent. Never remove the `-f` guard — an unconditional `supabase init` would
-      # overwrite the committed config, and with it the non-default ports and the whole header
-      # explaining them.
-      #
-      # NOTE ON PORTS. The committed config uses the 553xx range, not the Supabase defaults, for
-      # reasons its own header gives. That is fine here: a runner has no competing stack, and the
-      # export step below reads the real values back out of `supabase status -o env` rather than
-      # assuming any port. Do not hardcode a port in this job.
-      - name: Initialize the Supabase project config
-        run: |
-          set -euo pipefail
-          if [ -f supabase/config.toml ]; then
-            echo "supabase/config.toml is committed — using it as is."
-          else
-            supabase init
-          fi
-
-      # `supabase start` applies `supabase/migrations` in order on a fresh container, including
-      # 0009's buckets and 0010's five seed rows — exactly the state the harness asserts. The local
-      # instructions also run `supabase db reset`; on a throwaway runner the container is already
-      # new, so that second pass would recreate it to reach the state `start` just produced.
-      - name: Start the local Supabase stack
-        run: supabase start
-
-      # `supabase status -o env` prints shell assignments: API_URL, DB_URL, ANON_KEY,
-      # SERVICE_ROLE_KEY and friends. It is sourced from the runner temp directory rather than the
-      # working tree, and never echoed.
-      #
-      # The variable NAMES on the right are the application's own, which is what
-      # `tests/integration/database.ts` reads — no test-only aliases, so the harness resolves its
-      # clients the way production does.
-      #
-      # These keys are the CLI's fixed local-stack values, byte-identical on every machine that
-      # runs `supabase start`. They are scaffolding, not credentials.
-      - name: Export the stack's connection details
-        run: |
-          set -euo pipefail
-          env_file="${RUNNER_TEMP}/supabase-env.sh"
-          supabase status -o env > "${env_file}"
-
-          set -a
-          # shellcheck disable=SC1090
-          . "${env_file}"
-          set +a
-
-          missing=''
-          [ -n "${DB_URL:-}" ]            || missing="${missing} DB_URL"
-          [ -n "${API_URL:-}" ]           || missing="${missing} API_URL"
-          [ -n "${ANON_KEY:-}" ]          || missing="${missing} ANON_KEY"
-          [ -n "${SERVICE_ROLE_KEY:-}" ]  || missing="${missing} SERVICE_ROLE_KEY"
-
-          if [ -n "${missing}" ]; then
-            echo "::error title=Stack details missing::supabase status -o env produced no value for:${missing}. Without these the integration suite would self-skip and report green, so this fails now instead."
-            exit 1
-          fi
-
-          {
-            echo "JAMEE_TEST_DATABASE_URL=${DB_URL}"
-            echo "NEXT_PUBLIC_SUPABASE_URL=${API_URL}"
-            echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${ANON_KEY}"
-            echo "SUPABASE_SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}"
-          } >> "$GITHUB_ENV"
-
-          rm -f "${env_file}"
-          echo "Exported the database URL, API URL, anon key and service-role key."
-
-      # `default` keeps the log readable; `json` produces the report the next step audits.
+      # `default` keeps the log readable; `json` produces the report the next step audits. The suite
+      # starts its own in-memory replica set (V31/V33) — no environment is exported and no service
+      # is provisioned, because there is nothing external to point it at.
       - name: Integration suite
         run: |
           npm run test:integration -- \
@@ -349,8 +244,8 @@ jobs:
             --outputFile.json="${RUNNER_TEMP}/integration-report.json"
 
       # The gate on the gate. A vitest run in which every test was skipped exits 0, so without this
-      # a stack that came up wrong would look like passing integration coverage. `if: always()` so
-      # the audit still reports when the suite itself failed.
+      # a harness that failed to start its replica set would look like passing coverage. `if:
+      # always()` so the audit still reports when the suite itself failed.
       - name: Assert the integration suite actually executed
         if: always()
         run: |
@@ -376,7 +271,7 @@ jobs:
             }
 
             if (passed === 0) {
-              console.error("::error title=Integration suite did not run::Zero tests executed. The integration project self-skips when JAMEE_TEST_DATABASE_URL is unset, so this is a broken gate rather than passing coverage. Check the stack startup and the export step above.");
+              console.error("::error title=Integration suite did not run::Zero tests executed. The suite runs against mongodb-memory-server in replica-set mode; a run that executed nothing is a broken gate rather than passing coverage. Check the binary download and the harness startup in tests/integration/mongo.ts.");
               process.exit(1);
             }
 
