@@ -1,22 +1,91 @@
-/*
- * History screen shell.
- *
- * Design: "Mobile layout and accessibility" — mobile-first, single column. Sizes are relative so a
- * larger OS font setting widens the column with the text instead of squeezing it. Slightly wider
- * than `/profile`'s form column because each entry is a thumbnail beside four labelled facts.
- * Leading comes from `globals.css`, which owns the Devanagari floor.
- */
-
-.page {
-  max-width: 32rem;
-  margin: 0 auto;
-  /* Bottom padding keeps the last entry clear of a phone's browser chrome. */
-  padding: 1.5rem 1rem 4rem;
-  color: #1f2937;
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
 }
 
-.heading {
-  margin: 0 0 1.25rem;
+.summaryCard {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 1rem;
+  color: #475569;
+  background: #ffffff;
+  border: 1px solid var(--color-border);
+  border-radius: 1rem;
+  box-shadow: 0 0.4rem 1.25rem rgba(15, 23, 42, 0.04);
+}
+
+.summaryCard span {
+  overflow: hidden;
+  font-size: 0.75rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summaryCard strong {
+  color: #0f172a;
   font-size: 1.75rem;
   line-height: var(--line-height-tight);
+}
+
+.sectionCard {
+  max-width: 62rem;
+  margin-bottom: 1rem;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid var(--color-border);
+  border-radius: 1.5rem;
+  box-shadow: var(--shadow-card);
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.sectionHeader h2 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 1.25rem;
+}
+
+.sectionHeader p {
+  max-width: 40rem;
+  margin: 0.3rem 0 0;
+  color: #64748b;
+  font-size: 0.875rem;
+}
+
+.syncBadge {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.65rem;
+  color: #14532d;
+  background: #dcfce7;
+  border: 1px solid #bbf7d0;
+  border-radius: 999rem;
+  font-size: 0.6875rem;
+  font-weight: 800;
+}
+
+@media (max-width: 30rem) {
+  .summaryGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .summaryCard {
+    align-items: center;
+    flex-direction: row;
+    justify-content: space-between;
+  }
+
+  .summaryCard span {
+    white-space: normal;
+  }
 }

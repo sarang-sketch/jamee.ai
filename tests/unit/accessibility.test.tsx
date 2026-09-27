@@ -235,15 +235,15 @@ function shell({ language, heading, headingId }: ShellOptions, children: ReactNo
 /* ========================================================================== */
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
-const MESSAGE_ID = '55555555-5555-4555-8555-555555555555';
+const CONVERSATION_ID = '4'.repeat(24);
+const MESSAGE_ID = '5'.repeat(24);
 
 /** `/voice`'s heading id is private to its page module, so the pattern is mirrored, not imported. */
 const VOICE_HEADING_ID = 'jamee-voice-heading';
 
 const STORED_ROWS: readonly ChatMessageRow[] = [
   {
-    id: '66666666-6666-4666-8666-666666666666',
+    id: '6'.repeat(24),
     role: 'jamee',
     content: 'Dark rings on the lower leaves point to Tomato Early Blight.',
     language: 'en',
@@ -251,7 +251,7 @@ const STORED_ROWS: readonly ChatMessageRow[] = [
     createdAt: '2026-09-15T06:01:00.000Z',
   },
   {
-    id: '77777777-7777-4777-8777-777777777777',
+    id: '7'.repeat(24),
     role: 'farmer',
     content: 'What should I spray on my potatoes?',
     language: 'en',
@@ -309,7 +309,7 @@ function voiceResponse(language: Language): VoiceResponse {
 /** Both image states Requirement 12.1's list can be in, plus the one where neither survived. */
 const HISTORY_ENTRIES: readonly HistoryEntry[] = [
   {
-    id: '22222222-2222-4222-8222-222222222222',
+    id: '2'.repeat(24),
     condition: 'Tomato Early Blight',
     severity: 'moderate',
     channel: 'web',
@@ -317,7 +317,7 @@ const HISTORY_ENTRIES: readonly HistoryEntry[] = [
     image: { kind: 'full', url: 'https://signed.test/crop-images/a.jpg?token=t' },
   },
   {
-    id: '33333333-3333-4333-8333-333333333333',
+    id: '3'.repeat(24),
     condition: null,
     severity: 'none',
     channel: 'telegram',
@@ -325,7 +325,7 @@ const HISTORY_ENTRIES: readonly HistoryEntry[] = [
     image: { kind: 'thumbnail', url: 'https://signed.test/crop-images/b.thumb.jpg?token=t' },
   },
   {
-    id: '44444444-4444-4444-8444-444444444444',
+    id: '4'.repeat(24),
     condition: 'Potato Late Blight',
     severity: 'high',
     channel: 'web',

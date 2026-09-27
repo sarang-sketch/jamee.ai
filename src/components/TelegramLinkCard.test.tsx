@@ -19,16 +19,17 @@ const noop = (): void => undefined;
 
 describe('TelegramLinkCard', () => {
   it('when linked, shows the linked state and the unlink control (21.15)', () => {
-    const html = renderToStaticMarkup(<TelegramLinkCard isLinked language="en" onChanged={noop} />);
+    const html = renderToStaticMarkup(<TelegramLinkCard botUsername="jamee_bot" isLinked language="en" onChanged={noop} />);
     const { access } = messages('en');
     expect(html).toContain(access.linkedState);
+    expect(html).toContain('@jamee_bot');
     expect(html).toContain(access.unlinkButton);
     expect(html).not.toContain(access.linkButton);
     expect(html).toContain('role="status"');
   });
 
   it('when not linked, shows the not-linked state and the link control (21.20)', () => {
-    const html = renderToStaticMarkup(<TelegramLinkCard isLinked={false} language="en" onChanged={noop} />);
+    const html = renderToStaticMarkup(<TelegramLinkCard botUsername="jamee_bot" isLinked={false} language="en" onChanged={noop} />);
     const { access } = messages('en');
     expect(html).toContain(access.notLinkedState);
     expect(html).toContain(access.linkButton);
@@ -36,7 +37,7 @@ describe('TelegramLinkCard', () => {
   });
 
   it('renders its copy in the farmer’s saved language (hi)', () => {
-    const html = renderToStaticMarkup(<TelegramLinkCard isLinked={false} language="hi" onChanged={noop} />);
+    const html = renderToStaticMarkup(<TelegramLinkCard botUsername="jamee_bot" isLinked={false} language="hi" onChanged={noop} />);
     const { access } = messages('hi');
     expect(html).toContain(access.linkHeading);
     expect(html).toContain(access.linkButton);

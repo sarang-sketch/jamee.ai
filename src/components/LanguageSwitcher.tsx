@@ -35,13 +35,17 @@ import styles from './LanguageSwitcher.module.css';
  * It also touches no result content. Requirement 9.4's canonical disease name is not translated
  * by anything here: this component renders three static labels and nothing else.
  */
-export function LanguageSwitcher() {
+export interface LanguageSwitcherProps {
+  compact?: boolean;
+}
+
+export function LanguageSwitcher({ compact = false }: LanguageSwitcherProps) {
   const { language, setLanguage } = useLanguage();
   const { ui } = messages(language);
   const fieldId = useId();
 
   return (
-    <div className={styles.field}>
+    <div className={`${styles.field} ${compact ? styles.compact : ''}`}>
       {/**
        * A real `<label for>`: visible text AND the accessible name, from one element. The label
        * is in the ACTIVE language ("Language" / "भाषा") while the options are each in their own —

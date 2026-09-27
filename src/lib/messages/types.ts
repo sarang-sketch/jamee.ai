@@ -70,6 +70,8 @@ export interface MessageCatalog {
 
   /** Requirements 4.7 and 7.6 — the honest referral, made with no model call. */
   chat: {
+    /** Friendly capability introduction for greetings and simple questions about Jamee itself. */
+    welcome: string;
     /** 4.7 — the question is about a crop or condition Jamee does not cover. */
     outOfScope: string;
     /** 7.6 — the topic is in scope but no verified content answers the question. */
@@ -126,6 +128,28 @@ export interface MessageCatalog {
     navVoice: string;
     navHistory: string;
     navProfile: string;
+    /** Keyboard shortcut link rendered before the authenticated shell. */
+    skipToContent: string;
+    /** Compact product descriptor shared by the sidebar and page headers. */
+    shellEyebrow: string;
+    /** Account reassurance shown beside the signed-in farmer. */
+    secureSession: string;
+    /** A failed Better Auth sign-out remains actionable and localized. */
+    signOutFailed: string;
+    welcomeHeading: string;
+    welcomeBody: string;
+    signInCardHeading: string;
+    signInCardBody: string;
+    freeWebAccess: string;
+    diagnoseDescription: string;
+    chatDescription: string;
+    voiceDescription: string;
+    historyDescription: string;
+    profileDescription: string;
+    recentActivityHeading: string;
+    recentActivityDescription: string;
+    diagnosisHistoryHeading: string;
+    activityEmpty: string;
     chooseImage: string;
     /**
      * The second of the uploader's two file inputs — the one carrying `capture="environment"`,
@@ -358,6 +382,14 @@ export interface MessageCatalog {
     linkedState: string;
     /** Shown when no Telegram account is linked yet. */
     notLinkedState: string;
+    /** Public @username of the official bot — never the secret bot token. */
+    botIdLabel: string;
+    /** Opens the public bot profile without minting an account-link token. */
+    openBot: string;
+    /** Explains the secure deep-link handoff and return-to-site step. */
+    linkInstructions: string;
+    /** Re-reads MongoDB after the farmer completes `/start` in Telegram. */
+    checkLink: string;
   };
 
   /** Requirement 15.4/26.2 — severity is conveyed by LABEL TEXT, never by colour alone. */

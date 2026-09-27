@@ -32,29 +32,15 @@
  * if one did, it would not be imported here: `src/lib/**` never imports from `src/app/**` (design,
  * project structure), and that rule is worth more than deduplicating the string `'/'`.
  */
-export const SIGN_IN_PATH = '/';
+export const SIGN_IN_PATH = '/login';
 
 /**
- * Every screen that requires a session, as a path prefix.
- *
- * The first four are Requirement 1.6's own enumeration. The last two are the same farmer-private
- * data reached by another URL, and are gated for that reason rather than by 1.6's letter:
- *
- *  - `/diagnosis` is the detail view of a single diagnosis (Requirement 12.3) — the diagnosis
- *    screen with an id in the path, so leaving it open would gate the list and not the row;
- *  - `/profile` shows and edits the farmer's own display name and language (Requirement 1.8).
- *
- * The Data_Access_Layer scopes every read to the requesting farmer's id (Requirement 13.2), so an
- * anonymous request on any of them has no session id to scope by and would surface no row — an
- * ungated page could not leak data, it would render an empty screen instead of a sign-in
- * prompt, which is a worse answer to the same question.
- *
- * **`/api/**` is deliberately absent.** An unauthenticated API request must receive the
- * `AUTH_REQUIRED` envelope with HTTP 401 (Requirement 1.7), not a 307 to an HTML page. That half
- * of the gate belongs to `lib/api/authenticated-route.ts`, and the Proxy's matcher excludes `/api`
- * so the two halves cannot answer the same request differently.
+ * Every screen that requires a server-confirmed session. `/app` covers the new unified workspace
+ * and all nested conversation, history, connect, and profile routes; the legacy screens remain
+ * protected for backward-compatible bookmarks.
  */
 export const PROTECTED_SCREEN_PATHS = [
+  '/app',
   '/diagnose',
   '/diagnosis',
   '/chat',

@@ -67,9 +67,9 @@ vi.mock('@/services/chat.service', () => ({ chatTurn: spies.chatTurn }));
 /* -------------------------------------------------------------------------- */
 
 const USER = '11111111-1111-4111-8111-111111111111';
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
-const FARMER_MESSAGE_ID = '66666666-6666-4666-8666-666666666666';
-const ANSWER_MESSAGE_ID = '77777777-7777-4777-8777-777777777777';
+const CONVERSATION_ID = '4'.repeat(24);
+const FARMER_MESSAGE_ID = '6'.repeat(24);
+const ANSWER_MESSAGE_ID = '7'.repeat(24);
 
 const QUOTA: QuotaStatus = {
   operation: 'chat',

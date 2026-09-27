@@ -6,9 +6,12 @@ import { activeLanguage } from '@/lib/language.server';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Jamee',
+  title: {
+    default: 'Jamee — AI crop-care assistant',
+    template: '%s | Jamee',
+  },
   description:
-    'Crop disease detection for farmers, with answers in English, Hindi and Marathi.',
+    'Show Jamee a crop photo, ask a question, or speak naturally in English, Hindi, or Marathi.',
 };
 
 export const viewport: Viewport = {

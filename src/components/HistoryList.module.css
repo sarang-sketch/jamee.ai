@@ -28,11 +28,12 @@
   display: flex;
   align-items: flex-start;
   gap: 0.875rem;
-  padding: 0.75rem;
-  border: 1px solid #e2e8f0;
-  border-radius: 0.75rem;
-  background: #ffffff;
+  padding: 0.85rem;
   color: inherit;
+  background: #ffffff;
+  border: 1px solid #dbe4df;
+  border-radius: 1rem;
+  box-shadow: 0 0.35rem 1rem rgba(15, 23, 42, 0.045);
   text-decoration: none;
 }
 

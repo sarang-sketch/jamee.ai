@@ -36,3 +36,5 @@ yarn-error.log*
 # editors / os
 .DS_Store
 *.pem
+.kiro/settings/*.lock
+

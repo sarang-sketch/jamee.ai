@@ -555,7 +555,7 @@ export function geminiVisionAdapter(
 }
 
 /**
- * `text-generate` on Gemini — the primary member of that chain.
+ * `text-generate` on Gemini — the fallback member of the Groq-first text chain.
  *
  * Same model identifier as the vision adapter (V6: `gemini-3.8-flash` is stable and multimodal, so
  * one id serves both capabilities) and the same classification table. The difference is the output

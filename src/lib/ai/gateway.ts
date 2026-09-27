@@ -134,27 +134,17 @@ export type AdapterSet<TInput, TOutput> = Partial<
 /* ========================================================================== */
 
 const GEMINI_THEN_GROQ: readonly ProviderId[] = ['gemini', 'groq'];
+const GROQ_THEN_GEMINI: readonly ProviderId[] = ['groq', 'gemini'];
 const GEMINI_ONLY: readonly ProviderId[] = ['gemini'];
 const GROQ_ONLY: readonly ProviderId[] = ['groq'];
 
 /**
  * The provider order for a capability.
  *
- * **`vision-classify` is a single config read, not a branch.** V9 resolved that Groq hosts
- * vision-capable models, so the chain has two members today — but both candidates are *Preview*
- * models, "intended for evaluation purposes only… may be discontinued at short notice". Withdrawal
- * is therefore expected, and the whole edit is setting `VISION_FALLBACK_MODEL` to `null` in
- * `config/verified.ts`: this function returns a one-member chain, no call site moves, and no test
- * changes. Requirement 14.8 is what makes that safe — `run()` reaches its exhausted-chain throw by
- * exactly one route, so a one-member chain and a failed two-member chain are indistinguishable to
- * callers.
- *
- * `transcribe` has no cross-provider member by design (design: *Fallback matrix*, "None in this
- * release"). `whisper-large-v3` is a documented alternate, not a fallback: same host, so a Groq
- * outage takes both out.
- *
- * The parameter exists so both chain shapes are testable without mocking a module. It defaults to
- * the config value, which is what every production call site uses.
+ * Image classification keeps Gemini's schema-enforced vision path first and the optional Groq
+ * vision model second. Text generation — including website chat and the answer half of voice —
+ * uses Groq first and Gemini second. Transcription remains Groq-only because Gemini transcription
+ * is not implemented in this release.
  */
 export function chainOrderFor(
   capability: Capability,
@@ -164,7 +154,7 @@ export function chainOrderFor(
     case 'vision-classify':
       return visionFallbackModel === null ? GEMINI_ONLY : GEMINI_THEN_GROQ;
     case 'text-generate':
-      return GEMINI_THEN_GROQ;
+      return GROQ_THEN_GEMINI;
     case 'transcribe':
       return GROQ_ONLY;
   }

@@ -76,7 +76,7 @@ export const GEMINI_GENERATION = {
 } as const;
 
 /* ========================================================================== */
-/* Groq — text fallback, conditional vision fallback, and transcription        */
+/* Groq — primary text generation, conditional vision fallback, and transcription */
 /* ========================================================================== */
 
 /**

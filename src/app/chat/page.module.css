@@ -1,23 +1,32 @@
-/*
- * Chat screen shell.
- *
- * Design: "Mobile layout and accessibility" — mobile-first, single column, primary actions in
- * thumb reach. Same shape and the same reasoning as `app/diagnose/page.module.css`: sizes are
- * relative so a larger OS font setting widens the column with the text instead of squeezing it,
- * and there is no time-driven CSS anywhere (Requirement 15.2). Leading comes from `globals.css`,
- * which owns the Devanagari floor.
- */
-
-.page {
-  max-width: 26rem;
-  margin: 0 auto;
-  /* Bottom padding keeps the send control clear of a phone's browser chrome. */
-  padding: 1.5rem 1rem 4rem;
-  color: #1f2937;
+.chatCard {
+  display: flex;
+  max-width: 52rem;
+  min-block-size: 34rem;
+  flex-direction: column;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid var(--color-border);
+  border-radius: 1.5rem;
+  box-shadow: var(--shadow-card);
 }
 
-.heading {
-  margin: 0 0 1.25rem;
-  font-size: 1.75rem;
-  line-height: var(--line-height-tight);
+.channelHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.8rem;
+  color: #475569;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 0.8125rem;
+  font-weight: 750;
+}
+
+.statusDot {
+  width: 0.6rem;
+  height: 0.6rem;
+  background: #16a34a;
+  border: 0.15rem solid #dcfce7;
+  border-radius: 50%;
 }

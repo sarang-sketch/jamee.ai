@@ -141,9 +141,11 @@ export const en: MessageCatalog = {
   },
 
   chat: {
+    welcome:
+      'Hi! I’m Jamee, your AI crop-care assistant. Show me a tomato or potato photo, ask a crop question, or use the microphone to speak naturally.',
     /** Requirement 4.7 — states the coverage limit and recommends an expert. No model call. */
     outOfScope:
-      'Jamee covers tomato and potato conditions only. For this question, please consult an agricultural expert.',
+      'I can help with tomato and potato crop conditions. For questions about other crops, please consult a local agricultural expert.',
     /** Requirement 7.6 — in scope, but no verified content answers it. */
     noVerifiedInfo:
       'Jamee does not have verified information for that question. Please consult an agricultural expert.',
@@ -176,6 +178,26 @@ export const en: MessageCatalog = {
     navVoice: 'Speak a question',
     navHistory: 'My results',
     navProfile: 'My details',
+    skipToContent: 'Skip to main content',
+    shellEyebrow: 'Your crop care workspace',
+    secureSession: 'Protected with Google',
+    signOutFailed: 'Could not sign out. Please try again.',
+    welcomeHeading: 'A clearer answer for every crop concern.',
+    welcomeBody:
+      'Check a leaf, ask follow-up questions, and keep your website and Telegram care history together.',
+    signInCardHeading: 'Welcome to Jamee',
+    signInCardBody: 'Use your Google account to open your private farmer workspace.',
+    freeWebAccess: 'Website access is free',
+    diagnoseDescription: 'Upload or take a clear leaf photo for a grounded crop health check.',
+    chatDescription: 'Ask follow-up questions and continue your website conversation.',
+    voiceDescription: 'Speak naturally and get a written transcript with a grounded answer.',
+    historyDescription: 'See diagnoses and conversations from the website and Telegram in one place.',
+    profileDescription: 'Manage your language, Telegram connection, and bot access.',
+    recentActivityHeading: 'Recent conversations',
+    recentActivityDescription: 'Your latest website and Telegram messages, synced from MongoDB.',
+    diagnosisHistoryHeading: 'Crop diagnosis history',
+    activityEmpty:
+      'No conversation messages yet. Ask on the website or send a message to the linked Telegram bot.',
     chooseImage: 'Choose a crop photo',
     captureImage: 'Take a crop photo',
     imageHint: 'JPG, PNG or WebP, up to {maxMb} MB. Photograph the affected leaf in daylight.',
@@ -292,6 +314,11 @@ export const en: MessageCatalog = {
     unlinkButton: 'Unlink this Telegram account',
     linkedState: 'A Telegram account is linked to your Jamee account.',
     notLinkedState: 'No Telegram account is linked yet.',
+    botIdLabel: 'Official Telegram bot ID',
+    openBot: 'Open Telegram bot',
+    linkInstructions:
+      'Use the secure link, press Start in Telegram, then return here and check the connection.',
+    checkLink: 'Check connection',
   },
 
   severity: {

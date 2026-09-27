@@ -106,8 +106,10 @@ export const hi: MessageCatalog = {
   },
 
   chat: {
+    welcome:
+      'नमस्ते! मैं जामी हूँ—आपका एआई फसल-देखभाल सहायक। टमाटर या आलू की फोटो दिखाएँ, फसल का सवाल पूछें या माइक्रोफोन से सहज बोलें।',
     outOfScope:
-      'जामी केवल टमाटर और आलू की बीमारियों को देखता है। इस प्रश्न के लिए कृपया किसी कृषि विशेषज्ञ से पूछें।',
+      'मैं टमाटर और आलू की फसल स्थितियों में मदद कर सकता हूँ। दूसरी फसलों के सवालों के लिए स्थानीय कृषि विशेषज्ञ से सलाह लें।',
     noVerifiedInfo:
       'इस प्रश्न के लिए जामी के पास जाँची गई जानकारी नहीं है। कृपया किसी कृषि विशेषज्ञ से पूछें।',
   },
@@ -133,6 +135,26 @@ export const hi: MessageCatalog = {
     navVoice: 'बोलकर पूछें',
     navHistory: 'मेरे परिणाम',
     navProfile: 'मेरी जानकारी',
+    skipToContent: 'मुख्य सामग्री पर जाएँ',
+    shellEyebrow: 'आपका फसल सहायता केंद्र',
+    secureSession: 'Google से सुरक्षित',
+    signOutFailed: 'साइन आउट नहीं हो पाया। कृपया फिर कोशिश करें।',
+    welcomeHeading: 'फसल की हर चिंता का साफ जवाब।',
+    welcomeBody:
+      'पत्ती जाँचें, आगे के प्रश्न पूछें, और वेबसाइट व Telegram की पूरी सहायता हिस्ट्री एक साथ रखें।',
+    signInCardHeading: 'जामी में आपका स्वागत है',
+    signInCardBody: 'अपना निजी किसान केंद्र खोलने के लिए Google खाते का उपयोग करें।',
+    freeWebAccess: 'वेबसाइट का उपयोग निःशुल्क है',
+    diagnoseDescription: 'सटीक फसल जाँच के लिए प्रभावित पत्ती की साफ फोटो चुनें या खींचें।',
+    chatDescription: 'आगे के प्रश्न पूछें और वेबसाइट पर अपनी बातचीत जारी रखें।',
+    voiceDescription: 'स्वाभाविक रूप से बोलें और लिखित प्रतिलिपि के साथ जाँचा हुआ जवाब पाएँ।',
+    historyDescription: 'वेबसाइट और Telegram के परिणाम व बातचीत एक ही जगह देखें।',
+    profileDescription: 'अपनी भाषा, Telegram कनेक्शन और बॉट सुविधा सँभालें।',
+    recentActivityHeading: 'हाल की बातचीत',
+    recentActivityDescription: 'MongoDB से जुड़ी आपकी नई वेबसाइट और Telegram बातचीत।',
+    diagnosisHistoryHeading: 'फसल जाँच हिस्ट्री',
+    activityEmpty:
+      'अभी कोई बातचीत नहीं है। वेबसाइट पर प्रश्न पूछें या जुड़े हुए Telegram बॉट को संदेश भेजें।',
     chooseImage: 'फसल की फोटो चुनें',
     captureImage: 'फसल की फोटो खींचें',
     imageHint: 'JPG, PNG या WebP, {maxMb} MB तक। प्रभावित पत्ती की फोटो दिन की रोशनी में लें।',
@@ -228,6 +250,11 @@ export const hi: MessageCatalog = {
     unlinkButton: 'यह Telegram खाता हटाएँ',
     linkedState: 'एक Telegram खाता आपके जामी खाते से जुड़ा है।',
     notLinkedState: 'अभी कोई Telegram खाता जुड़ा नहीं है।',
+    botIdLabel: 'आधिकारिक Telegram बॉट ID',
+    openBot: 'Telegram बॉट खोलें',
+    linkInstructions:
+      'सुरक्षित लिंक खोलें, Telegram में Start दबाएँ, फिर यहाँ लौटकर कनेक्शन जाँचें।',
+    checkLink: 'कनेक्शन जाँचें',
   },
 
   severity: {

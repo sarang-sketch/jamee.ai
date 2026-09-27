@@ -12,9 +12,10 @@
   align-items: flex-start;
   gap: 1rem;
   padding: 1.5rem 1.25rem;
-  border: 1px dashed #cbd5e1;
-  border-radius: 0.75rem;
+  color: #334155;
   background: #f8fafc;
+  border: 1px dashed #94a3b8;
+  border-radius: 1rem;
 }
 
 .message {

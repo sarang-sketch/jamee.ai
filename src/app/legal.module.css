@@ -1,0 +1,11 @@
+.page { min-block-size: 100dvh; padding: 1rem; color: #24342a; background: radial-gradient(circle at 10% 0%, rgba(74, 222, 128, 0.18), transparent 25rem), #f7faf8; }
+.card { width: min(100%, 46rem); margin: 2rem auto; padding: clamp(1.3rem, 5vw, 2.8rem); background: #fff; border: 1px solid #dce6de; border-radius: 1.3rem; box-shadow: 0 1.3rem 3.5rem rgba(15, 49, 27, 0.09); }
+.brand { display: inline-flex; align-items: center; gap: 0.65rem; color: #173523; text-decoration: none; }
+.brand strong { font-size: 1.2rem; }
+.logo { display: inline-flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(145deg, #27b95d, #155b31); border-radius: 0.85rem; }
+.logo svg { width: 70%; height: 70%; fill: currentColor; stroke: currentColor; }
+.eyebrow { margin: 2.4rem 0 0.5rem; color: #237443; font-size: 0.72rem; font-weight: 850; letter-spacing: 0.09em; text-transform: uppercase; }
+.card h1 { margin: 0 0 1.3rem; color: #102417; font-size: clamp(2rem, 7vw, 3.3rem); letter-spacing: -0.05em; }
+.card > p:not(.eyebrow) { color: #53645a; }
+.back { min-block-size: var(--tap-target-min); display: inline-flex; align-items: center; margin-top: 1.1rem; color: #176b37; font-weight: 800; text-decoration: none; }
+.card a:focus-visible { outline: 3px solid #4ade80; outline-offset: 3px; }

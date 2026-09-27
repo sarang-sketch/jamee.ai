@@ -635,13 +635,15 @@ export interface ChatDeps {
   readonly runOptions?: RunOptions | undefined;
 }
 
+export type ChatReferralReason = ReferralReason | 'small_talk';
+
 export interface ChatTurnOutcome {
   /** What the farmer reads. Never empty, and grounded in `answer.groundedIn` or in nothing at all. */
   readonly answer: PendingChatAnswer;
   /** The window this answer was produced from, so task 15.3 need not read it a second time. */
   readonly context: ConversationContext;
-  /** Set exactly when no model was called: which honest referral was returned (4.7 vs 7.6). */
-  readonly referralReason: ReferralReason | null;
+  /** Non-null when no model call was needed: a crop referral or a simple social greeting. */
+  readonly referralReason: ChatReferralReason | null;
   /** Which provider served the answer, or `null` when no model call was made at all. */
   readonly provider: ModelProvider | null;
   /** Requirement 14.7 — true when a fallback chain member served or was attempted. */
@@ -666,6 +668,41 @@ const REFERRAL_COPY = {
   out_of_scope: 'outOfScope',
   no_verified_content: 'noVerifiedInfo',
 } as const satisfies Record<ReferralReason, 'outOfScope' | 'noVerifiedInfo'>;
+
+const SMALL_TALK_PHRASES = new Set([
+  'hi',
+  'hello',
+  'hey',
+  'namaste',
+  'hey what are you doing',
+  'what are you doing',
+  'who are you',
+  'what can you do',
+  'how can you help me',
+  'how are you',
+  'नमस्ते',
+  'नमस्कार',
+  'हाय',
+  'आप कौन हैं',
+  'तुम कौन हो',
+  'आप क्या कर सकते हैं',
+  'तुम क्या कर रहे हो',
+  'तुम्ही कोण आहात',
+  'तू कोण आहेस',
+  'तुम्ही काय करू शकता',
+  'तू काय करतेस',
+]);
+
+/** Friendly social turns are handled locally so they work identically on web and Telegram. */
+export function isSmallTalk(message: string): boolean {
+  const normalized = message
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[!?,.।]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return SMALL_TALK_PHRASES.has(normalized);
+}
 
 /**
  * Answer one chat turn: assemble the context, resolve scope, and — only if there is something to
@@ -695,6 +732,24 @@ export async function answerQuestion(
     messageLimit: deps.messageLimit,
     tokenBudget: deps.tokenBudget,
   });
+
+  if (isSmallTalk(question.message)) {
+    return {
+      answer: {
+        content: messages(question.language).chat.welcome,
+        language: question.language,
+        groundedIn: [],
+        needsExpert: false,
+      },
+      context,
+      referralReason: 'small_talk',
+      provider: null,
+      usedFallback: false,
+      degradation: null,
+      outOfScopeMentions: [],
+      promptVersion: null,
+    };
+  }
 
   // Requirement 7.3 lives in this one argument list: the question supplies its own vocabulary when
   // it has any, and `context.condition` — the conversation's most recent Diagnosis_Result — supplies
@@ -1337,7 +1392,11 @@ export async function chatTurn(
 
   // ── 7. Usage log (Requirements 5.7, 14.6, 14.7) ───────────────────────────
   await log({
-    outcome: providerAttempted ? outcomeFor(turn.degradation) : REFERRAL_OUTCOME,
+    outcome: providerAttempted
+      ? outcomeFor(turn.degradation)
+      : turn.referralReason === 'small_talk'
+        ? 'success'
+        : REFERRAL_OUTCOME,
     provider: turn.provider ?? 'none',
     usedFallback: turn.usedFallback,
     quotaSpent: providerAttempted,

@@ -1,6 +1,8 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { AppShell } from '@/components/AppShell';
+import { LanguageProvider } from '@/components/LanguageProvider';
 import {
   DETAIL_MESSAGE_LIMIT,
   formatConfidence,
@@ -163,24 +165,21 @@ export default async function DiagnosisDetailPage({ params }: DiagnosisDetailPag
      * screen knows which language its labels are in. It matters for pronunciation — Devanagari read
      * under `lang="en"` is mispronounced or skipped.
      */
-    <main className={styles.page} lang={language}>
+    <LanguageProvider initialLanguage={language}>
+      <AppShell
+        active="history"
+        description={catalog.ui.historyDescription}
+        displayName={settings?.displayName ?? null}
+        language={language}
+        title={detail.status === 'identified' ? <span lang="en">{detail.diseaseName}</span> : catalog.ui.inconclusiveLabel}
+      >
+        <article className={styles.detail}>
       <Link className={styles.back} href="/history">
         {catalog.ui.backToHistory}
       </Link>
 
       <header className={styles.header}>
-        <h1 className={styles.heading}>
-          {detail.status === 'identified' ? (
-            /**
-             * Requirements 4.6 and 9.4: the Canonical_Disease_Name is rendered in Latin script and
-             * is never translated. `lang="en"` tells a screen reader that this run of text is
-             * English inside a Hindi or Marathi page.
-             */
-            <span lang="en">{detail.diseaseName}</span>
-          ) : (
-            catalog.ui.inconclusiveLabel
-          )}
-        </h1>
+
         <p className={styles.meta}>
           {/*
             The timestamp follows the switcher, not the row: a date is screen furniture like the
@@ -274,7 +273,9 @@ export default async function DiagnosisDetailPage({ params }: DiagnosisDetailPag
           </ol>
         )}
       </section>
-    </main>
+        </article>
+      </AppShell>
+    </LanguageProvider>
   );
 }
 

@@ -97,6 +97,17 @@
 
   /* 2.75rem = 44 px at the default root size (design: tap targets ≥ 44×44 px). */
   --tap-target-min: 2.75rem;
+
+  --color-canvas: #f7faf8;
+  --color-surface: #ffffff;
+  --color-surface-soft: #f0fdf4;
+  --color-ink: #17211b;
+  --color-muted: #526158;
+  --color-border: #dbe4df;
+  --color-primary: #166534;
+  --color-primary-strong: #14532d;
+  --color-primary-soft: #dcfce7;
+  --shadow-card: 0 1rem 3rem rgba(15, 23, 42, 0.08);
 }
 
 *,
@@ -116,6 +127,8 @@ body {
   font-family: var(--font-sans);
   font-size: var(--font-size-base);
   line-height: var(--line-height-base);
+  color: var(--color-ink);
+  background: var(--color-canvas);
 
   /*
    * The single-column guarantee, and the one rule that most needs to be global.
@@ -152,4 +165,26 @@ h2,
 h3,
 h4 {
   line-height: var(--line-height-tight);
+}
+
+
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  color: #052e16;
+  background: #bbf7d0;
 }

@@ -37,6 +37,8 @@ import styles from './TelegramLinkCard.module.css';
  */
 
 export interface TelegramLinkCardProps {
+  /** Public @username shown as the bot ID. This is never the Telegram bot token. */
+  botUsername: string;
   /** Whether a Telegram account is currently linked — from the one server-side access read. */
   isLinked: boolean;
   /** The language every label on this card is rendered in — the farmer's saved preference. */
@@ -45,11 +47,13 @@ export interface TelegramLinkCardProps {
   onChanged: () => void;
 }
 
-export function TelegramLinkCard({ isLinked, language, onChanged }: TelegramLinkCardProps) {
+export function TelegramLinkCard({ botUsername, isLinked, language, onChanged }: TelegramLinkCardProps) {
   const { access } = messages(language);
 
   /** `true` for exactly as long as a mint or an unlink request is open (Requirement 15.2). */
   const [pending, setPending] = useState(false);
+  /** Kept only in memory so a blocked popup still leaves a working, visible handoff link. */
+  const [secureLink, setSecureLink] = useState<string | null>(null);
   /** What `ErrorBanner` renders and nothing more — the cause never reaches this state (15.6). */
   const [error, setError] = useState<ErrorBannerError | null>(null);
 
@@ -61,9 +65,10 @@ export function TelegramLinkCard({ isLinked, language, onChanged }: TelegramLink
       const response = await fetch('/api/link/token', { method: 'POST' });
       if (!response.ok) throw await errorFromResponse(response);
       const parsed = linkTokenResponseSchema.parse(await response.json());
+      setSecureLink(parsed.deepLink);
       // A new tab so the profile screen stays put; the bot performs the bind on the /start.
       window.open(parsed.deepLink, '_blank', 'noopener,noreferrer');
-      // The link is not confirmed here (the bot confirms it); re-read so a completed bind shows.
+      // The focus listener and this immediate read cover both same-device and desktop handoffs.
       onChanged();
     } catch (cause) {
       setError(bannerError(cause, language));
@@ -91,6 +96,26 @@ export function TelegramLinkCard({ isLinked, language, onChanged }: TelegramLink
     <section className={styles.card} aria-busy={pending}>
       <h2 className={styles.heading}>{access.linkHeading}</h2>
 
+      <div className={styles.botIdentity}>
+        <span className={styles.botLogo} aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" focusable="false">
+            <path d="m21 4-3 16-6-4-3 3v-5l9-7-11 6-4-2Z" />
+          </svg>
+        </span>
+        <span className={styles.botCopy}>
+          <small>{access.botIdLabel}</small>
+          <strong dir="ltr">@{botUsername}</strong>
+        </span>
+        <a
+          className={styles.botLink}
+          href={`https://t.me/${encodeURIComponent(botUsername)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {access.openBot}
+        </a>
+      </div>
+
       <p className={styles.state} role="status" lang={language}>
         {isLinked ? access.linkedState : access.notLinkedState}
       </p>
@@ -101,10 +126,22 @@ export function TelegramLinkCard({ isLinked, language, onChanged }: TelegramLink
         <button className={styles.secondary} type="button" onClick={onUnlink} disabled={pending}>
           {access.unlinkButton}
         </button>
-      ) : (
+      ) : secureLink === null ? (
         <button className={styles.primary} type="button" onClick={onLink} disabled={pending}>
           {access.linkButton}
         </button>
+      ) : (
+        <div className={styles.handoff}>
+          <p>{access.linkInstructions}</p>
+          <div className={styles.handoffActions}>
+            <a className={styles.primary} href={secureLink} target="_blank" rel="noopener noreferrer">
+              {access.openBot}
+            </a>
+            <button className={styles.secondary} type="button" onClick={onChanged} disabled={pending}>
+              {access.checkLink}
+            </button>
+          </div>
+        </div>
       )}
     </section>
   );

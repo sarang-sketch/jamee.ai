@@ -27,7 +27,7 @@ Three capabilities, three chains.
 | Capability | Primary (model id, tier) | Fallback (model id, tier) | Fallback trigger | Chain exhausted | Source |
 | --- | --- | --- | --- | --- | --- |
 | `vision-classify` | **Gemini** `gemini-3.8-flash` — **stable** | **Groq** `qwen/qwen3.8-27b` — **Preview** (evaluation only, may be withdrawn at short notice) | Primary classified `RATE_LIMIT` or `UNAVAILABLE` only | `PROVIDERS_UNAVAILABLE` (503) → the Requirement 14.5 busy message | V6, V9, V11 |
-| `text-generate` | **Gemini** `gemini-3.8-flash` — **stable** | **Groq** `openai/gpt-oss-20b` — **not Preview** (see the tier note) | Primary classified `RATE_LIMIT` or `UNAVAILABLE` only | `PROVIDERS_UNAVAILABLE` (503) → the Requirement 14.5 busy message | V6, V8, V11 |
+| `text-generate` | **Groq** `openai/gpt-oss-20b` — **not Preview** (see the tier note) | **Gemini** `gemini-3.8-flash` — **stable** | Primary classified `RATE_LIMIT` or `UNAVAILABLE` only | `PROVIDERS_UNAVAILABLE` (503) → the Requirement 14.5 busy message | V6, V8, V11 |
 | `transcribe` | **Groq** `whisper-large-v3-turbo` — **not Preview** (see the tier note) | **none** | n/a — single-member chain | `TRANSCRIPTION_FAILED` (502, retryable). An empty transcript is a *different* case: `TRANSCRIPT_EMPTY` (422), Requirement 8.7 | V10, V11 |
 
 `OTHER` never triggers a fallback. A validation failure, a malformed answer or a content refusal is
@@ -44,7 +44,7 @@ recorded so a swap is a config edit against a known-good id rather than a fresh 
   `text-generate`. Documented stable alternate: `gemini-3.6-flash`, which V6 describes as balancing
   speed and multimodal capability. V6's instruction not to pin a `-preview` id is why no preview
   Gemini id appears anywhere in this matrix.
-- **`openai/gpt-oss-20b`** for the text fallback — the model in Groq's official JS quickstart (V8).
+- **`openai/gpt-oss-20b`** for primary text generation — the model in Groq's official JS quickstart (V8).
   Documented alternate: `openai/gpt-oss-120b`, which V8 records as production-listed with published
   pricing and limits; both carry 131,072-token context and 65,536 max completion tokens. V8's finding that
   `llama-3.1-8b-instant` and `llama-3.3-70b-versatile` are Enterprise / Contact Sales with no
@@ -112,11 +112,11 @@ answers land in the existing single inconclusive shape (Requirement 6.1–6.5) w
 "Gemini is rate-limiting us" look the same to a farmer and are distinguishable only in `usage_logs`
 via `used_fallback` and `rejection_reason` (D10). Worth remembering when reading logs.
 
-**Single point of failure — voice.** `transcribe` has no cross-provider member, by design (design:
-*Fallback matrix*, "None in this release"). A Groq outage therefore takes voice offline while image
-and chat continue on Gemini, and a Gemini outage takes text offline while voice transcription still
-works but cannot produce an answer. Neither is a defect; both are stated here so the deployment doc's
-failure-mode section does not have to rediscover them.
+**Single point of failure — voice transcription.** `transcribe` has no cross-provider member, by design
+(design: *Fallback matrix*, "None in this release"). A Groq outage therefore takes transcription
+offline, but text generation falls back to Gemini and image classification remains on Gemini. A
+Gemini outage leaves text generation on Groq and moves image classification to its Groq fallback.
+The remaining voice limitation is explicit: transcription itself has no second provider.
 
 **No container hole on `transcribe` — the one the old channel opened closes with it (V26, V10).** An
 inbound voice note now arrives on Telegram, and a Telegram `voice` message is **always OGG/Opus**:
@@ -547,7 +547,7 @@ Worst case — every image identified, every question in coverage, every recordi
 | Capability | Calls / day | Calls / 30 days | Normal host |
 | --- | --- | --- | --- |
 | `vision-classify` | 120 | 3,600 | Gemini |
-| `text-generate` | 120 + 300 + 120 = **540** | 16,200 | Gemini |
+| `text-generate` | 120 + 300 + 120 = **540** | 16,200 | Groq |
 | `transcribe` | 120 | 3,600 | Groq |
 | **Total** | **780 / day** | **23,400** | |
 
@@ -555,10 +555,9 @@ Best case for call volume — every image inconclusive and every question out of
 **240 calls/day** (120 vision + 120 transcribe). The honest range is **240–780 model calls/day**;
 everything below uses 780.
 
-By host under normal routing: **Gemini 660 calls/day** (19,800/month), **Groq 120 calls/day**
-(3,600/month). Under sustained fallback these shift toward Groq, and each rate-limited primary attempt
-is an extra call on top — up to roughly **2× on vision and text** in a sustained rate-limit period,
-since a 429'd attempt should be assumed to count against the primary's accounting (section 2).
+By host under normal routing: **Gemini 120 calls/day** (3,600/month), **Groq 660 calls/day**
+(19,800/month). A Groq text failure shifts text calls to Gemini; each rate-limited primary attempt
+is an extra call on top.
 
 Burst rate: 6 farmers cannot generate meaningful concurrency. All six submitting simultaneously is
 6 concurrent requests → at most **12 model calls inside one minute**.

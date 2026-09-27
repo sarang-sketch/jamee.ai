@@ -36,7 +36,7 @@ describe('startGoogleSignIn', () => {
     const outcome = await startGoogleSignIn(client);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ provider: 'google', callbackURL: '/diagnose' });
+    expect(calls[0]).toMatchObject({ provider: 'google', callbackURL: '/app', errorCallbackURL: '/login' });
     expect(outcome).toBe('ok');
   });
 

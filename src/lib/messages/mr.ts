@@ -120,8 +120,10 @@ export const mr: MessageCatalog = {
   },
 
   chat: {
+    welcome:
+      'नमस्कार! मी जामी—तुमची एआय पीक-देखभाल सहाय्यक. टोमॅटो किंवा बटाट्याचा फोटो दाखवा, पिकाचा प्रश्न विचारा किंवा मायक्रोफोनवर सहज बोला.',
     outOfScope:
-      'जामी फक्त टोमॅटो आणि बटाट्याच्या रोगांकडे पाहते. या प्रश्नासाठी कृपया कृषी तज्ज्ञाला विचारा.',
+      'मी टोमॅटो आणि बटाट्याच्या पीक स्थितींबाबत मदत करू शकते. इतर पिकांच्या प्रश्नांसाठी स्थानिक कृषितज्ज्ञांचा सल्ला घ्या.',
     noVerifiedInfo:
       'या प्रश्नासाठी जामीकडे तपासलेली माहिती नाही. कृपया कृषी तज्ज्ञाला विचारा.',
   },
@@ -147,6 +149,26 @@ export const mr: MessageCatalog = {
     navVoice: 'बोलून विचारा',
     navHistory: 'माझे निकाल',
     navProfile: 'माझी माहिती',
+    skipToContent: 'मुख्य मजकुराकडे जा',
+    shellEyebrow: 'तुमचे पीक सहाय्य केंद्र',
+    secureSession: 'Google द्वारे सुरक्षित',
+    signOutFailed: 'साइन आउट करता आले नाही. कृपया पुन्हा प्रयत्न करा.',
+    welcomeHeading: 'पिकाच्या प्रत्येक चिंतेसाठी स्पष्ट उत्तर.',
+    welcomeBody:
+      'पान तपासा, पुढचे प्रश्न विचारा आणि वेबसाइट व Telegram वरील संपूर्ण सहाय्य इतिहास एकत्र ठेवा.',
+    signInCardHeading: 'जामीमध्ये स्वागत आहे',
+    signInCardBody: 'तुमचे खासगी शेतकरी केंद्र उघडण्यासाठी Google खाते वापरा.',
+    freeWebAccess: 'वेबसाइटचा वापर विनामूल्य आहे',
+    diagnoseDescription: 'विश्वसनीय पीक तपासणीसाठी प्रभावित पानाचा स्पष्ट फोटो निवडा किंवा काढा.',
+    chatDescription: 'पुढचे प्रश्न विचारा आणि वेबसाइटवरील तुमचे संभाषण सुरू ठेवा.',
+    voiceDescription: 'सहज बोला आणि लिखित प्रतिलेखासह तपासलेले उत्तर मिळवा.',
+    historyDescription: 'वेबसाइट आणि Telegram वरील निकाल व संभाषणे एकाच ठिकाणी पाहा.',
+    profileDescription: 'तुमची भाषा, Telegram जोडणी आणि बॉट सुविधा सांभाळा.',
+    recentActivityHeading: 'अलीकडील संभाषणे',
+    recentActivityDescription: 'MongoDB मधून जोडलेले तुमचे नवीन वेबसाइट आणि Telegram संदेश.',
+    diagnosisHistoryHeading: 'पीक तपासणी इतिहास',
+    activityEmpty:
+      'अजून कोणतेही संभाषण नाही. वेबसाइटवर प्रश्न विचारा किंवा जोडलेल्या Telegram बॉटला संदेश पाठवा.',
     chooseImage: 'पिकाचा फोटो निवडा',
     captureImage: 'पिकाचा फोटो काढा',
     imageHint:
@@ -244,6 +266,11 @@ export const mr: MessageCatalog = {
     unlinkButton: 'हे Telegram खाते काढा',
     linkedState: 'एक Telegram खाते तुमच्या जामी खात्याशी जोडलेले आहे.',
     notLinkedState: 'अजून कोणतेही Telegram खाते जोडलेले नाही.',
+    botIdLabel: 'अधिकृत Telegram बॉट ID',
+    openBot: 'Telegram बॉट उघडा',
+    linkInstructions:
+      'सुरक्षित लिंक उघडा, Telegram मध्ये Start दाबा, नंतर येथे परत येऊन जोडणी तपासा.',
+    checkLink: 'जोडणी तपासा',
   },
 
   severity: {

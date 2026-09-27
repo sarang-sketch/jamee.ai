@@ -108,7 +108,7 @@ const serverEnvSchema = z.object({
   /** Gemini API key. `lib/gemini.ts` only. V6 records that the SDK reads this name itself. */
   GEMINI_API_KEY: z.string().min(1),
 
-  /** Groq API key — text fallback, vision fallback, and transcription. `lib/groq.ts` only. */
+  /** Groq API key — primary text generation, vision fallback, and transcription. `lib/groq.ts` only. */
   GROQ_API_KEY: z.string().min(1),
 
   /**

@@ -1,5 +1,19 @@
 {
   "toolSearch.enabled": true,
   "toolSearch.minPct": 5,
-  "toolSearch.minTokens": 50000
+  "toolSearch.minTokens": 50000,
+  "chat.modelDefaults": {
+    "gpt-5.6-sol": {
+      "reasoning": {
+        "effort": "max"
+      }
+    }
+  },
+  "kirocrew.skillDiscovery.previousInheritance": {
+    "present": false,
+    "value": null
+  },
+  "kirocrew.skillDiscovery.inheritFiles": true,
+  "kirocrew.skillDiscovery.inheritSource": "global",
+  "chat.disableInheritingDefaultResources": true
 }

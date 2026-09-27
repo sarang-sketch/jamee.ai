@@ -33,7 +33,7 @@ import { serverEnv } from '@/lib/env';
 import type { Language } from '@/lib/schemas';
 
 /**
- * The Groq provider: the `text-generate` fallback, the `vision-classify` fallback that only
+ * The Groq provider: the primary `text-generate` member, the `vision-classify` fallback that only
  * exists while a vision-capable model does, and the sole `transcribe` member.
  *
  * Requirements: 8.4 (a valid voice request is transcribed through the Transcription_Provider),
@@ -463,10 +463,10 @@ function createOf(options: GroqAdapterOptions): GroqChatCreate {
 }
 
 /**
- * The `text-generate` fallback. **V8:** `openai/gpt-oss-20b`, read from config.
+ * The `text-generate` adapter. **V8:** `openai/gpt-oss-20b`, read from config.
  *
- * Unconditional — V8 records the gpt-oss models as production-listed with published pricing and
- * limits, so unlike the vision member this one has no withdrawal switch.
+ * This adapter is the primary for text generation; the capability gateway falls back to Gemini
+ * when Groq reports a rate limit or documented unavailability.
  */
 export function groqTextAdapter(
   options: GroqAdapterOptions = {},

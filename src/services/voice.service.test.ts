@@ -49,9 +49,9 @@ import type { UsageLogInsert } from '@/lib/db/usage-log';
 /* ========================================================================== */
 
 const USER = '11111111-1111-4111-8111-111111111111';
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
-const FARMER_MESSAGE_ID = '55555555-5555-4555-8555-555555555555';
-const ANSWER_MESSAGE_ID = '66666666-6666-4666-8666-666666666666';
+const CONVERSATION_ID = '4'.repeat(24);
+const FARMER_MESSAGE_ID = '5'.repeat(24);
+const ANSWER_MESSAGE_ID = '6'.repeat(24);
 
 /** A3: the input carries a `{ fileId, kind: 'voice' }` Media_Reference, not a storage path. */
 const AUDIO_REF: MediaRef = { fileId: 'c'.repeat(24), kind: 'voice' };

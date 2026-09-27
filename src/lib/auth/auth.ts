@@ -58,7 +58,7 @@ import type { BetterAuthOptions } from 'better-auth';
  * the owner-scoping of D18 and never touches the driver directly.
  */
 
-const CALLBACK_URL = '/diagnose';
+const CALLBACK_URL = '/app';
 
 /** Module-scope cache — one instance per isolate. See the header for why not `globalThis`. */
 let cached: ReturnType<typeof betterAuth> | undefined;

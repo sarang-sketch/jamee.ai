@@ -1559,13 +1559,13 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 13.7, 16.1, 16.2, 16.3, 17.8_
     - _Design: Amendment A3 point 2; Security boundary_
 
-- [ ] 61. Restate the property tests for the amended properties and add Property 36
-  - [ ]* 61.1 Restate the properties A3 re-vocabularises and A2 re-scopes
+- [x] 61. Restate the property tests for the amended properties and add Property 36
+  - [x]* 61.1 Restate the properties A3 re-vocabularises and A2 re-scopes
     - Re-word every property still reading in Postgres/RLS/Storage/signed-URL terms to the MongoDB / Data_Access_Layer / GridFS substrate without changing what it asserts: **Property 5** (ownership before spend — now a `metadata.ownerId` read), **Property 20** (quotas shared across web/telegram — Telegram side drawn from a linked *and unexpired-entitled* farmer, A2), **Property 23** (webhook auth + single processing — secret token + `update_id` `insertOne` claim), **Property 27 / 31** (tenant isolation across collections/GridFS and over deletion — application-enforced by the layer, cross-farmer writes on the access collections fail rather than return zero), **Property 30** (deliverable completeness over the new env and endpoint sets)
     - _Requirements: 2.5, 2.6, 13.2, 13.4, 13.6, 14.1, 14.2, 14.3, 17.2, 17.4, 18.8_
     - _Design: Amendment A3; Correctness Properties_
 
-  - [ ]* 61.2 Restate Properties 33–35 for the windowed entitlement and add Property 36
+  - [x]* 61.2 Restate Properties 33–35 for the windowed entitlement and add Property 36
     - **Property 33** (entitlement gate total over update kinds) and **Property 34** (no entitlement without a verified signature, one payment grants once) re-stated so the entitlement carries a window and the grant is a claim-plus-extend transaction — Property 34 gains the window and a **no-double-extension** claim (A2 inverts its old "no expiry"); **Property 35** (unlink preserves everything) unchanged in intent on the new substrate; **Property 32** (link token binds at most once) over the transactional consume-and-bind
     - Add **Property 36: recharge extension arithmetic** — over arbitrary sequences of recharges at arbitrary times, the resulting expiry is always `max(now, previous_expiry) + 7 days` per recharge, an early recharge never loses paid days, a lapsed recharge starts at payment, and no redelivery of one payment extends twice
     - **Validates: Amendment A2 decision 3; Requirements 22.9 (as inverted by A2), 22.11**
@@ -1604,7 +1604,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 1.9, 3.8, 7.7, 13.7, 16.1, 16.2, 16.3, 16.4, 17.6, 22.17, 22.23_
     - _Design: Static architecture check (CI); D18_
 
-- [ ] 64. Final checkpoint — Amendment A3 release readiness
+- [x] 64. Final checkpoint — Amendment A3 release readiness
   - Ensure all tests pass, ask the user if questions arise. This checkpoint **replaces task 48 as the release gate.**
   - Run the gates: `npm run typecheck` (currently failing in ~12 files awaiting the WhatsApp/OTP deletions of task 60 — must be clean here), `npm run lint`, `npm run check:secret-scope`, `npm run check:shared-implementation`, `npm run check:data-access`, `npm run test:unit`, `npm run test:property`, `npm run test:integration`, and `npm run build`.
   - The integration suite needs `mongodb-memory-server` in replica-set mode (V31); it no longer needs a local Supabase stack. A run that executed zero integration tests is a broken gate, not a pass.

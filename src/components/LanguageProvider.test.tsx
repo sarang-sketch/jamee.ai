@@ -33,7 +33,7 @@ import {
 /* Fixtures — real shapes, not placeholders                                    */
 /* -------------------------------------------------------------------------- */
 
-const CONVERSATION = '7d1a4c2e-5b6f-4a8d-9c3e-2f1b0a9d8c7b';
+const CONVERSATION = '7d1a4c2e5b6f4a8d9c3e2f1b';
 
 /**
  * Media_References under Amendment A3 (D1 amended): a GridFS `{ fileId, kind }` pair, where

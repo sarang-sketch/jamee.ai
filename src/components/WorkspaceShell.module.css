@@ -1,0 +1,213 @@
+.shell {
+  min-block-size: 100dvh;
+  color: #17211b;
+  background: #f5f8f5;
+}
+
+.skipLink {
+  position: fixed;
+  z-index: 100;
+  top: -6rem;
+  left: 1rem;
+  padding: 0.65rem 1rem;
+  color: #fff;
+  background: #14532d;
+  border-radius: 0.75rem;
+  font-weight: 750;
+}
+
+.skipLink:focus { top: 1rem; }
+.desktopSidebar { display: none; }
+.workspace { min-width: 0; }
+.main { min-block-size: calc(100dvh - 4.5rem); }
+
+.mobileHeader {
+  position: sticky;
+  z-index: 30;
+  top: 0;
+  display: grid;
+  min-block-size: 4.5rem;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.65rem 0.85rem;
+  background: rgba(248, 250, 248, 0.96);
+  border-bottom: 1px solid #dbe4df;
+  backdrop-filter: blur(1rem);
+}
+
+.menuButton,
+.drawerClose {
+  display: inline-flex;
+  width: var(--tap-target-min);
+  height: var(--tap-target-min);
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: #1e3a2a;
+  background: #fff;
+  border: 1px solid #dbe4df;
+  border-radius: 0.8rem;
+  cursor: pointer;
+}
+
+.mobileBrand,
+.brand {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.7rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.mobileBrand { justify-self: start; }
+.mobileBrand strong { font-size: 1.05rem; letter-spacing: -0.03em; }
+.mobileActions { display: flex; align-items: center; gap: 0.35rem; }
+
+.logo {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: linear-gradient(145deg, #22c55e, #166534);
+  border-radius: 0.85rem;
+  box-shadow: 0 0.55rem 1.25rem rgba(22, 101, 52, 0.2);
+}
+.logo svg { width: 70%; height: 70%; fill: currentColor; stroke: currentColor; stroke-width: 1.3; }
+
+.backdrop {
+  position: fixed;
+  z-index: 49;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: rgba(4, 20, 12, 0.48);
+  border: 0;
+}
+
+.mobileDrawer {
+  position: fixed;
+  z-index: 50;
+  inset: 0 auto 0 0;
+  display: flex;
+  width: min(21rem, 88vw);
+  flex-direction: column;
+  padding: 1rem;
+  color: #e7f8ed;
+  background: #0b2117;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 1.5rem 0 3rem rgba(4, 20, 12, 0.28);
+  transform: translateX(-105%);
+  visibility: hidden;
+}
+
+.mobileDrawerOpen { transform: translateX(0); visibility: visible; }
+.sidebarTop { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.brand > span:last-child { display: flex; min-width: 0; flex-direction: column; }
+.brand strong { color: #fff; font-size: 1.2rem; letter-spacing: -0.03em; }
+.brand small { overflow: hidden; color: #a7dcb9; font-size: 0.68rem; text-overflow: ellipsis; white-space: nowrap; }
+.drawerClose { color: #d8f5e2; background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.12); }
+
+.newChatForm { margin-top: 1.35rem; }
+.newChat {
+  display: flex;
+  width: 100%;
+  min-block-size: var(--tap-target-min);
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.7rem 0.8rem;
+  color: #062e18;
+  background: #b8f3cb;
+  border: 1px solid #8ee8ab;
+  border-radius: 0.9rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+.newChat span { flex: 1; text-align: left; }
+.newChat kbd { color: #2c6040; font-family: inherit; font-size: 0.65rem; font-weight: 650; }
+.newChat:disabled { cursor: wait; opacity: 0.75; }
+
+.primaryNav { display: grid; gap: 0.3rem; margin-top: 0.85rem; padding-bottom: 0.85rem; border-bottom: 1px solid rgba(255, 255, 255, 0.09); }
+.navLink,
+.conversationLink {
+  display: flex;
+  min-block-size: var(--tap-target-min);
+  align-items: center;
+  gap: 0.7rem;
+  color: #d9efe1;
+  border: 1px solid transparent;
+  border-radius: 0.75rem;
+  text-decoration: none;
+}
+.navLink { padding: 0.62rem 0.7rem; font-weight: 700; }
+.navLinkActive { color: #fff; background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.12); }
+.icon { width: 1.25rem; height: 1.25rem; flex: 0 0 auto; }
+
+.conversationSection { min-block-size: 0; flex: 1; overflow-y: auto; padding: 0.85rem 0; scrollbar-width: thin; }
+.sectionLabel,
+.group > p { margin: 0; color: #83bd97; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+.emptyHistory { margin: 0.65rem 0; color: #9dc9ac; font-size: 0.8rem; }
+.groups { display: grid; gap: 0.9rem; margin-top: 0.65rem; }
+.group ul { display: grid; gap: 0.15rem; margin: 0.25rem 0 0; padding: 0; list-style: none; }
+.conversationLink { min-block-size: 2.45rem; padding: 0.45rem 0.55rem; color: #b9d8c4; font-size: 0.8rem; }
+.conversationLink span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversationLinkActive { color: #fff; background: rgba(184, 243, 203, 0.12); }
+.conversationLink .icon { width: 1rem; height: 1rem; }
+
+.profileCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem 0.55rem;
+  color: #e7f8ed;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.9rem;
+  text-decoration: none;
+}
+.profileCardActive { background: rgba(184, 243, 203, 0.13); border-color: rgba(184, 243, 203, 0.22); }
+.avatar { display: inline-flex; width: 2.3rem; height: 2.3rem; align-items: center; justify-content: center; color: #07351b; background: #b8f3cb; border-radius: 50%; font-weight: 850; }
+.profileCopy { display: flex; min-width: 0; flex-direction: column; }
+.profileCopy strong,
+.profileCopy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profileCopy strong { color: #fff; font-size: 0.8rem; }
+.profileCopy small { color: #9dc9ac; font-size: 0.67rem; }
+
+.menuButton:focus-visible,
+.drawerClose:focus-visible,
+.mobileBrand:focus-visible,
+.brand:focus-visible,
+.newChat:focus-visible,
+.navLink:focus-visible,
+.conversationLink:focus-visible,
+.profileCard:focus-visible {
+  outline: 3px solid #4ade80;
+  outline-offset: 2px;
+}
+
+@media (width >= 68rem) {
+  .shell { display: grid; grid-template-columns: 17.5rem minmax(0, 1fr); }
+  .desktopSidebar {
+    position: sticky;
+    top: 0;
+    display: flex;
+    height: 100dvh;
+    min-width: 0;
+    flex-direction: column;
+    padding: 1.15rem;
+    color: #e7f8ed;
+    background:
+      radial-gradient(circle at 5% 0%, rgba(65, 191, 105, 0.19), transparent 17rem),
+      #0b2117;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .desktopSidebar .drawerClose { display: none; }
+  .mobileHeader,
+  .mobileDrawer,
+  .backdrop { display: none; }
+  .main { height: 100dvh; min-block-size: 0; }
+}

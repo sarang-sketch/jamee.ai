@@ -1,0 +1,59 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.button {
+  display: inline-flex;
+  min-height: var(--tap-target-min);
+  min-width: var(--tap-target-min);
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.85rem;
+  color: #14532d;
+  background: #ffffff;
+  border: 1px solid #bbf7d0;
+  border-radius: 0.75rem;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.button svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.button:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.button:focus-visible {
+  outline: 3px solid #22c55e;
+  outline-offset: 2px;
+}
+
+.compact .button {
+  padding: 0;
+  color: #14532d;
+  background: #ffffff;
+  border-color: #bbf7d0;
+}
+
+.compact .button span {
+  position: absolute;
+  width: 1rem;
+  height: 1rem;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.error {
+  margin: 0;
+  color: #fecaca;
+  font-size: 0.75rem;
+}

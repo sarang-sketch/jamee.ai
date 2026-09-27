@@ -337,7 +337,7 @@ describe('chainOrderFor', () => {
   });
 
   it('routes text through both providers and transcription through Groq alone', () => {
-    expect(chainOrderFor('text-generate')).toEqual(['gemini', 'groq']);
+    expect(chainOrderFor('text-generate')).toEqual(['groq', 'gemini']);
     expect(chainOrderFor('transcribe')).toEqual(['groq']);
   });
 });
@@ -522,28 +522,26 @@ describe('the fallback matrix — a Gemini rejection as the primary', () => {
     },
   );
 
-  it('reaches the fallback identically on the text chain', async () => {
-    // `text-generate` is `gemini → groq` unconditionally (V8 lists the Groq text model as GA), so
-    // the same rejection has the same consequence on the capability the rephrase uses.
+  it('uses Gemini when the Groq-first text chain rate-limits', async () => {
     const attempts: ProviderId[] = [];
     const result = await run(
       'text-generate',
       {
-        gemini: failingWithTable(
-          'gemini',
-          GEMINI_FAILURE_CLASSIFICATION,
+        groq: failingWithTable(
+          'groq',
+          GROQ_FAILURE_CLASSIFICATION,
           { status: 429 },
           attempts,
         ),
-        groq: servingFallback('groq', attempts),
+        gemini: servingFallback('gemini', attempts),
       },
       'rephrase',
       { now: () => START },
     );
 
-    expect(result.provider).toBe('groq');
+    expect(result.provider).toBe('gemini');
     expect(result.usedFallback).toBe(true);
-    expect(attempts).toEqual(['gemini', 'groq']);
+    expect(attempts).toEqual(['groq', 'gemini']);
   });
 });
 
@@ -639,7 +637,7 @@ const CAPABILITY_MATRIX: ReadonlyArray<
   // V9 records both Groq vision candidates as Preview models that "may be discontinued at short
   // notice", so the one-member shape is an expected configuration rather than a hypothetical.
   ['vision-classify', null, ['gemini'], 'PROVIDERS_UNAVAILABLE', 503],
-  ['text-generate', null, ['gemini', 'groq'], 'PROVIDERS_UNAVAILABLE', 503],
+  ['text-generate', null, ['groq', 'gemini'], 'PROVIDERS_UNAVAILABLE', 503],
   // `transcribe` differs because the requirements make it differ: 8.4 gives a failed transcription
   // its own retryable code. Its chain has no cross-provider member by design — `whisper-large-v3`
   // is a documented alternate on the same host, so a Groq outage takes both out.

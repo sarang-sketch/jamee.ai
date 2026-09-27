@@ -1,3 +1,4 @@
+import { AppShell } from '@/components/AppShell';
 import { ChatComposer } from '@/components/ChatComposer';
 import {
   CHAT_HEADING_ID,
@@ -6,7 +7,6 @@ import {
   type ChatMessageRow,
 } from '@/components/ChatThread';
 import { LanguageProvider } from '@/components/LanguageProvider';
-import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { requireFarmer } from '@/lib/auth/session';
 import { farmerData } from '@/lib/db/farmer';
 import { farmerReads } from '@/lib/db/reads';
@@ -132,28 +132,38 @@ export default async function ChatPage() {
      * from its stored language, which is what keeps a Marathi question pronounced as Marathi after
      * the farmer switches to English.
      */
-    <main className={styles.page} lang={language}>
+    <LanguageProvider initialLanguage={language}>
       {/**
        * The provider is not optional furniture: `useJameeRequests()` is the only way to reach
        * `/api/chat`, it takes the language from this context, and it throws rather than defaulting
        * to `en` when the provider is missing (Requirement 9.2).
        */}
-      <LanguageProvider initialLanguage={language}>
-        <LanguageSwitcher />
+      <AppShell
+        active="chat"
+        description={ui.chatDescription}
+        displayName={settings.displayName}
+        headingId={CHAT_HEADING_ID}
+        language={language}
+        title={ui.navChat}
+      >
         {/*
          * `ui.navChat` — "Ask a question" — is the nav label and this heading, the same way
          * `/diagnose` uses `ui.navDiagnose`. The id is what names the thread's live region, so the
          * accessible name a screen reader reads is the words a sighted farmer sees.
          */}
-        <h1 className={styles.heading} id={CHAT_HEADING_ID}>
-          {ui.navChat}
-        </h1>
-        <ChatComposer
-          conversationId={conversation.id}
-          initialTurns={toChatTurns(rows)}
-          labelledBy={CHAT_HEADING_ID}
-        />
-      </LanguageProvider>
-    </main>
+
+        <section className={styles.chatCard}>
+          <div className={styles.channelHeader}>
+            <span className={styles.statusDot} aria-hidden="true" />
+            <span>{ui.channelWeb}</span>
+          </div>
+          <ChatComposer
+            conversationId={conversation.id}
+            initialTurns={toChatTurns(rows)}
+            labelledBy={CHAT_HEADING_ID}
+          />
+        </section>
+      </AppShell>
+    </LanguageProvider>
   );
 }

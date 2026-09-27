@@ -41,7 +41,7 @@ describe('proxy optimistic redirect', () => {
     expect(response.status).toBeLessThan(400);
     const location = response.headers.get('location');
     expect(location).not.toBeNull();
-    expect(new URL(location!).pathname).toBe('/');
+    expect(new URL(location!).pathname).toBe('/login');
   });
 
   it('lets a protected path through when a session cookie is present', () => {
@@ -55,7 +55,7 @@ describe('proxy optimistic redirect', () => {
 
   it('redirects every protected screen prefix when signed out', () => {
     cookiePresent = false;
-    for (const path of ['/diagnose', '/chat', '/voice', '/history', '/profile', '/diagnosis/abc']) {
+    for (const path of ['/app', '/app/history', '/diagnose', '/chat', '/voice', '/history', '/profile', '/diagnosis/abc']) {
       const response = proxy(request(path));
       expect(response.headers.get('location'), `expected ${path} to redirect`).not.toBeNull();
     }

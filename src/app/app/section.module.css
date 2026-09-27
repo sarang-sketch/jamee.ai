@@ -1,0 +1,51 @@
+.page {
+  min-block-size: 100%;
+  padding: 1.4rem 1rem 3rem;
+  color: #17211b;
+  background:
+    radial-gradient(circle at 95% 0%, rgba(74, 222, 128, 0.11), transparent 25rem),
+    #f6f9f6;
+}
+.sectionHeader,
+.hero { width: min(100%, 68rem); margin: 0 auto 1.4rem; }
+.sectionHeader > p,
+.hero p { margin: 0 0 0.25rem; color: #237443; font-size: 0.72rem; font-weight: 850; letter-spacing: 0.08em; text-transform: uppercase; }
+.sectionHeader h1,
+.hero h1 { margin: 0; color: #102417; font-size: clamp(2rem, 6vw, 3.2rem); letter-spacing: -0.045em; }
+.sectionHeader > span,
+.hero > div > span { display: block; max-width: 46rem; margin-top: 0.5rem; color: #5b6b61; font-size: 1rem; }
+.hero { display: flex; align-items: center; gap: 1rem; padding: 1.25rem; background: #fff; border: 1px solid #dce6de; border-radius: 1.25rem; box-shadow: 0 0.75rem 2rem rgba(15, 49, 27, 0.06); }
+.heroIcon { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; padding: 0.55rem; color: #fff; background: #176b37; border-radius: 1rem; }
+.heroIcon svg { fill: currentColor; stroke: currentColor; }
+.securityNote { width: min(100%, 68rem); margin: -0.55rem auto 1.2rem; padding: 0.8rem 1rem; color: #355843; background: #eaf7ee; border: 1px solid #c9e4d2; border-radius: 0.85rem; font-size: 0.78rem; }
+.cardGrid,
+.profileGrid { display: grid; width: min(100%, 68rem); margin: 0 auto; gap: 1rem; }
+.cardGrid > * { min-width: 0; }
+.panel,
+.accountCard { padding: 1rem; color: #24342a; background: #fff; border: 1px solid #dce6de; border-radius: 1.15rem; box-shadow: 0 0.65rem 1.8rem rgba(15, 49, 27, 0.05); }
+.panel + .panel { width: min(100%, 68rem); margin: 1rem auto 0; }
+.panelHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 0.9rem; padding-bottom: 0.75rem; border-bottom: 1px solid #e4ebe6; }
+.panelHeader h2 { margin: 0; color: #183222; font-size: 1.1rem; }
+.panelHeader p { margin: 0.15rem 0 0; color: #66766c; font-size: 0.8rem; }
+.panelHeader > span { padding: 0.22rem 0.5rem; color: #176b37; background: #e6f7eb; border-radius: 999rem; font-size: 0.65rem; font-weight: 800; }
+.stats { display: grid; width: min(100%, 68rem); margin: 0 auto 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
+.stats > div { display: flex; min-width: 0; flex-direction: column; padding: 0.85rem; background: #fff; border: 1px solid #dce6de; border-radius: 0.9rem; }
+.stats span { overflow: hidden; color: #647269; font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+.stats strong { color: #173523; font-size: 1.6rem; }
+.profileGrid { align-items: start; }
+.accountCard { display: grid; gap: 0.9rem; }
+.accountAvatar { display: inline-flex; width: 4rem; height: 4rem; align-items: center; justify-content: center; color: #0b4624; background: #c9f3d6; border: 1px solid #9ae7b2; border-radius: 50%; font-size: 1.5rem; font-weight: 850; }
+.accountCard > div:nth-child(2) { display: flex; flex-direction: column; }
+.accountCard p { margin: 0; color: #237443; font-size: 0.7rem; font-weight: 850; letter-spacing: 0.07em; text-transform: uppercase; }
+.accountCard strong { margin-top: 0.2rem; color: #173523; font-size: 1.25rem; }
+.accountCard span { margin-top: 0.8rem; color: #66766c; font-size: 0.72rem; }
+.accountCard a { color: #175f33; overflow-wrap: anywhere; }
+.accountCard small { margin-top: 0.35rem; color: #718078; }
+
+@media (width >= 48rem) {
+  .page { padding: 2.25rem 2rem 4rem; }
+  .panel,
+  .accountCard { padding: 1.35rem; }
+  .cardGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profileGrid { grid-template-columns: minmax(0, 1.45fr) minmax(18rem, 0.75fr); }
+}

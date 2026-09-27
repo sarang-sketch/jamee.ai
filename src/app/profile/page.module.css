@@ -1,24 +1,29 @@
-/*
- * Profile screen shell.
- *
- * Design: "Mobile layout and accessibility" — mobile-first, single column, primary actions in thumb
- * reach. Sizes are relative so a larger OS font setting widens the column with the text instead of
- * squeezing it. Leading comes from `globals.css`, which owns the Devanagari floor.
- */
-
-.page {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-  max-width: 26rem;
-  margin: 0 auto;
-  /* Bottom padding keeps the save control clear of a phone's browser chrome. */
-  padding: 1.5rem 1rem 4rem;
-  color: #1f2937;
+.profileGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+  max-width: 66rem;
 }
 
-.heading {
-  margin: 0 0 1.25rem;
-  font-size: 1.75rem;
-  line-height: var(--line-height-tight);
+.settingsCard {
+  padding: clamp(1.1rem, 3vw, 1.5rem);
+  color: #1e293b;
+  background: #ffffff;
+  border: 1px solid var(--color-border);
+  border-radius: 1.5rem;
+  box-shadow: var(--shadow-card);
+}
+
+.accessColumn {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+@media (width >= 52rem) {
+  .profileGrid {
+    grid-template-columns: minmax(18rem, 0.85fr) minmax(22rem, 1.15fr);
+  }
 }

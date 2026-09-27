@@ -1,8 +1,12 @@
+import { AppShell } from '@/components/AppShell';
+import { LanguageProvider } from '@/components/LanguageProvider';
 import { ProfileAccessCards } from '@/components/ProfileAccessCards';
 import { ProfileForm } from '@/components/ProfileForm';
 import { requireFarmer } from '@/lib/auth/session';
 import { accessData } from '@/lib/db/access';
 import { farmerData } from '@/lib/db/farmer';
+import { telegramBotUsername } from '@/lib/env.public';
+import { activeLanguage } from '@/lib/language.server';
 import { messages } from '@/lib/messages';
 import { DEFAULT_LANGUAGE, readProfileSettings, type ProfileSettings } from '@/lib/profile';
 import { entitlementStatus } from '@/services/entitlement.service';
@@ -69,24 +73,39 @@ export default async function ProfilePage() {
   ]);
 
   const resolved: ProfileSettings = settings ?? { displayName: null, language: DEFAULT_LANGUAGE };
+  const language = await activeLanguage(resolved.language);
+  const displaySettings: ProfileSettings = { ...resolved, language };
+  const botUsername = telegramBotUsername();
 
   /**
    * `ui.navProfile` — "My details" — is the heading as well as the nav label. A separate heading key
    * would be a fourth string saying the same thing in three catalogs.
    */
-  const { ui } = messages(resolved.language);
+  const { ui } = messages(language);
 
   return (
-    /**
-     * `lang` on the landmark rather than on `<html>`: the root layout is language-agnostic, and this
-     * screen knows which language its text is in. It matters for pronunciation — a screen reader
-     * given Devanagari under `lang="en"` will mispronounce or skip it. The form asks for a refresh
-     * after a language change, which keeps this attribute and the labels in step.
-     */
-    <main className={styles.page} lang={resolved.language}>
-      <h1 className={styles.heading}>{ui.navProfile}</h1>
-      <ProfileForm initial={resolved} />
-      <ProfileAccessCards isLinked={isLinked} entitlement={entitlement} language={resolved.language} />
-    </main>
+    <LanguageProvider initialLanguage={language}>
+      <AppShell
+        active="profile"
+        description={ui.profileDescription}
+        displayName={resolved.displayName}
+        language={language}
+        title={ui.navProfile}
+      >
+        <div className={styles.profileGrid}>
+          <section className={styles.settingsCard}>
+            <ProfileForm initial={displaySettings} />
+          </section>
+          <div className={styles.accessColumn}>
+            <ProfileAccessCards
+              botUsername={botUsername}
+              isLinked={isLinked}
+              entitlement={entitlement}
+              language={language}
+            />
+          </div>
+        </div>
+      </AppShell>
+    </LanguageProvider>
   );
 }

@@ -232,6 +232,29 @@ export function farmerReads(ownerId: string): FarmerReads {
 }
 
 /* ========================================================================== */
+/* Cross-channel recent activity                                               */
+/* ========================================================================== */
+
+/**
+ * The newest persisted messages for one farmer across both `web` and `telegram` channels.
+ *
+ * No channel parameter is accepted deliberately: this is the dashboard's unified activity read,
+ * and filtering here is how Telegram history would disappear from the website again. The bound
+ * owner is merged through the same `owned()` helper as every other tenant read. The sort is total
+ * (`createdAt`, then `_id`) and is served by the messages `owner_recent` index.
+ */
+export async function listRecentMessages(
+  ownerId: string,
+  limit: number,
+): Promise<MessageRecord[]> {
+  return messages()
+    .find(owned<MessageDoc>(ownerId, {}))
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(limit)
+    .toArray();
+}
+
+/* ========================================================================== */
 /* Conversation ownership — used by the chat write path's ownership check       */
 /* ========================================================================== */
 

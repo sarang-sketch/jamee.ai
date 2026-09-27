@@ -1,5 +1,5 @@
+import { AppShell } from '@/components/AppShell';
 import { LanguageProvider } from '@/components/LanguageProvider';
-import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { VoicePanel } from '@/components/VoiceAnswerCard';
 import { requireFarmer } from '@/lib/auth/session';
 import { farmerData } from '@/lib/db/farmer';
@@ -121,33 +121,45 @@ export default async function VoicePage() {
      * their own `lang` from the language they were produced in, which is what keeps a Marathi
      * answer pronounced as Marathi after the farmer switches to English.
      */
-    <main className={styles.page} lang={language}>
+    <LanguageProvider initialLanguage={language}>
       {/**
        * The provider is not optional furniture: `useJameeRequests()` is the only way to reach
        * `/api/voice`, it takes the language from this context, and it throws rather than defaulting
        * to `en` when the provider is missing (Requirement 9.2).
        */}
-      <LanguageProvider initialLanguage={language}>
-        <LanguageSwitcher />
+      <AppShell
+        active="voice"
+        description={ui.voiceDescription}
+        displayName={settings.displayName}
+        headingId={VOICE_HEADING_ID}
+        language={language}
+        title={ui.navVoice}
+      >
         {/*
          * `ui.navVoice` — "Speak a question" — is the nav label and this heading, the same way
          * `/chat` uses `ui.navChat`. The id is what names the result region, so the accessible name
          * a screen reader reads is the words a sighted farmer sees.
          */}
-        <h1 className={styles.heading} id={VOICE_HEADING_ID}>
-          {ui.navVoice}
-        </h1>
+
         {/*
          * The recorder and the `aria-live="polite"` result region, in one client subtree. The
          * callback wiring is why that pair is a client component: a server component cannot hand
          * `VoiceRecorder` a function.
          */}
-        <VoicePanel
-          userId={userId}
-          conversationId={conversation.id}
-          labelledBy={VOICE_HEADING_ID}
-        />
-      </LanguageProvider>
-    </main>
+        <section className={styles.voiceCard}>
+          <div className={styles.microphone} aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" focusable="false">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6" />
+            </svg>
+          </div>
+          <VoicePanel
+            userId={userId}
+            conversationId={conversation.id}
+            labelledBy={VOICE_HEADING_ID}
+          />
+        </section>
+      </AppShell>
+    </LanguageProvider>
   );
 }

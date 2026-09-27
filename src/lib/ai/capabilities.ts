@@ -220,7 +220,7 @@ export function visionAdapters(deps: CapabilityDeps = {}): AdapterSet<VisionCall
   };
 }
 
-/** `text-generate`: Gemini, then Groq. Unconditional — V8 lists the Groq text model as GA. */
+/** `text-generate`: Groq first, then Gemini. Both adapters remain registered for fallback. */
 export function textAdapters(deps: CapabilityDeps = {}): AdapterSet<TextCall, string> {
   return {
     gemini: adapt(geminiTextAdapter(deps.gemini ?? {}), toGeminiText, textOf),

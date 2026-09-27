@@ -632,6 +632,33 @@ function ask(message: string, language: Language = 'en'): Parameters<typeof answ
 }
 
 /* -------------------------------------------------------------------------- */
+/* Friendly assistant introduction — shared by website and Telegram            */
+/* -------------------------------------------------------------------------- */
+
+describe('answerQuestion — friendly small talk', () => {
+  it.each([
+    ['hey', 'en'],
+    ['Hey, what are you doing?', 'en'],
+    ['नमस्ते', 'hi'],
+    ['नमस्कार', 'mr'],
+  ] as const)('answers %s as a Jamee introduction in %s without calling a model', async (message, language) => {
+    const knowledge = knowledgeStub();
+    const outcome = await answerQuestion(ask(message, language), {
+      store: fakeStore(),
+      knowledge: knowledge.read,
+      models: tripwireModels,
+    });
+
+    expect(outcome.answer.content).toBe(messages(language).chat.welcome);
+    expect(outcome.answer.needsExpert).toBe(false);
+    expect(outcome.answer.groundedIn).toEqual([]);
+    expect(outcome.referralReason).toBe('small_talk');
+    expect(outcome.provider).toBeNull();
+    expect(knowledge.requested).toEqual([]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* Requirements 4.7 and 7.6 — the referral, with no model call                 */
 /* -------------------------------------------------------------------------- */
 

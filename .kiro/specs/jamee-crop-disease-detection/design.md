@@ -519,7 +519,7 @@ src/
       gateway.ts                   # capability routing + fallback (14.4)
       errors.ts                    # RATE_LIMIT | UNAVAILABLE | OTHER
     gemini.ts                      # primary adapter, inline bytes (V6, V7, V34)
-    groq.ts                        # text fallback + transcription (V8, V9, V10, V34)
+    groq.ts                        # primary text + vision fallback + transcription (V8, V9, V10, V34)
     telegram.ts                    # secret token, parse, getFile, sendMessage (V24-V26)
     razorpay.ts                    # order create + webhook signature (V27)
     prompts.ts                     # classification + rephrase + chat prompts
@@ -1624,7 +1624,7 @@ The fallback trigger is narrow by requirement: only a rate-limit or unavailabili
 | Capability | Primary | Fallback | On both failing |
 | --- | --- | --- | --- |
 | `vision-classify` (image → candidate condition) | Gemini multimodal — **VERIFY model id (V6)** | **Conditional.** Exists only if a currently vision-capable Groq model is available — **VERIFY (V9)**. If none, this capability has no fallback | `PROVIDERS_UNAVAILABLE` → the Requirement 14.5 busy message (Requirement 14.8) |
-| `text-generate` (KB rephrase, chat answer) | Gemini text — **VERIFY model id (V6)** | Groq text model — **VERIFY model id (V8)** | `PROVIDERS_UNAVAILABLE` → busy message (Requirement 14.5) |
+| `text-generate` (KB rephrase, chat answer) | Groq text model — **VERIFY model id (V8)** | Gemini text — **VERIFY model id (V6)** | `PROVIDERS_UNAVAILABLE` → busy message (Requirement 14.5) |
 | `transcribe` (audio → text) | Whisper — **VERIFY host, model id, limits (V10)** | None in this release | `TRANSCRIPTION_FAILED` → retryable error; empty transcript is a separate case (Requirement 8.7) |
 
 Requirement 14.8 says image interpretation must treat a both-provider failure as a failed operation returning the busy message. The code path is written so that the *absence* of a vision fallback is handled by exactly the same branch as a *failed* vision fallback:

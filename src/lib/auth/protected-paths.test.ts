@@ -31,6 +31,8 @@ import {
 
 describe('isProtectedScreenPath', () => {
   it("gates each of Requirement 1.6's four screens", () => {
+    expect(isProtectedScreenPath('/app')).toBe(true);
+    expect(isProtectedScreenPath('/app/chat/abc')).toBe(true);
     expect(isProtectedScreenPath('/diagnose')).toBe(true);
     expect(isProtectedScreenPath('/chat')).toBe(true);
     expect(isProtectedScreenPath('/voice')).toBe(true);

@@ -17,7 +17,7 @@ import { messages } from '@/lib/messages';
 describe('ProfileAccessCards', () => {
   it('renders both the link card and the recharge card from one read', () => {
     const html = renderToStaticMarkup(
-      <ProfileAccessCards isLinked={false} entitlement={{ expiresAt: null, isActive: false }} language="en" />,
+      <ProfileAccessCards botUsername="jamee_bot" isLinked={false} entitlement={{ expiresAt: null, isActive: false }} language="en" />,
     );
     const { access } = messages('en');
     expect(html).toContain(access.linkHeading);

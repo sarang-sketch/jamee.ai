@@ -43,8 +43,8 @@ import { severityIndicator } from '@/lib/severity';
 /* Fixtures                                                                    */
 /* ========================================================================== */
 
-const DIAGNOSIS_ID = '33333333-3333-4333-8333-333333333333';
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
+const DIAGNOSIS_ID = '3'.repeat(24);
+const CONVERSATION_ID = '4'.repeat(24);
 
 function identified(overrides: Partial<IdentifiedResult> = {}): IdentifiedResult {
   return {

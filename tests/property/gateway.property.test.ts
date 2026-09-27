@@ -349,16 +349,17 @@ function runScenario(scenario: Scenario, harness: Harness): Promise<GatewayResul
 /**
  * The chain the design's fallback matrix specifies, intersected with the adapters that exist.
  *
- * Gemini first for both capabilities; the Groq vision member only while a fallback model is
- * configured. This is where Requirement 14.4's "retried on the fallback" ordering is stated — the
- * primary is position 0 — so a gateway that reordered the chain fails the property rather than
- * agreeing with it.
+ * Gemini remains first for vision; Groq is first for text generation. The Groq vision member exists
+ * only while a fallback model is configured. This is where the provider priority is stated
+ * independently of `run()`, so an accidental reorder fails the property.
  */
 function expectedChain(scenario: Scenario): ProviderId[] {
   const order: ProviderId[] =
-    scenario.capability === 'vision-classify' && scenario.visionFallbackModel === null
-      ? ['gemini']
-      : ['gemini', 'groq'];
+    scenario.capability === 'vision-classify'
+      ? scenario.visionFallbackModel === null
+        ? ['gemini']
+        : ['gemini', 'groq']
+      : ['groq', 'gemini'];
   return order.filter((id) => scenario.present.includes(id));
 }
 
@@ -545,20 +546,25 @@ describe('Property 21: the fallback chain either serves the request or reports t
         fc.constantFrom<Outcome>('rateLimit', 'unavailable'),
         fc.constantFrom(...SERVING),
         async (capability, primaryFailure, fallbackAnswer) => {
+          const primary: ProviderId = capability === 'vision-classify' ? 'gemini' : 'groq';
+          const fallback: ProviderId = capability === 'vision-classify' ? 'groq' : 'gemini';
           const scenario: Scenario = {
             capability,
             visionFallbackModel: A_CONFIGURED_VISION_FALLBACK,
             present: PROVIDER_IDS,
-            outcomes: { gemini: primaryFailure, groq: fallbackAnswer },
+            outcomes:
+              capability === 'vision-classify'
+                ? { gemini: primaryFailure, groq: fallbackAnswer }
+                : { groq: primaryFailure, gemini: fallbackAnswer },
           };
           const harness = harnessFor(scenario);
           const settled = await settle(runScenario(scenario, harness));
 
           expect(settled.kind).toBe('served');
           if (settled.kind !== 'served') return;
-          expect(settled.result.provider).toBe('groq');
+          expect(settled.result.provider).toBe(fallback);
           expect(settled.result.usedFallback).toBe(true);
-          expect(harness.calls.map((call) => call.provider)).toEqual(['gemini', 'groq']);
+          expect(harness.calls.map((call) => call.provider)).toEqual([primary, fallback]);
         },
       ),
     );
@@ -577,11 +583,15 @@ describe('Property 21: the fallback chain either serves the request or reports t
         fc.constantFrom<Outcome>('unprocessable', 'transport'),
         outcomeArb,
         async (capability, primaryFailure, fallbackOutcome) => {
+          const primary: ProviderId = capability === 'vision-classify' ? 'gemini' : 'groq';
           const scenario: Scenario = {
             capability,
             visionFallbackModel: A_CONFIGURED_VISION_FALLBACK,
             present: PROVIDER_IDS,
-            outcomes: { gemini: primaryFailure, groq: fallbackOutcome },
+            outcomes:
+              capability === 'vision-classify'
+                ? { gemini: primaryFailure, groq: fallbackOutcome }
+                : { groq: primaryFailure, gemini: fallbackOutcome },
           };
           const harness = harnessFor(scenario);
           const settled = await settle(runScenario(scenario, harness));
@@ -590,7 +600,7 @@ describe('Property 21: the fallback chain either serves the request or reports t
           if (settled.kind !== 'reported') return;
           expectBusyReport(settled.error);
           // The fallback was never asked, whatever it would have answered.
-          expect(harness.calls.map((call) => call.provider)).toEqual(['gemini']);
+          expect(harness.calls.map((call) => call.provider)).toEqual([primary]);
         },
       ),
     );

@@ -67,8 +67,8 @@ export async function startGoogleSignIn(client: SocialSignInClient): Promise<'ok
   try {
     const result = await client.signIn.social({
       provider: 'google',
-      callbackURL: '/diagnose',
-      errorCallbackURL: '/',
+      callbackURL: '/app',
+      errorCallbackURL: '/login',
     });
     return result?.error ? 'failed' : 'ok';
   } catch {

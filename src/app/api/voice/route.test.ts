@@ -73,9 +73,9 @@ vi.mock('@/services/chat.service', () => ({ chatAnswerer: spies.chatAnswerer }))
 /* -------------------------------------------------------------------------- */
 
 const USER = '11111111-1111-4111-8111-111111111111';
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
-const ANSWER_MESSAGE_ID = '77777777-7777-4777-8777-777777777777';
-const FARMER_MESSAGE_ID = '88888888-8888-4888-8888-888888888888';
+const CONVERSATION_ID = '4'.repeat(24);
+const ANSWER_MESSAGE_ID = '7'.repeat(24);
+const FARMER_MESSAGE_ID = '8'.repeat(24);
 
 /** A3: the body carries a `{ fileId, kind: 'voice' }` Media_Reference. */
 const AUDIO_REF: MediaRef = { fileId: 'c'.repeat(24), kind: 'voice' };

@@ -734,7 +734,7 @@ describe('Property 16: subject-less follow-ups resolve to the latest diagnosis o
       // 25 runs against the real replica set (each seeds several rows and makes three real
       // answerQuestion chains plus a find-or-create); lowered from the pre-A3 200 so the suite stays
       // inside the 30-second per-test timeout. Generator breadth is unchanged.
-      { numRuns: 25 },
+      { numRuns: 40 },
     );
 
     expect([...shapesSeen].sort()).toStrictEqual([...FOLLOW_UP_SHAPES].sort());

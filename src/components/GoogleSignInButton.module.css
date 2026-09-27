@@ -1,11 +1,3 @@
-/*
- * Google sign-in button styles.
- *
- * Design: "Mobile layout and accessibility" — single column, tap target at least 44×44 px
- * (`--tap-target-min` from globals.css), body text in relative units, contrast at WCAG 2.1 AA,
- * and no time-driven animation (Requirement 15.2 forbids simulated progress).
- */
-
 .form {
   display: flex;
   flex-direction: column;
@@ -15,30 +7,30 @@
 .submit {
   min-height: var(--tap-target-min);
   min-width: var(--tap-target-min);
-  padding: 0.625rem 1rem;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  color: #ffffff;
+  background: linear-gradient(135deg, #166534, #15803d);
+  border: 1px solid #14532d;
+  border-radius: 0.9rem;
   font-family: inherit;
   font-size: 1.0625rem;
-  font-weight: 600;
-  /* #15803d on #ffffff is ≈5:1 — above the 4.5:1 AA threshold for body text. */
-  color: #ffffff;
-  background-color: #15803d;
-  border: 1px solid #15803d;
-  border-radius: 0.375rem;
+  font-weight: 750;
+  box-shadow: 0 0.75rem 1.5rem rgba(22, 101, 52, 0.2);
   cursor: pointer;
 }
 
 .submit:disabled {
   cursor: default;
-  /* Muted, not invisible — the in-flight label must stay legible. */
   opacity: 0.7;
 }
 
 .submit:focus-visible {
   outline: 3px solid #0f766e;
-  outline-offset: 2px;
+  outline-offset: 3px;
 }
 
 .error {
   margin: 0;
-  color: #b91c1c;
+  color: #991b1b;
 }

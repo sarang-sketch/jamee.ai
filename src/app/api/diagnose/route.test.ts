@@ -67,8 +67,8 @@ vi.mock('@/services/diagnosis.service', () => ({ diagnose: spies.diagnose }));
 /* -------------------------------------------------------------------------- */
 
 const USER = '11111111-1111-4111-8111-111111111111';
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
-const DIAGNOSIS_ID = '55555555-5555-4555-8555-555555555555';
+const CONVERSATION_ID = '4'.repeat(24);
+const DIAGNOSIS_ID = '5'.repeat(24);
 
 /** A3: the body carries a `{ fileId, kind }` Media_Reference — a 24-hex ObjectId and a kind. */
 const IMAGE_REF: MediaRef = { fileId: 'a'.repeat(24), kind: 'crop-image' };

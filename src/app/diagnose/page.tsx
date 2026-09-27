@@ -1,6 +1,6 @@
+import { AppShell } from '@/components/AppShell';
 import { DIAGNOSE_HEADING_ID, DiagnosisPanel } from '@/components/DiagnosisResultCard';
 import { LanguageProvider } from '@/components/LanguageProvider';
-import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { requireFarmer } from '@/lib/auth/session';
 import { farmerData } from '@/lib/db/farmer';
 import { activeLanguage } from '@/lib/language.server';
@@ -75,14 +75,20 @@ export default async function DiagnosePage() {
      * under `lang="en"` is mispronounced or skipped — and the switcher's `router.refresh()` is
      * what keeps this attribute in step with a selection.
      */
-    <main className={styles.page} lang={language}>
+    <LanguageProvider initialLanguage={language}>
       {/**
        * The provider is not optional furniture here: `useJameeRequests()` is the only way to
        * reach `/api/diagnose`, it takes the language from this context, and it throws rather
        * than defaulting to `en` when the provider is missing (Requirement 9.2).
        */}
-      <LanguageProvider initialLanguage={language}>
-        <LanguageSwitcher />
+      <AppShell
+        active="diagnose"
+        description={ui.diagnoseDescription}
+        displayName={settings.displayName}
+        headingId={DIAGNOSE_HEADING_ID}
+        language={language}
+        title={ui.navDiagnose}
+      >
         {/*
          * `ui.navDiagnose` — "Check a crop" — is the nav label and this heading. One string.
          *
@@ -90,9 +96,7 @@ export default async function DiagnosePage() {
          * theirs: the accessible name a screen reader reads is the words a sighted farmer sees, with
          * no off-screen duplicate heading to keep translated.
          */}
-        <h1 className={styles.heading} id={DIAGNOSE_HEADING_ID}>
-          {ui.navDiagnose}
-        </h1>
+
         {/*
          * The uploader and the `aria-live="polite"` result region, in one client subtree. The
          * callback wiring is why that pair is a client component: a server component cannot hand
@@ -102,8 +106,11 @@ export default async function DiagnosePage() {
          * Requirement 7.5 then makes the API create one and attach the result to it. Threading a
          * conversation through this screen belongs to the chat work, not here.
          */}
-        <DiagnosisPanel userId={userId} labelledBy={DIAGNOSE_HEADING_ID} />
-      </LanguageProvider>
-    </main>
+        <section className={styles.toolCard}>
+          <div className={styles.toolAccent} aria-hidden="true">✦</div>
+          <DiagnosisPanel userId={userId} labelledBy={DIAGNOSE_HEADING_ID} />
+        </section>
+      </AppShell>
+    </LanguageProvider>
   );
 }

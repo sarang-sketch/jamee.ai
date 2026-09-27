@@ -1,7 +1,9 @@
+import { ActivityFeed } from '@/components/ActivityFeed';
+import { AppShell } from '@/components/AppShell';
 import { EmptyState } from '@/components/EmptyState';
 import { HistoryList } from '@/components/HistoryList';
 import { LanguageProvider } from '@/components/LanguageProvider';
-import { LanguageSwitcher } from '@/components/LanguageSwitcher';
+import { readRecentActivity } from '@/lib/activity';
 import { requireFarmer } from '@/lib/auth/session';
 import { farmerData } from '@/lib/db/farmer';
 import { DIAGNOSE_PATH, readHistory } from '@/lib/history';
@@ -87,7 +89,12 @@ export default async function HistoryPage() {
    * (Requirement 12.1) is a property of the `owner_recent` index the accessor sorts on, not of a
    * statement here.
    */
-  const entries = await readHistory({ userId });
+  const [entries, activity] = await Promise.all([
+    readHistory({ userId }),
+    readRecentActivity({ userId }),
+  ]);
+  const websiteCount = activity.filter((entry) => entry.channel === 'web').length;
+  const telegramCount = activity.length - websiteCount;
 
   return (
     /**
@@ -96,23 +103,61 @@ export default async function HistoryPage() {
      * inside it (Requirement 9.4) — a name is not translated, and `overflow-wrap` in the list's CSS
      * is what keeps one from widening the layout.
      */
-    <main className={styles.page} lang={language}>
+    <LanguageProvider initialLanguage={language}>
       {/**
        * The provider is here for the switcher, which is the only client component on this screen.
        * Its `router.refresh()` is what re-runs this server render in the new language, which is the
        * whole of Requirement 9.2 for a read-only screen.
        */}
-      <LanguageProvider initialLanguage={language}>
-        <LanguageSwitcher />
+      <AppShell
+        active="history"
+        description={ui.historyDescription}
+        displayName={settings.displayName}
+        language={language}
+        title={ui.historyHeading}
+      >
         {/* `ui.historyHeading` and `ui.navHistory` are the same words; the heading key is used. */}
-        <h1 className={styles.heading}>{ui.historyHeading}</h1>
+
 
         {/*
           Requirement 12.4. An empty array is a real, observed state — the farmer has sent nothing
           yet — and `readHistory` throws rather than returning one for a failed read, so this branch
           cannot be reached by an error pretending to be an empty history.
         */}
-        {entries.length === 0 ? (
+        <div className={styles.summaryGrid} aria-label={ui.historyHeading}>
+          <div className={styles.summaryCard}>
+            <span>{ui.diagnosisHistoryHeading}</span>
+            <strong>{entries.length}</strong>
+          </div>
+          <div className={styles.summaryCard}>
+            <span>{ui.channelWeb}</span>
+            <strong>{websiteCount}</strong>
+          </div>
+          <div className={styles.summaryCard}>
+            <span>{ui.channelTelegram}</span>
+            <strong>{telegramCount}</strong>
+          </div>
+        </div>
+
+        <section className={styles.sectionCard}>
+          <header className={styles.sectionHeader}>
+            <div>
+              <h2>{ui.recentActivityHeading}</h2>
+              <p>{ui.recentActivityDescription}</p>
+            </div>
+            <span className={styles.syncBadge}>MongoDB</span>
+          </header>
+          <ActivityFeed entries={activity} language={language} />
+        </section>
+
+        <section className={styles.sectionCard}>
+          <header className={styles.sectionHeader}>
+            <div>
+              <h2>{ui.diagnosisHistoryHeading}</h2>
+              <p>{ui.historyDescription}</p>
+            </div>
+          </header>
+          {entries.length === 0 ? (
           <EmptyState
             message={ui.historyEmpty}
             actionLabel={ui.historyEmptyAction}
@@ -120,8 +165,9 @@ export default async function HistoryPage() {
           />
         ) : (
           <HistoryList entries={entries} language={language} />
-        )}
-      </LanguageProvider>
-    </main>
+          )}
+        </section>
+      </AppShell>
+    </LanguageProvider>
   );
 }

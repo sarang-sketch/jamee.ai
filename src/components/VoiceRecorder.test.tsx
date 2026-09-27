@@ -63,7 +63,7 @@ import {
 /* ========================================================================== */
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
-const CONVERSATION_ID = '33333333-3333-4333-8333-333333333333';
+const CONVERSATION_ID = '3'.repeat(24);
 
 /** The reference the media endpoint returns for a `voice` upload. */
 const AUDIO_REF: MediaRef = { fileId: 'c'.repeat(24), kind: 'voice' };

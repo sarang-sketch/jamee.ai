@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { BotUnlockCard } from '@/components/BotUnlockCard';
@@ -30,6 +31,8 @@ import type { Language } from '@/lib/schemas';
  */
 
 export interface ProfileAccessCardsProps {
+  /** Public Telegram @username shown as the bot identifier; never the bot token. */
+  botUsername: string;
   /** Whether a Telegram account is currently linked — from the server-side access read. */
   isLinked: boolean;
   /** The entitlement window — from the same server-side access read. */
@@ -38,13 +41,24 @@ export interface ProfileAccessCardsProps {
   language: Language;
 }
 
-export function ProfileAccessCards({ isLinked, entitlement, language }: ProfileAccessCardsProps) {
+export function ProfileAccessCards({ botUsername, isLinked, entitlement, language }: ProfileAccessCardsProps) {
   const router = useRouter();
   const onChanged = (): void => router.refresh();
 
+  useEffect(() => {
+    const refreshOnReturn = (): void => router.refresh();
+    window.addEventListener('focus', refreshOnReturn);
+    return () => window.removeEventListener('focus', refreshOnReturn);
+  }, [router]);
+
   return (
     <>
-      <TelegramLinkCard isLinked={isLinked} language={language} onChanged={onChanged} />
+      <TelegramLinkCard
+        botUsername={botUsername}
+        isLinked={isLinked}
+        language={language}
+        onChanged={onChanged}
+      />
       <BotUnlockCard entitlement={entitlement} language={language} onChanged={onChanged} />
     </>
   );

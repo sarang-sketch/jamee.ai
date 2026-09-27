@@ -1,0 +1,45 @@
+.page { display: grid; min-block-size: 100dvh; color: #17211b; background: #f7faf8; }
+.story { position: relative; display: none; min-block-size: 100dvh; overflow: hidden; padding: 2rem 3rem; color: #eaf8ef; background: radial-gradient(circle at 10% 10%, rgba(74, 222, 128, 0.22), transparent 24rem), #0b2b1a; }
+.brand { position: relative; z-index: 2; display: inline-flex; width: fit-content; align-items: center; gap: 0.7rem; color: inherit; text-decoration: none; }
+.brand > span:last-child { display: flex; flex-direction: column; }
+.brand strong { color: #fff; font-size: 1.25rem; letter-spacing: -0.035em; }
+.brand small { color: #9bd5ad; font-size: 0.65rem; }
+.logo,
+.cardLogo,
+.visualLogo { display: inline-flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(145deg, #27b95d, #155b31); border-radius: 0.95rem; box-shadow: 0 0.7rem 1.6rem rgba(4, 23, 12, 0.25); }
+.logo svg,
+.cardLogo svg,
+.visualLogo svg { width: 70%; height: 70%; fill: currentColor; stroke: currentColor; stroke-width: 1.2; }
+.storyCopy { position: relative; z-index: 2; max-width: 36rem; align-self: center; margin-bottom: 9rem; }
+.storyCopy > p,
+.card > p { margin: 0 0 0.5rem; color: #6fda91; font-size: 0.72rem; font-weight: 850; letter-spacing: 0.09em; text-transform: uppercase; }
+.storyCopy h1 { margin: 0; color: #fff; font-size: clamp(2.8rem, 5vw, 4.8rem); letter-spacing: -0.06em; line-height: var(--line-height-tight); }
+.storyCopy > span { display: block; margin-top: 1rem; color: #b9ddc4; font-size: 1.05rem; }
+.storyCopy ul { display: grid; gap: 0.6rem; margin: 1.5rem 0 0; padding: 0; list-style: none; }
+.storyCopy li { display: flex; align-items: center; gap: 0.5rem; color: #d8efdf; font-size: 0.82rem; }
+.storyCopy li svg { width: 1rem; height: 1rem; color: #61d787; }
+.cropVisual { position: absolute; right: 0; bottom: 0; left: 0; height: 16rem; overflow: hidden; }
+.sun { position: absolute; right: 18%; bottom: 5.5rem; width: 7rem; height: 7rem; background: rgba(237, 255, 200, 0.14); border-radius: 50%; }
+.fieldLines { position: absolute; right: -10%; bottom: -10rem; left: -10%; height: 18rem; background: repeating-radial-gradient(ellipse at 50% 120%, transparent 0 1.6rem, rgba(126, 218, 150, 0.15) 1.7rem 1.9rem); }
+.visualLogo { position: absolute; right: 20%; bottom: 3.1rem; color: #c7f3d5; background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: none; }
+.loginArea { display: flex; min-block-size: 100dvh; flex-direction: column; padding: 1rem; }
+.topActions { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; }
+.topActions > a { min-block-size: var(--tap-target-min); display: inline-flex; align-items: center; color: #376047; font-size: 0.75rem; font-weight: 700; text-decoration: none; }
+.card { width: min(100%, 28rem); margin: auto; padding: 1.5rem; color: #2f4035; background: #fff; border: 1px solid #dce6de; border-radius: 1.4rem; box-shadow: 0 1.5rem 4rem rgba(15, 49, 27, 0.1); }
+.cardLogo { margin-bottom: 1rem; }
+.card > p { color: #237443; }
+.card h2 { margin: 0; color: #102417; font-size: 2rem; letter-spacing: -0.045em; }
+.card > span { display: block; margin-top: 0.45rem; color: #627168; }
+.googleAction { margin-top: 1.5rem; }
+.googleAction button { width: 100%; min-block-size: 3.2rem; }
+.card > small { display: block; margin-top: 1.2rem; padding-top: 1rem; color: #728078; border-top: 1px solid #e3eae5; text-align: center; }
+.legal { display: flex; justify-content: center; gap: 0.45rem; margin-top: 0.7rem; color: #63756a; font-size: 0.7rem; }
+.legal a { color: #376047; }
+.page a:focus-visible { outline: 3px solid #4ade80; outline-offset: 3px; }
+
+@media (width >= 60rem) {
+  .page { grid-template-columns: minmax(0, 1.1fr) minmax(28rem, 0.9fr); }
+  .story { display: flex; flex-direction: column; }
+  .loginArea { padding: 2rem clamp(2rem, 5vw, 5rem); }
+  .card { padding: 2.2rem; }
+}
