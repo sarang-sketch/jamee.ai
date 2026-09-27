@@ -1,9 +1,11 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { ObjectId } from 'mongodb';
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner, TextCall } from '@/lib/ai/capabilities';
 import { DAILY_QUOTAS } from '@/lib/config/verified';
+import type { DiagnosisRecord, MessageRecord } from '@/lib/db/reads';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import { AppError } from '@/lib/errors';
 import {
   matchConditions,
@@ -32,7 +34,6 @@ import {
   type ContextStore,
 } from '@/services/chat.service';
 import { ownsRequest, type CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
 
 /**
  * ### Property 14: Questions outside verified knowledge yield an honest referral
@@ -49,7 +50,7 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
  * =============================================================================
  *
  * A whole chat turn, through `chatAnswerer()` — the bound `ChatService` that `/api/chat`,
- * `/api/voice` and the WhatsApp adapter all hold — with every seam injected: the context reads, the
+ * `/api/voice` and the Telegram adapter all hold — with every seam injected: the context reads, the
  * knowledge reader, the counter RPC, the write store and the capability runner. So there is no
  * Supabase stack and no provider, and the four things the property is *about* are directly
  * observable: the answer handed back, the answer persisted as the Jamee message, the counter, and
@@ -158,14 +159,15 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
 /* ========================================================================== */
 
 const FARMER = '2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b';
-const THREAD = '3c3c3c3c-3c3c-4c3c-8c3c-3c3c3c3c3c3c';
-const FARMER_MESSAGE_ID = '4d4d4d4d-4d4d-4d4d-8d4d-4d4d4d4d4d4d';
-const ANSWER_MESSAGE_ID = '5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e';
-const DIAGNOSIS_ID = '6f6f6f6f-6f6f-4f6f-8f6f-6f6f6f6f6f6f';
+/** Under A3 a conversation `_id` is a 24-hex ObjectId; the scope check compares its `toHexString()`. */
+const THREAD = '3c3c3c3c3c3c4c3c8c3c3c3c';
+const THREAD_OID = new ObjectId(THREAD);
+const FARMER_MESSAGE_OID = new ObjectId('4d4d4d4d4d4d4d4d4d4d4d4d');
+const ANSWER_MESSAGE_OID = new ObjectId('5e5e5e5e5e5e5e5e5e5e5e5e');
+const DIAGNOSIS_OID = new ObjectId('6f6f6f6f6f6f6f6f6f6f6f6f');
 
 /** 2026-09-15T19:30:00Z. Fixed, so a run owns its clock and never reads the wall clock. */
 const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
-const NOW_ISO = new Date(NOW_MS).toISOString();
 
 /** The four agronomic columns, in the order a farmer needs them and the template renders them. */
 const KB_FIELDS = ['symptoms', 'causes', 'treatment', 'prevention'] as const;
@@ -275,7 +277,7 @@ function rowFor(condition: VerifiedCondition, tag: string, tails: readonly strin
   const statements = (field: KbField): string[] =>
     tails.map((tail, index) => `${tag}-${field}-${index} ${tail}`);
   return {
-    id: `00000000-0000-4000-8000-${tag.slice(2).padStart(12, '0')}`,
+    id: `0000000000000000${tag.slice(2).toLowerCase().padStart(8, '0')}`,
     disease_name: condition,
     crop: CROP_OF[condition],
     scientific_name: healthy ? null : `${tag} pathogen`,
@@ -463,11 +465,14 @@ interface Recorded {
   readonly prompts: string[];
   /** Every name set the knowledge reader was asked for. */
   readonly knowledgeReads: VerifiedCondition[][];
-  readonly messageRows: TablesInsert<'messages'>[];
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly messageRows: MessageInsertRow[];
+  readonly usageRows: UsageLogInsert[];
   readonly touched: string[];
   readonly counts: Counts;
 }
+
+/** The wire-shaped message the write seam receives — `insertTurn`'s `MessageInsert` element. */
+type MessageInsertRow = Parameters<ChatWriteStore['insertTurn']>[0][number];
 
 /** What the text seam does — or, on a referral, what it must never be asked to do. */
 type Behaviour =
@@ -475,21 +480,6 @@ type Behaviour =
   | { readonly kind: 'tripwire' }
   | { readonly kind: 'text'; readonly text: string }
   | { readonly kind: 'fail'; readonly error: AppError };
-
-/**
- * A tripwire, not a stand-in: every seam is injected, so a read of the request client means the
- * service reached past its dependencies and nothing recorded above can be trusted.
- */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
 
 interface Harness {
   readonly deps: ChatTurnDeps;
@@ -501,7 +491,7 @@ function harness(options: {
   readonly rows: readonly KnowledgeEntry[];
   /** The window, oldest → newest. The store hands it back newest-first, as the index does. */
   readonly transcript: readonly ContextMessage[];
-  readonly latestDiagnosis: DiagnosisRow | null;
+  readonly latestDiagnosis: DiagnosisRecord | null;
   readonly behaviour: Behaviour;
 }): Harness {
   const counts: Counts = { classify: 0, generate: 0, increments: 0, decrements: 0 };
@@ -577,17 +567,20 @@ function harness(options: {
       Promise.resolve(conversationId === THREAD && userId === FARMER),
     insertTurn: (pair) => {
       recorded.messageRows.push(...pair);
-      const stored: MessageRow[] = pair.map((row, index) => ({
-        id: index === 0 ? FARMER_MESSAGE_ID : ANSWER_MESSAGE_ID,
-        conversation_id: row.conversation_id,
-        user_id: row.user_id,
+      const stored: MessageRecord[] = pair.map((row, index) => ({
+        _id: index === 0 ? FARMER_MESSAGE_OID : ANSWER_MESSAGE_OID,
+        ownerId: row.ownerId,
+        conversationId: new ObjectId(row.conversationId),
         role: row.role,
         content: row.content,
         language: row.language,
         channel: row.channel,
-        input_kind: row.input_kind ?? 'text',
-        transcript_of: row.transcript_of ?? null,
-        created_at: NOW_ISO,
+        inputKind: row.inputKind,
+        transcriptOf:
+          row.transcriptOf === undefined
+            ? null
+            : { fileId: new ObjectId(row.transcriptOf.fileId), kind: row.transcriptOf.kind },
+        createdAt: new Date(NOW_MS),
       }));
       return Promise.resolve(stored);
     },
@@ -604,7 +597,6 @@ function harness(options: {
   return {
     recorded,
     deps: {
-      supabase: unreachableSupabase,
       store,
       writes,
       knowledge,
@@ -624,16 +616,16 @@ function harness(options: {
 
 function transcriptFor(turns: number): readonly ContextMessage[] {
   return Array.from({ length: turns }, (_unused, index) => ({
-    id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
-    conversation_id: THREAD,
-    user_id: FARMER,
+    _id: new ObjectId(`10000000000000000000000${index}`.slice(0, 24)),
+    ownerId: FARMER,
+    conversationId: THREAD_OID,
     role: index % 2 === 0 ? ('farmer' as const) : ('jamee' as const),
     content: 'an earlier turn of this thread',
     language: 'en' as const,
     channel: 'web' as const,
-    input_kind: 'text' as const,
-    transcript_of: null,
-    created_at: new Date(NOW_MS - (turns - index) * 60_000).toISOString(),
+    inputKind: 'text' as const,
+    transcriptOf: null,
+    createdAt: new Date(NOW_MS - (turns - index) * 60_000),
   }));
 }
 
@@ -644,7 +636,7 @@ function transcriptFor(turns: number): readonly ContextMessage[] {
  * knowledge id, no confidence, severity `none`, an expert needed (Requirement 6.5) — so the branch
  * where a diagnosis exists and still supplies no subject is exercised by a row the database admits.
  */
-function diagnosisFor(premise: Premise): DiagnosisRow | null {
+function diagnosisFor(premise: Premise): DiagnosisRecord | null {
   const shape = premise.diagnosisShape;
   if (shape === 'none') return null;
   const identified = shape === 'identified';
@@ -656,23 +648,22 @@ function diagnosisFor(premise: Premise): DiagnosisRow | null {
     throw new Error('an identified diagnosis row needs a condition');
   }
   return {
-    id: DIAGNOSIS_ID,
-    user_id: FARMER,
-    conversation_id: THREAD,
+    _id: DIAGNOSIS_OID,
+    ownerId: FARMER,
+    conversationId: THREAD_OID,
     status: identified ? 'identified' : 'unknown',
-    disease_name: identified ? condition : null,
-    knowledge_id: null,
+    diseaseName: identified ? condition : null,
+    knowledgeId: null,
     confidence: identified ? 0.84 : null,
     severity: identified ? 'moderate' : 'none',
     explanation: 'an earlier diagnosis of this conversation',
     language: 'en',
-    needs_expert: !identified,
+    needsExpert: !identified,
     channel: 'web',
-    image_bucket: 'crop-images',
-    image_path: `${FARMER}/2026/09/leaf.jpg`,
-    full_image_deleted_at: null,
-    model_provider: 'gemini',
-    created_at: new Date(NOW_MS - 300_000).toISOString(),
+    mediaRef: { fileId: new ObjectId('a11111111111111111111111'), kind: 'crop-image' },
+    fullImageDeletedAt: null,
+    modelProvider: 'gemini',
+    createdAt: new Date(NOW_MS - 300_000),
   };
 }
 
@@ -714,7 +705,7 @@ function assertNotAnErrorMessage(content: string, language: Language, label: str
 /* ========================================================================== */
 
 const languageArb = fc.constantFrom<Language>(...SUPPORTED_LANGUAGES);
-const channelArb = fc.constantFrom<Channel>('web', 'whatsapp');
+const channelArb = fc.constantFrom<Channel>('web', 'telegram');
 
 /** One or two statements per column: enough for containment, short enough to stay terse. */
 const tailsArb = fc.subarray([...TAILS], { minLength: 1, maxLength: 2 });
@@ -909,7 +900,7 @@ describe('Property 14: questions outside verified knowledge yield an honest refe
         };
 
         // `chatAnswerer()` is the bound service both channels hold, so the turn under test is the
-        // one `/api/chat`, `/api/voice` and the WhatsApp adapter all run.
+        // one `/api/chat`, `/api/voice` and the Telegram adapter all run.
         const outcome = await chatAnswerer(test.deps)(input, ownsRequest(FARMER, 'chat'));
         const { answer } = outcome;
 
@@ -1062,7 +1053,7 @@ describe('Property 14: questions outside verified knowledge yield an honest refe
     expect([...diagnosisShapesSeen].sort()).toStrictEqual([...DIAGNOSIS_SHAPES].sort());
     expect([...languagesSeen].sort()).toStrictEqual([...SUPPORTED_LANGUAGES].sort());
     // Requirement 7.7 — one implementation, exercised on both channels.
-    expect([...channelsSeen].sort()).toStrictEqual(['web', 'whatsapp']);
+    expect([...channelsSeen].sort()).toStrictEqual(['telegram', 'web']);
     expect([...windowsSeen].sort()).toStrictEqual([...WINDOW_SHAPES].sort());
     // Every resolution-set size a chat question can ask for and be answered with nothing, up to all
     // five rows. A run that only ever asked for one would have proved nothing about the wide case.

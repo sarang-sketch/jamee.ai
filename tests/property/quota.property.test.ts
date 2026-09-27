@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner } from '@/lib/ai/capabilities';
-import { DAILY_QUOTAS, STORAGE_BUCKETS } from '@/lib/config/verified';
+import { DAILY_QUOTAS } from '@/lib/config/verified';
+import type { MessageRecord } from '@/lib/db/reads';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import { isAppError, toEnvelope, type AppError } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import {
@@ -14,17 +15,17 @@ import {
   type Channel,
   type ChatInput,
   type Language,
+  type MediaRef,
   type Operation,
-  type StorageRef,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import { dayWindowKey, nextResetAtIso } from '@/lib/time';
 import {
   chatTurn,
   type ChatTurnDeps,
   type ChatWriteStore,
   type ContextStore,
+  type MessageInsert,
 } from '@/services/chat.service';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
@@ -32,23 +33,26 @@ import { reserveForRequest, type CounterRpc, type QuotaContext } from '@/service
 import {
   transcribeAndAnswer,
   type ChatAnswerer,
+  type MediaRemover,
   type NestedChatOutcome,
-  type ObjectRemoveClient,
   type Transcriber,
   type VoiceDeps,
   type VoiceStore,
 } from '@/services/voice.service';
 import type { TranscriptionResult } from '@/lib/groq';
-import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
+import { ObjectId } from 'mongodb';
 
 /**
  * **Property 20: Daily quotas are never exceeded and are shared across channels**
  *
- * > For any interleaving of web and WhatsApp requests of one operation type by one farmer within one
+ * > For any interleaving of web and Telegram requests of one operation type by one farmer within one
  * > Asia/Kolkata day, including concurrent requests, the number of requests that reach a provider
  * > never exceeds that operation's daily limit; every request beyond the limit is declined with the
  * > limit and the reset time stated and invokes no provider; and the accepted count is identical
- * > regardless of how the requests were distributed between channels.
+ * > regardless of how the requests were distributed between channels. The Telegram side of the
+ * > interleaving is drawn from a farmer who is linked and holds an entitlement whose expiry is in the
+ * > future, because a gated update reserves no quota unit at all (Property 33) and so is not a
+ * > request this property can count.
  *
  * **Validates: Requirements 14.1, 14.2, 14.3**
  *
@@ -59,25 +63,26 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
  * `reserveForRequest()` in `src/services/quota.service.ts`. Nothing about the reserve, the decline,
  * the window key or the reset instant is re-described here.
  *
- * The one thing that cannot be real off a database is `counter_try_increment`, so it is modelled
- * with the property migration `0007` gives it: the row is read and written **with no `await` between
- * them**, which is the atomicity a single UPDATE has in Postgres, and the increment is refused at
- * the ceiling. That the real statement is atomic is not this file's claim to make —
- * `quota.service.test.ts` pins the seam's contract and task 10.2 owns it against a real Postgres.
+ * The one thing that cannot be real off a database is the atomic counter, so it is modelled with the
+ * property Amendment A3's D19 gives its `findOneAndUpdate` conditional reserve: the row is read and
+ * written **with no `await` between them**, which is the atomicity a single conditional update has,
+ * and the increment is refused at the ceiling. That the real MongoDB statement is atomic is not this
+ * file's claim to make — `quota.service.test.ts` pins the seam's contract and the integration suite
+ * proves it against `mongodb-memory-server` (V31, V33).
  *
  * ### "Shared across channels" is asserted as a mechanism, not just as a count
  *
- * The counter key is `(user_id, operation, window_kind, window_key)` and has **no channel
- * component** — that absence *is* Requirement 14.2. So the in-memory table is keyed the same way
- * and every run asserts that a mixed-channel burst touched **exactly one row**. A channel that
- * quietly got its own allowance would show up as two rows long before the accepted count drifted,
- * and the assertion names the row rather than inferring it.
+ * The counter key is `(ownerId, operation, windowKind, windowKey)` and has **no channel component**
+ * — that absence *is* Requirement 14.2. So the in-memory table is keyed the same way and every run
+ * asserts that a mixed-channel burst touched **exactly one row**. A channel that quietly got its own
+ * allowance would show up as two rows long before the accepted count drifted, and the assertion
+ * names the row rather than inferring it.
  *
  * The count claim is then made the way the design words it: the same multiset of requests is run
- * twice, once as generated and once with **every channel mirrored** (`web`↔`whatsapp`), against two
+ * twice, once as generated and once with **every channel mirrored** (`web`↔`telegram`), against two
  * fresh counters, and the accepted totals must be equal. Mirroring is what makes the uniform cases
- * meet: an all-web run's mirror is an all-WhatsApp run, so "20 photos from the browser" and "20
- * photos from WhatsApp" are compared directly, and a mixed run is compared against its own
+ * meet: an all-web run's mirror is an all-Telegram run, so "20 photos from the browser" and "20
+ * photos from Telegram" are compared directly, and a mixed run is compared against its own
  * complement.
  *
  * ### "Never exceeds" and "invokes no provider" are counted, per request
@@ -104,7 +109,7 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
  * ### Non-vacuity
  *
  * Four coverage sets, all asserted after `fc.assert`: every operation, every distribution shape
- * (all-web, all-WhatsApp, alternating, mixed, WhatsApp-first), both execution orders (sequential and
+ * (all-web, all-Telegram, alternating, mixed, Telegram-first), both execution orders (sequential and
  * **concurrent**, with every request in flight at once), and every generated clock instant inside the
  * Asia/Kolkata day. And the run is asserted to have produced **both** answers — at least one
  * accepted request and at least one decline — so a harness that refused or admitted everything
@@ -116,10 +121,11 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
 /* ========================================================================== */
 
 const USER_ID = '2b4d6f8a-1c3e-4a5b-8d7f-9e0a1b2c3d4e';
-const CONVERSATION_ID = 'e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b';
-const DIAGNOSIS_ID = 'f1e2d3c4-b5a6-4978-8a6b-5c4d3e2f1a0b';
-const FARMER_MESSAGE_ID = 'a9b8c7d6-e5f4-4321-8a1b-2c3d4e5f6071';
-const ANSWER_MESSAGE_ID = 'b8c7d6e5-f4a3-4210-8b2c-3d4e5f607182';
+/** A3: a conversation `_id` is a 24-hex ObjectId string. */
+const CONVERSATION_ID = 'e1f2a3b4c5d64e7f8a9b0c1d';
+const DIAGNOSIS_ID = 'f1e2d3c4b5a649788a6b5c4d';
+const FARMER_MESSAGE_ID = 'a9b8c7d6e5f443218a1b2c30';
+const ANSWER_MESSAGE_ID = 'b8c7d6e5f4a342108b2c3d40';
 
 const CONDITION: VerifiedCondition = 'Tomato Early Blight';
 
@@ -148,7 +154,7 @@ const CROP_OF: Readonly<Record<VerifiedCondition, KnowledgeEntry['crop']>> = {
 const KNOWLEDGE_ROWS: readonly KnowledgeEntry[] = VERIFIED_CONDITIONS.map((condition, index) => {
   const healthy = condition === HEALTHY_CONDITION;
   return {
-    id: `20b0abcd-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    id: `20b0abcd000040008000${String(index + 1).padStart(4, '0')}`,
     disease_name: condition,
     crop: CROP_OF[condition],
     scientific_name: healthy ? null : `${condition} pathogen`,
@@ -182,12 +188,17 @@ const PROVIDER_CALLS_PER_ACCEPTED: Readonly<Record<Operation, number>> = {
   voice: 1,
 };
 
+/** A 24-hex GridFS `_id`, so a Media_Reference satisfies `mediaRefSchema` (A3). */
+function fileId(): string {
+  return new ObjectId().toHexString();
+}
+
 /* ========================================================================== */
-/* The counter — one in-memory `counters` table, keyed as migration 0007 keys it */
+/* The counter — one in-memory `counters` collection, keyed as D19 keys it      */
 /* ========================================================================== */
 
 interface CounterState {
-  /** `user::operation::window_kind::window_key` → `used`. **No channel component.** */
+  /** `owner::operation::windowKind::windowKey` → `used`. **No channel component.** */
   readonly rows: Map<string, number>;
   increments: number;
   decrements: number;
@@ -201,11 +212,11 @@ function counterState(): CounterState {
 }
 
 /**
- * `counter_try_increment`, `counter_decrement` and `counter_used` as one in-memory row set.
+ * `counterTryIncrement`, `counterDecrement` and `counterUsed` as one in-memory row set.
  *
  * The read and the write in `tryIncrement` are separated by **no `await`**, which is what makes a
- * concurrent burst behave the way a single atomic UPDATE does: two overlapping requests cannot both
- * observe the same `used` and both write `used + 1`.
+ * concurrent burst behave the way the real conditional `findOneAndUpdate` does: two overlapping
+ * requests cannot both observe the same `used` and both write `used + 1`.
  */
 function sharedCounter(state: CounterState): CounterRpc {
   const key = (args: {
@@ -248,7 +259,7 @@ function sharedCounter(state: CounterState): CounterRpc {
 interface RequestRecord {
   /** Gateway calls this request made. Asserted per request, which is what makes zero mean zero. */
   providerCalls: number;
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly usageRows: UsageLogInsert[];
   /** The coverage a nested chat call was handed, if one happened. */
   readonly nestedCoverage: QuotaContext['role'][];
 }
@@ -256,18 +267,6 @@ interface RequestRecord {
 function requestRecord(): RequestRecord {
   return { providerCalls: 0, usageRows: [], nestedCoverage: [] };
 }
-
-/** A tripwire, not a stand-in: every seam is injected, so a read here means one was missed. */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
 
 function conversationFor(userId: string, channel: Conversation['channel']): Conversation {
   return {
@@ -283,24 +282,24 @@ function conversationFor(userId: string, channel: Conversation['channel']): Conv
 const knowledge: KnowledgeReader = (names) =>
   Promise.resolve(KNOWLEDGE_ROWS.filter((row) => names.includes(row.disease_name)));
 
-function storageStub(): StorageClientLike & ObjectRemoveClient {
-  return {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: true, error: null }),
-        createSignedUrl: (path: string) =>
-          Promise.resolve({
-            data: { signedUrl: `https://storage.test/${path}?token=synthetic` },
-            error: null,
-          }),
-        remove: () => Promise.resolve({ data: [{ name: 'removed' }], error: null }),
-      }),
-    },
-  };
+/**
+ * The owner-scoped media read (A3): a few bytes and a MIME type. The transcription seam never
+ * inspects the bytes, and the image classify seam sends whatever base64 it gets — this property is
+ * about the counter, not the media.
+ */
+function readMediaStub(): NonNullable<VoiceDeps['readMedia']> {
+  return () => Promise.resolve({ bytes: Buffer.from('media-bytes'), mimeType: 'audio/ogg' });
 }
 
-function refFor(bucket: string): StorageRef {
-  return { bucket: bucket as StorageRef['bucket'], path: `${USER_ID}/2026/09/${randomUUID()}.jpg` };
+function imageReadMediaStub(): NonNullable<DiagnosisDeps['readMedia']> {
+  return () => Promise.resolve({ bytes: Buffer.from('image-bytes'), mimeType: 'image/jpeg' });
+}
+
+/** The owner-scoped delete (A3), a no-op that reports success. */
+const removeStub: MediaRemover = () => Promise.resolve(true);
+
+function mediaRef(kind: MediaRef['kind']): MediaRef {
+  return { fileId: fileId(), kind };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -325,28 +324,8 @@ function diagnosisDeps(rpc: CounterRpc, record: RequestRecord, clockMs: number):
   };
 
   const store: DiagnosisStore = {
-    insertDiagnosis: (row) => {
-      const stored: DiagnosisRow = {
-        id: DIAGNOSIS_ID,
-        user_id: row.user_id,
-        conversation_id: row.conversation_id,
-        status: row.status,
-        disease_name: row.disease_name ?? null,
-        knowledge_id: row.knowledge_id ?? null,
-        confidence: row.confidence ?? null,
-        severity: row.severity,
-        explanation: row.explanation,
-        language: row.language,
-        needs_expert: row.needs_expert ?? false,
-        channel: row.channel,
-        image_bucket: row.image_bucket,
-        image_path: row.image_path,
-        full_image_deleted_at: null,
-        model_provider: row.model_provider,
-        created_at: '2026-09-16T01:00:00.000Z',
-      };
-      return Promise.resolve(stored);
-    },
+    // A3: the store returns the stored diagnosis id (hex string).
+    insertDiagnosis: () => Promise.resolve(DIAGNOSIS_ID),
     insertUsageLog: (row) => {
       record.usageRows.push(row);
       return Promise.resolve();
@@ -360,12 +339,11 @@ function diagnosisDeps(rpc: CounterRpc, record: RequestRecord, clockMs: number):
   };
 
   return {
-    supabase: unreachableSupabase,
-    storage: storageStub(),
     store,
     conversations,
     knowledge,
     models,
+    readMedia: imageReadMediaStub(),
     quota: { rpc, now: new Date(clockMs) },
     now: () => clockMs,
     deadlineMs: clockMs + 45_000,
@@ -380,18 +358,21 @@ function diagnosisDeps(rpc: CounterRpc, record: RequestRecord, clockMs: number):
 /** A question that names a verified condition, so the turn resolves a scope and calls the model. */
 const CHAT_QUESTION = `what should I do about ${CONDITION}`;
 
-function messageRowFor(row: TablesInsert<'messages'>, id: string): MessageRow {
+function messageRecordFor(row: MessageInsert, id: string): MessageRecord {
   return {
-    id,
-    conversation_id: row.conversation_id,
-    user_id: row.user_id,
+    _id: new ObjectId(id),
+    ownerId: row.ownerId,
+    conversationId: new ObjectId(row.conversationId),
     role: row.role,
     content: row.content,
     language: row.language,
     channel: row.channel,
-    input_kind: row.input_kind ?? 'text',
-    transcript_of: row.transcript_of ?? null,
-    created_at: '2026-09-16T01:00:00.000Z',
+    inputKind: row.inputKind,
+    transcriptOf:
+      row.transcriptOf === undefined
+        ? null
+        : { fileId: new ObjectId(row.transcriptOf.fileId), kind: row.transcriptOf.kind },
+    createdAt: new Date('2026-09-16T01:00:00.000Z'),
   };
 }
 
@@ -417,8 +398,8 @@ function chatDeps(rpc: CounterRpc, record: RequestRecord, clockMs: number): Chat
   const writes: ChatWriteStore = {
     insertTurn: (rows) =>
       Promise.resolve([
-        messageRowFor(rows[0], FARMER_MESSAGE_ID),
-        messageRowFor(rows[1], ANSWER_MESSAGE_ID),
+        messageRecordFor(rows[0], FARMER_MESSAGE_ID),
+        messageRecordFor(rows[1], ANSWER_MESSAGE_ID),
       ]),
     insertUsageLog: (row) => {
       record.usageRows.push(row);
@@ -429,7 +410,6 @@ function chatDeps(rpc: CounterRpc, record: RequestRecord, clockMs: number): Chat
   };
 
   return {
-    supabase: unreachableSupabase,
     writes,
     store,
     knowledge,
@@ -496,13 +476,10 @@ function voiceDeps(rpc: CounterRpc, record: RequestRecord, clockMs: number): Voi
     },
   };
 
-  const storage = storageStub();
-
   return {
-    supabase: unreachableSupabase,
     chat,
-    storage,
-    deleter: storage,
+    readMedia: readMediaStub(),
+    remove: removeStub,
     store,
     transcribe,
     quota: { rpc, now: new Date(clockMs) },
@@ -539,7 +516,7 @@ async function runRequest(
       await diagnose(
         {
           userId: USER_ID,
-          storageRef: refFor(STORAGE_BUCKETS.cropImages),
+          image: mediaRef('crop-image'),
           language,
           channel,
           conversationId: CONVERSATION_ID,
@@ -562,7 +539,7 @@ async function runRequest(
       await transcribeAndAnswer(
         {
           userId: USER_ID,
-          storageRef: refFor(STORAGE_BUCKETS.voiceMessages),
+          audio: mediaRef('voice'),
           language,
           channel,
           conversationId: CONVERSATION_ID,
@@ -592,7 +569,7 @@ interface Summary {
   readonly accepted: number;
   readonly declined: number;
   readonly acceptedWeb: number;
-  readonly acceptedWhatsapp: number;
+  readonly acceptedTelegram: number;
 }
 
 async function executeAll(
@@ -628,7 +605,7 @@ async function executeAll(
     accepted: accepted.length,
     declined: outcomes.length - accepted.length,
     acceptedWeb: accepted.filter((outcome) => outcome.channel === 'web').length,
-    acceptedWhatsapp: accepted.filter((outcome) => outcome.channel === 'whatsapp').length,
+    acceptedTelegram: accepted.filter((outcome) => outcome.channel === 'telegram').length,
   };
 }
 
@@ -639,9 +616,9 @@ async function executeAll(
 /** How the requests are spread across the two channels. */
 const DISTRIBUTIONS = [
   'all_web',
-  'all_whatsapp',
+  'all_telegram',
   'alternating',
-  'whatsapp_first_then_web',
+  'telegram_first_then_web',
   'mixed',
 ] as const;
 
@@ -678,21 +655,21 @@ function channelsFor(burst: Burst): readonly Channel[] {
     switch (burst.distribution) {
       case 'all_web':
         return 'web';
-      case 'all_whatsapp':
-        return 'whatsapp';
+      case 'all_telegram':
+        return 'telegram';
       case 'alternating':
-        return index % 2 === 0 ? 'web' : 'whatsapp';
-      case 'whatsapp_first_then_web':
-        return index < Math.floor(total / 2) ? 'whatsapp' : 'web';
+        return index % 2 === 0 ? 'web' : 'telegram';
+      case 'telegram_first_then_web':
+        return index < Math.floor(total / 2) ? 'telegram' : 'web';
       case 'mixed':
-        return burst.bits[index % burst.bits.length] === true ? 'whatsapp' : 'web';
+        return burst.bits[index % burst.bits.length] === true ? 'telegram' : 'web';
     }
   });
 }
 
-/** `web`↔`whatsapp`. The mirror of an all-web burst is an all-WhatsApp burst. */
+/** `web`↔`telegram`. The mirror of an all-web burst is an all-Telegram burst. */
 function mirrored(channels: readonly Channel[]): readonly Channel[] {
-  return channels.map((channel) => (channel === 'web' ? 'whatsapp' : 'web'));
+  return channels.map((channel) => (channel === 'web' ? 'telegram' : 'web'));
 }
 
 /* ========================================================================== */
@@ -769,7 +746,7 @@ describe('Property 20: the daily quota is never exceeded, and both channels shar
 
           /** And the audit says the decline spent nothing (Requirements 14.3, 14.6). */
           expect(outcome.record.usageRows, label).toHaveLength(1);
-          const row = outcome.record.usageRows[0] as TablesInsert<'usage_logs'>;
+          const row = outcome.record.usageRows[0] as UsageLogInsert;
           expect(row.outcome, label).toBe('quota_declined');
           expect(row.quota_spent, label).toBe(false);
           expect(row.model_provider, label).toBe('none');
@@ -791,7 +768,7 @@ describe('Property 20: the daily quota is never exceeded, and both channels shar
           run.accepted,
         );
         expect(mirror.declined, label).toBe(run.declined);
-        expect(mirror.acceptedWeb + mirror.acceptedWhatsapp, label).toBe(mirror.accepted);
+        expect(mirror.acceptedWeb + mirror.acceptedTelegram, label).toBe(mirror.accepted);
 
         /**
          * And the mirror really was a different distribution: in the sequential order the accepted
@@ -800,8 +777,8 @@ describe('Property 20: the daily quota is never exceeded, and both channels shar
          * and pinning it would be asserting a scheduling accident.
          */
         if (order === 'sequential') {
-          expect(mirror.acceptedWeb, label).toBe(run.acceptedWhatsapp);
-          expect(mirror.acceptedWhatsapp, label).toBe(run.acceptedWeb);
+          expect(mirror.acceptedWeb, label).toBe(run.acceptedTelegram);
+          expect(mirror.acceptedTelegram, label).toBe(run.acceptedWeb);
         }
       }),
       // 60 runs: the chat operation alone drives 51-53 real service calls per distribution, twice
@@ -819,23 +796,23 @@ describe('Property 20: the daily quota is never exceeded, and both channels shar
     expect(declinedSeen).toBeGreaterThan(0);
   });
 
-  it('lets a WhatsApp request spend the unit a web request would have had', async () => {
+  it('lets a Telegram request spend the unit a web request would have had', async () => {
     /**
      * The sharing claim from the other side, and the one an accepted-count comparison cannot make:
-     * a farmer who has spent their whole allowance **on the web** is declined on **WhatsApp**, and
+     * a farmer who has spent their whole allowance **on the web** is declined on **Telegram**, and
      * the reverse. Two channels with two counters would answer both of these with an acceptance.
      */
     await fc.assert(
       fc.asyncProperty(
         fc.record({
           operation: fc.constantFrom<Operation>('image', 'chat', 'voice'),
-          spender: fc.constantFrom<Channel>('web', 'whatsapp'),
+          spender: fc.constantFrom<Channel>('web', 'telegram'),
           language: fc.constantFrom<Language>('en', 'hi', 'mr'),
           clockIso: fc.constantFrom(...CLOCKS),
         }),
         async ({ operation, spender, language, clockIso }) => {
           const limit = DAILY_QUOTAS[operation];
-          const other: Channel = spender === 'web' ? 'whatsapp' : 'web';
+          const other: Channel = spender === 'web' ? 'telegram' : 'web';
           const clockMs = Date.parse(clockIso);
 
           const state = counterState();

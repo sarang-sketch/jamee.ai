@@ -1,9 +1,10 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { ObjectId } from 'mongodb';
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import type { CapabilityRunner, TextCall } from '@/lib/ai/capabilities';
-import { REPHRASE_REJECTED_REASON } from '@/lib/db/usage-log';
+import type { DiagnosisRecord, MessageRecord } from '@/lib/db/reads';
+import { REPHRASE_REJECTED_REASON, type UsageLogInsert } from '@/lib/db/usage-log';
 import { AppError } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { messages } from '@/lib/messages';
@@ -28,9 +29,9 @@ import {
   type ChatWriteStore,
   type ContextMessage,
   type ContextStore,
+  type MessageInsert,
 } from '@/services/chat.service';
 import { ownsRequest, type CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
 
 /**
  * ### Property 11: Chat answers are grounded only in resolved knowledge base entries
@@ -128,14 +129,13 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
 /* ========================================================================== */
 
 const FARMER = '33333333-3333-4333-8333-333333333333';
-const THREAD = '44444444-4444-4444-8444-444444444444';
-const FARMER_MESSAGE_ID = '55555555-5555-4555-8555-555555555555';
-const ANSWER_MESSAGE_ID = '66666666-6666-4666-8666-666666666666';
-const DIAGNOSIS_ID = '77777777-7777-4777-8777-777777777777';
+/** Under A3 a conversation `_id` is a 24-hex ObjectId; the scope check compares its `toHexString()`. */
+const THREAD = '44444444444444444444444a';
+const THREAD_OID = new ObjectId(THREAD);
+const DIAGNOSIS_OID = new ObjectId('77777777777777777777777a');
 
 /** 2026-09-15T19:30:00Z. Fixed so the run owns its clock and never reads the wall clock. */
 const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
-const NOW_ISO = new Date(NOW_MS).toISOString();
 
 /** The four agronomic columns, in the order a farmer needs them and the prompt renders them. */
 const KB_FIELDS = ['symptoms', 'causes', 'treatment', 'prevention'] as const;
@@ -218,7 +218,7 @@ type Tails = Record<KbField, readonly string[]>;
 function rowFor(condition: VerifiedCondition, tag: string, tails: Tails): KnowledgeEntry {
   const healthy = condition === HEALTHY_CONDITION;
   return {
-    id: `00000000-0000-4000-8000-${tag.slice(2).padStart(12, '0')}`,
+    id: `0000000000000000${tag.slice(2).toLowerCase().padStart(8, '0')}`,
     disease_name: condition,
     crop: CROP_OF[condition],
     scientific_name: healthy ? null : `${tag} pathogen`,
@@ -393,7 +393,7 @@ function expectedPathOf(kind: ModelKind): ExpectedPath {
 /* ========================================================================== */
 
 const languageArb = fc.constantFrom<Language>(...SUPPORTED_LANGUAGES);
-const channelArb = fc.constantFrom<Channel>('web', 'whatsapp');
+const channelArb = fc.constantFrom<Channel>('web', 'telegram');
 
 /** One to two statements per column: enough for order and containment, short enough to stay terse. */
 const tailsArb = fc.subarray([...TAILS], { minLength: 1, maxLength: 2 });
@@ -543,26 +543,11 @@ interface Recorded {
   readonly prompts: string[];
   /** Every name set the knowledge reader was asked for. */
   readonly knowledgeReads: VerifiedCondition[][];
-  readonly messageRows: TablesInsert<'messages'>[];
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly messageRows: MessageInsert[];
+  readonly usageRows: UsageLogInsert[];
   readonly touched: string[];
   counts: { classify: number; generate: number; increments: number; decrements: number };
 }
-
-/**
- * A tripwire, not a stand-in: every seam is injected, so a read of the request client means the
- * service reached past its dependencies and nothing recorded above can be trusted.
- */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
 
 interface Harness {
   readonly deps: ChatTurnDeps;
@@ -574,7 +559,7 @@ function harness(options: {
   readonly rows: readonly KnowledgeEntry[];
   /** The window, oldest → newest. The store hands it back newest-first, as the index does. */
   readonly transcript: readonly ContextMessage[];
-  readonly latestDiagnosis: DiagnosisRow | null;
+  readonly latestDiagnosis: DiagnosisRecord | null;
   readonly behaviour: Behaviour;
 }): Harness {
   const recorded: Recorded = {
@@ -639,17 +624,20 @@ function harness(options: {
       Promise.resolve(conversationId === THREAD && userId === FARMER),
     insertTurn: (pair) => {
       recorded.messageRows.push(...pair);
-      const stored: MessageRow[] = pair.map((row, index) => ({
-        id: index === 0 ? FARMER_MESSAGE_ID : ANSWER_MESSAGE_ID,
-        conversation_id: row.conversation_id,
-        user_id: row.user_id,
+      const stored: MessageRecord[] = pair.map((row, index) => ({
+        _id: new ObjectId(index === 0 ? '55555555555555555555555a' : '66666666666666666666666a'),
+        ownerId: row.ownerId,
+        conversationId: new ObjectId(row.conversationId),
         role: row.role,
         content: row.content,
         language: row.language,
         channel: row.channel,
-        input_kind: row.input_kind ?? 'text',
-        transcript_of: row.transcript_of ?? null,
-        created_at: NOW_ISO,
+        inputKind: row.inputKind,
+        transcriptOf:
+          row.transcriptOf === undefined
+            ? null
+            : { fileId: new ObjectId(row.transcriptOf.fileId), kind: row.transcriptOf.kind },
+        createdAt: new Date(NOW_MS),
       }));
       return Promise.resolve(stored);
     },
@@ -666,7 +654,6 @@ function harness(options: {
   return {
     recorded,
     deps: {
-      supabase: unreachableSupabase,
       store,
       writes,
       knowledge,
@@ -687,38 +674,37 @@ function harness(options: {
 function transcriptFor(seed: number, turns: number): readonly ContextMessage[] {
   const tag = `TX${(seed & 0xffff).toString(16).toUpperCase().padStart(4, '0')}`;
   return Array.from({ length: turns }, (_unused, index) => ({
-    id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
-    conversation_id: THREAD,
-    user_id: FARMER,
+    _id: new ObjectId(`10000000000000000000000${index}`.slice(0, 24)),
+    ownerId: FARMER,
+    conversationId: THREAD_OID,
     role: index % 2 === 0 ? ('farmer' as const) : ('jamee' as const),
     content: `${tag}-${index} an earlier turn of this thread`,
     language: 'en' as const,
     channel: 'web' as const,
-    input_kind: 'text' as const,
-    transcript_of: null,
-    created_at: new Date(NOW_MS - (turns - index) * 60_000).toISOString(),
+    inputKind: 'text' as const,
+    transcriptOf: null,
+    createdAt: new Date(NOW_MS - (turns - index) * 60_000),
   }));
 }
 
-function diagnosisRow(condition: VerifiedCondition, knowledgeId: string): DiagnosisRow {
+function diagnosisRow(condition: VerifiedCondition, knowledgeId: string): DiagnosisRecord {
   return {
-    id: DIAGNOSIS_ID,
-    user_id: FARMER,
-    conversation_id: THREAD,
+    _id: DIAGNOSIS_OID,
+    ownerId: FARMER,
+    conversationId: THREAD_OID,
     status: 'identified',
-    disease_name: condition,
-    knowledge_id: knowledgeId,
+    diseaseName: condition,
+    knowledgeId: new ObjectId(knowledgeId),
     confidence: 0.87,
     severity: 'moderate',
     explanation: 'an earlier diagnosis of this conversation',
     language: 'en',
-    needs_expert: false,
+    needsExpert: false,
     channel: 'web',
-    image_bucket: 'crop-images',
-    image_path: `${FARMER}/2026/09/leaf.jpg`,
-    full_image_deleted_at: null,
-    model_provider: 'gemini',
-    created_at: new Date(NOW_MS - 300_000).toISOString(),
+    mediaRef: { fileId: new ObjectId('a11111111111111111111111'), kind: 'crop-image' },
+    fullImageDeletedAt: null,
+    modelProvider: 'gemini',
+    createdAt: new Date(NOW_MS - 300_000),
   };
 }
 

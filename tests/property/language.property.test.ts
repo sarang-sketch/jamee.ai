@@ -1,6 +1,6 @@
-﻿import type { SupabaseClient } from '@supabase/supabase-js';
-import * as fc from 'fast-check';
 import type { NextRequest } from 'next/server';
+import { ObjectId } from 'mongodb';
+import * as fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
 
 import { POST as chatRoute } from '@/app/api/chat/route';
@@ -8,13 +8,15 @@ import { POST as diagnoseRoute } from '@/app/api/diagnose/route';
 import { POST as voiceRoute } from '@/app/api/voice/route';
 import { jameeRequests, type FetchLike } from '@/components/LanguageProvider';
 import type { CapabilityRunner } from '@/lib/ai/capabilities';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
+import type { DiagnosisRecord, MessageRecord } from '@/lib/db/reads';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import { AppError, withErrorHandling } from '@/lib/errors';
 import type { KnowledgeEntry, KnowledgeReader } from '@/lib/knowledge';
 import { DEFAULT_LANGUAGE, languageCookie, resolveLanguage } from '@/lib/language';
 import { messages as catalogFor } from '@/lib/messages';
 import {
   HEALTHY_CONDITION,
+  OBJECT_ID_HEX_REGEX,
   SUPPORTED_LANGUAGES,
   VERIFIED_CONDITIONS,
   channelSchema,
@@ -33,7 +35,6 @@ import {
   type ContextStore,
 } from '@/services/chat.service';
 import type { CounterRpc } from '@/services/quota.service';
-import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/database';
 
 /**
  * ### Property 19: Language codes propagate, and unsupported codes are refused at the edge
@@ -80,42 +81,37 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
  *    language check is genuinely upstream of it rather than merely present.
  *
  * =============================================================================
- * WHICH SEAMS ARE COUNTED, AND WHY THOSE
+ * WHICH SEAMS ARE COUNTED, AND WHY THOSE (AMENDMENT A3)
  * =============================================================================
  *
  * "Before any provider call or quota spend" is asserted by counting the doors, not by inspecting the
- * route bodies:
+ * route bodies. Under A3 there is no Supabase request client and no service-role credential; the
+ * doors are the module-boundary functions the real services pass through, and each is a **partial**
+ * mock (the rest of every module is the shipped one, so the propagation half runs against real code):
  *
- *  - **`gatewayRunner()`** — the only way any service reaches a model. Counted directly, so
- *    "no provider call" is a number rather than an inference.
- *  - **`createAdminClient()`** — the service-role credential, and therefore the only door to a quota
- *    spend: `QuotaService` takes the counter RPC as a seam and its default,
- *    `adminCounterRpc(createAdminClient())`, cannot reach `counter_try_increment` without it. The
- *    audit table is behind the same credential. **This is the seam counted rather than
- *    `adminCounterRpc` itself**, and the reason is worth writing down: `quota.service.ts` calls that
- *    factory through a module-internal reference, so replacing its export intercepts a cross-module
- *    caller and nothing else. A tripwire on it would have been unfirable — green, and saying nothing.
- *    `createAdminClient` is a genuine cross-module import from that module, and it is the narrower
- *    claim anyway: no credential, no counter.
- *  - **`createServerSupabase()`** — the request-scoped credential, and the first statement inside
- *    every one of the three handlers past the parse. Its ledger entry is what the supported-language
- *    complement asserts *is* present, which is how the two halves together pin the ordering.
- *  - **`burstLimiter()`** and **`objectSizeOf()`** — the two remaining seams the handler bodies
- *    touch, so the ledger covers everything reachable past the parse rather than a chosen subset.
+ *  - **`gatewayRunner()`** (`@/lib/ai/capabilities`) — the only way any service reaches a model.
+ *    Counted directly, so "no provider call" is a number rather than an inference.
+ *  - **`farmerData()`** (`@/lib/db/farmer`) — the owner-scoped Data_Access_Layer accessor, and under
+ *    A3 the **only door to a quota spend**: `QuotaService`'s default `adminCounterRpc()` reaches
+ *    `counterTryIncrement` through it, and every `messages`/`diagnoses`/`usage_logs` write and the
+ *    conversation-ownership read pass through it too. It replaces the retired `createAdminClient` /
+ *    `createServerSupabase` doors: no accessor, no counter, no write.
+ *  - **`readMediaBytesForOwner()`** (`@/lib/db/analysis`) — the owner-scoped GridFS read that the
+ *    diagnosis and voice services do first. It replaces the retired storage-object probe
+ *    (`objectSizeOf`), and reaching it would mean a request got past the parse into the service body.
+ *  - **`burstLimiter()`** (`@/lib/rate-limit`) — the burst control the three routes bind, so the
+ *    ledger covers the seam the handler bodies touch rather than a chosen subset.
  *
- * Each is a **partial** mock: the rest of every module is the real one, so the propagation half runs
- * against the shipped code and only these five factories are observable. Both of the two that carry
- * the load were confirmed to fire by removing the injection they stand in for.
+ * The propagation half injects every service seam (`writes`, `store`, `knowledge`, `models`,
+ * `quota.rpc`), so the real `ChatService` it exercises reaches none of these four doors — which is
+ * what lets the same file run real code in one half and count untripped doors in the other.
  *
  * =============================================================================
  * WHAT THIS PROPERTY DELIBERATELY DOES NOT ASSERT
  * =============================================================================
  *
- * **`<html lang>`.** `layout.tsx` awaits `activeLanguage(null)` — the cookie answer — and
- * `LanguageProvider` writes `document.documentElement.lang` after hydration, which together close
- * the profile-only and post-switch cases. Both are DOM behaviour and belong to the component tests;
- * a node-environment property test has no document to read, and asserting it here would mean
- * re-describing the effect rather than observing it.
+ * **`<html lang>`.** DOM behaviour, owned by the component tests; a node-environment property test
+ * has no document to read.
  *
  * **Envelope totality.** That every code renders in every language, with no leak, is Property 29's
  * claim. What is asserted here is narrower and is this property's: the code the *farmer selected*
@@ -123,7 +119,7 @@ import type { Database, DiagnosisRow, MessageRow, TablesInsert } from '@/types/d
  */
 
 /* ========================================================================== */
-/* Seams — recorded, then tripped                                              */
+/* Seams — recorded, then tripped (Amendment A3)                               */
 /* ========================================================================== */
 
 /**
@@ -146,50 +142,44 @@ const seams = vi.hoisted(() => {
   return {
     opened,
     currentUserId: vi.fn(),
-    createServerSupabase: tripwire('supabase.createServerSupabase'),
-    createAdminClient: tripwire('supabase.createAdminClient'),
+    farmerData: tripwire('db.farmerData'),
+    readMediaBytesForOwner: tripwire('db.readMediaBytesForOwner'),
     burstLimiter: tripwire('rateLimit.burstLimiter'),
-    objectSizeOf: tripwire('storage.objectSizeOf'),
     gatewayRunner: tripwire('ai.gatewayRunner'),
   };
 });
 
-/** The identity resolver the wrapper was built over. The real guard stays under test. */
-vi.mock('@/lib/supabase/server', () => ({
+/** The identity resolver the auth wrapper is built over. The real guard stays under test. */
+vi.mock('@/lib/auth/session', () => ({
   currentUserId: seams.currentUserId,
-  createServerSupabase: seams.createServerSupabase,
 }));
-
-vi.mock('@/lib/supabase/admin', () => ({ createAdminClient: seams.createAdminClient }));
 
 /**
  * Partial mocks from here down: one factory each, everything else the shipped module.
  *
  * That is what lets the propagation half exercise the real `ChatService`, the real `QuotaService`
- * reserve, and the real rate-limit helpers in the same file that counts these five doors.
+ * reserve, and the real rate-limit helpers in the same file that counts these four doors — the
+ * propagation half injects the service seams, so it never reaches any of them.
  */
+vi.mock('@/lib/db/farmer', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/db/farmer')>()),
+  farmerData: seams.farmerData,
+}));
+
+vi.mock('@/lib/db/analysis', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/db/analysis')>()),
+  readMediaBytesForOwner: seams.readMediaBytesForOwner,
+}));
+
 vi.mock('@/lib/rate-limit', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/rate-limit')>()),
   burstLimiter: seams.burstLimiter,
-}));
-
-vi.mock('@/lib/storage', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/storage')>()),
-  objectSizeOf: seams.objectSizeOf,
 }));
 
 vi.mock('@/lib/ai/capabilities', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/ai/capabilities')>()),
   gatewayRunner: seams.gatewayRunner,
 }));
-
-/**
- * The imports at the top of this file resolve **after** the mocks above, not before: `vi.mock` is
- * hoisted above every import by Vitest's transform, so the three route modules and the real
- * `ChatService` both see the stubs. Keeping the imports in one block rather than splitting them
- * around the `vi.mock` calls is safe for that reason, and it is the arrangement
- * `auth-gate.property.test.ts` and every route test in `src/` already use.
- */
 
 /* ========================================================================== */
 /* Fixtures                                                                    */
@@ -198,7 +188,17 @@ vi.mock('@/lib/ai/capabilities', async (importOriginal) => ({
 const ORIGIN = 'https://jamee.test';
 
 const USER = '11111111-1111-4111-8111-111111111111';
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
+/** The 24-hex conversation id the wire schemas (`chatRequestSchema`, `voiceRequestSchema`) now
+ * require in a request body — Amendment A3 moved these fields from `z.uuid()` to `dbIdSchema`. */
+const WIRE_CONVERSATION_ID = '44444444444444448444444b';
+/**
+ * The conversation thread the service resolves context against. Under A3 a conversation `_id` is a
+ * GridFS-style 24-hex ObjectId, and `assembleContext`'s scope check compares
+ * `row.conversationId.toHexString()` against this string — so the diagnosis record's
+ * `conversationId` is `new ObjectId(THREAD)`, matching by construction.
+ */
+const THREAD = '4a4a4a4a4a4a4a4a4a4a4a4a';
+const THREAD_OID = new ObjectId(THREAD);
 
 const NOW_MS = Date.parse('2026-09-16T01:30:00.000Z');
 
@@ -213,14 +213,17 @@ const CROP_OF: Record<VerifiedCondition, KnowledgeEntry['crop']> = {
   'Potato Late Blight': 'potato',
 };
 
-function uuidFor(prefix: string, serial: number): string {
-  return `${prefix}-0000-4000-8000-${String(serial).padStart(12, '0')}`;
+/** A 24-hex GridFS `_id`, so a Media_Reference satisfies `mediaRefSchema` (A3). */
+function fileIdFor(serial: number): string {
+  const hex = serial.toString(16).padStart(24, '0');
+  if (!OBJECT_ID_HEX_REGEX.test(hex)) throw new Error(`bad fileId for ${serial}`);
+  return hex;
 }
 
 const KNOWLEDGE_ROWS: readonly KnowledgeEntry[] = VERIFIED_CONDITIONS.map((condition, index) => {
   const healthy = condition === HEALTHY_CONDITION;
   return {
-    id: uuidFor('1000abcd', index + 1),
+    id: fileIdFor(index + 1),
     disease_name: condition,
     crop: CROP_OF[condition],
     scientific_name: healthy ? null : `${condition} pathogen`,
@@ -285,17 +288,6 @@ function scriptClassHolds(text: string, language: Language): boolean {
 /* The propagation harness — every seam injected                                */
 /* ========================================================================== */
 
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
-
 /** How the answer a farmer reads was produced. All three render text, in three different ways. */
 const ANSWER_SOURCES = [
   /** The model's own localized prose, kept. */
@@ -312,8 +304,8 @@ const ENVELOPE_FAILURES = ['quota_declined', 'conversation_not_owned'] as const;
 type EnvelopeFailure = (typeof ENVELOPE_FAILURES)[number];
 
 interface TurnRecorded {
-  readonly messageRows: TablesInsert<'messages'>[];
-  readonly usageRows: TablesInsert<'usage_logs'>[];
+  readonly messageRows: MessageRecord[];
+  readonly usageRows: UsageLogInsert[];
   counts: { generate: number };
 }
 
@@ -332,13 +324,13 @@ function turnHarness(options: {
   readonly atLimit?: boolean;
 }): TurnHarness {
   const recorded: TurnRecorded = { messageRows: [], usageRows: [], counts: { generate: 0 } };
-  const scope = { conversationId: CONVERSATION_ID, userId: USER };
+  const scope = { conversationId: THREAD, userId: USER };
 
   const store: ContextStore = {
     recentMessages: () => Promise.resolve([]),
     latestDiagnosis: () =>
       Promise.resolve(
-        options.source === 'referral_copy' ? null : diagnosisRowFor(scope, options.condition),
+        options.source === 'referral_copy' ? null : diagnosisRecordFor(scope, options.condition),
       ),
   };
 
@@ -367,19 +359,22 @@ function turnHarness(options: {
 
   const writes: ChatWriteStore = {
     insertTurn: (rows) => {
-      recorded.messageRows.push(...rows);
-      const stored: MessageRow[] = rows.map((row, index) => ({
-        id: uuidFor('9e55a9e0', recorded.messageRows.length - rows.length + index + 1),
-        conversation_id: row.conversation_id,
-        user_id: row.user_id,
+      const stored: MessageRecord[] = rows.map((row, index) => ({
+        _id: new ObjectId(fileIdFor(recorded.messageRows.length + index + 100)),
+        ownerId: row.ownerId,
+        conversationId: THREAD_OID,
         role: row.role,
         content: row.content,
         language: row.language,
         channel: row.channel,
-        input_kind: row.input_kind ?? 'text',
-        transcript_of: row.transcript_of ?? null,
-        created_at: '2026-09-16T01:31:00.000Z',
+        inputKind: row.inputKind,
+        transcriptOf:
+          row.transcriptOf === undefined
+            ? null
+            : { fileId: new ObjectId(row.transcriptOf.fileId), kind: row.transcriptOf.kind },
+        createdAt: new Date('2026-09-16T01:31:00.000Z'),
       }));
+      recorded.messageRows.push(...stored);
       return Promise.resolve(stored);
     },
     insertUsageLog: (row) => {
@@ -399,7 +394,6 @@ function turnHarness(options: {
   return {
     recorded,
     deps: {
-      supabase: unreachableSupabase,
       writes,
       store,
       knowledge,
@@ -411,28 +405,32 @@ function turnHarness(options: {
   };
 }
 
-function diagnosisRowFor(
+/**
+ * A `DiagnosisRecord` (`WithId<DiagnosisDoc>` under A3) for the conversation's most recent
+ * diagnosis — the shape `assembleContext` reads `status`/`diseaseName` off and `assertInScope`
+ * re-checks by `_id`/`conversationId`/`ownerId`.
+ */
+function diagnosisRecordFor(
   scope: { readonly conversationId: string; readonly userId: string },
   condition: VerifiedCondition,
-): DiagnosisRow {
+): DiagnosisRecord {
   return {
-    id: uuidFor('d1a90515', 1),
-    user_id: scope.userId,
-    conversation_id: scope.conversationId,
+    _id: new ObjectId(fileIdFor(900)),
+    ownerId: scope.userId,
+    conversationId: THREAD_OID,
     status: 'identified',
-    disease_name: condition,
-    knowledge_id: entryFor(condition).id,
+    diseaseName: condition,
+    knowledgeId: new ObjectId(entryFor(condition).id),
     confidence: 0.87,
     severity: condition === HEALTHY_CONDITION ? 'none' : 'moderate',
     explanation: `${condition} explanation`,
     language: 'en',
-    needs_expert: false,
+    needsExpert: false,
     channel: 'web',
-    image_bucket: STORAGE_BUCKETS.cropImages,
-    image_path: `${scope.userId}/2026/09/${uuidFor('0b1ec700', 1)}.jpg`,
-    full_image_deleted_at: null,
-    model_provider: 'gemini',
-    created_at: '2026-09-16T00:30:00.000Z',
+    mediaRef: { fileId: new ObjectId(fileIdFor(901)), kind: 'crop-image' },
+    fullImageDeletedAt: null,
+    modelProvider: 'gemini',
+    createdAt: new Date('2026-09-16T00:30:00.000Z'),
   };
 }
 
@@ -550,9 +548,10 @@ const HANDLERS: Record<RouteName, (request: NextRequest) => Promise<Response>> =
 
 /**
  * A body that satisfies its endpoint's contract in every respect except the `language` field, which
- * the caller supplies.
+ * the caller supplies. Under A3 the media bodies carry Media_References (`{ fileId, kind }`), not
+ * `{ bucket, path }`.
  *
- * `alsoInvalid` breaks a second field as well. That case is not padding: `edgeErrorFor` consults the
+ * `alsoInvalid` breaks a second field as well. That case is not padding: `parseJsonBody` consults the
  * language branch first, so a body naming both an unsupported language and an over-long recording
  * must still be `LANGUAGE_UNSUPPORTED` — the language is the thing Jamee will not do at all, and an
  * endpoint-specific branch must not shadow it.
@@ -561,26 +560,21 @@ function bodyFor(route: RouteName, language: unknown, alsoInvalid: boolean): Rec
   switch (route) {
     case 'chat':
       return {
-        conversationId: CONVERSATION_ID,
+        conversationId: WIRE_CONVERSATION_ID,
         ...(alsoInvalid ? {} : { message: 'why?' }),
         language,
       };
     case 'diagnose':
       return {
-        image: {
-          bucket: alsoInvalid ? STORAGE_BUCKETS.voiceMessages : STORAGE_BUCKETS.cropImages,
-          path: `${USER}/2026/09/${uuidFor('0b1ec700', 2)}.jpg`,
-        },
+        // `alsoInvalid` names the wrong kind, which the schema's `kind === 'crop-image'` refine rejects.
+        image: { fileId: fileIdFor(2), kind: alsoInvalid ? 'voice' : 'crop-image' },
         language,
       };
     case 'voice':
       return {
-        audio: {
-          bucket: STORAGE_BUCKETS.voiceMessages,
-          path: `${USER}/2026/09/${uuidFor('0b1ec700', 3)}.webm`,
-        },
-        conversationId: CONVERSATION_ID,
-        // Past `MAX_AUDIO_SECONDS`, which is `AUDIO_TOO_LONG`'s own `too_big` issue.
+        audio: { fileId: fileIdFor(3), kind: 'voice' },
+        conversationId: WIRE_CONVERSATION_ID,
+        // Past `MAX_AUDIO_SECONDS`, which is the schema's own `too_big` issue.
         durationSeconds: alsoInvalid ? 9_999 : 12,
         language,
       };
@@ -667,19 +661,11 @@ describe('Property 19: the selected language propagates to every layer that rend
             };
             const requests = jameeRequests(selected, recorder);
 
-            await requests.chat({ conversationId: CONVERSATION_ID, message });
-            await requests.diagnose({
-              image: {
-                bucket: STORAGE_BUCKETS.cropImages,
-                path: `${USER}/2026/09/${uuidFor('0b1ec700', 4)}.jpg`,
-              },
-            });
+            await requests.chat({ conversationId: WIRE_CONVERSATION_ID, message });
+            await requests.diagnose({ image: { fileId: fileIdFor(4), kind: 'crop-image' } });
             await requests.voice({
-              audio: {
-                bucket: STORAGE_BUCKETS.voiceMessages,
-                path: `${USER}/2026/09/${uuidFor('0b1ec700', 5)}.webm`,
-              },
-              conversationId: CONVERSATION_ID,
+              audio: { fileId: fileIdFor(5), kind: 'voice' },
+              conversationId: WIRE_CONVERSATION_ID,
               durationSeconds: 12,
             });
 
@@ -694,7 +680,7 @@ describe('Property 19: the selected language propagates to every layer that rend
             const result = await chatTurn(
               {
                 userId: USER,
-                conversationId: CONVERSATION_ID,
+                conversationId: THREAD,
                 message,
                 language: selected,
                 channel: test.channel,
@@ -822,7 +808,7 @@ describe('Property 19: the selected language propagates to every layer that rend
                 await chatTurn(
                   {
                     userId: USER,
-                    conversationId: CONVERSATION_ID,
+                    conversationId: THREAD,
                     message: 'why?',
                     language,
                     channel: test.channel,
@@ -926,10 +912,10 @@ describe('Property 19: an unsupported language code is refused at the request bo
         /* ================================================================== */
 
         /**
-         * Not one door was opened: no provider runner, neither credential, no burst slot, no storage
-         * probe. A code defaulted deeper in would have had to pass at least the request client to get
+         * Not one door was opened: no provider runner, no owner-scoped accessor, no GridFS read, no
+         * burst slot. A code defaulted deeper in would have had to pass the service body to get
          * anywhere; a provider call would have had to pass `gatewayRunner`; and a quota spend would
-         * have had to pass the service-role credential, which is the only way to the counter.
+         * have had to pass `farmerData`, which under A3 is the only way to the counter.
          */
         expect(seams.opened, `${where} reached past the request boundary`).toStrictEqual([]);
       }),
@@ -953,7 +939,9 @@ describe('Property 19: an unsupported language code is refused at the request bo
     /**
      * The complement, and the half that pins the *ordering*. A body carrying a supported code and
      * satisfying its contract must get past the language edge — which on these three routes means
-     * reaching `createServerSupabase()`, the first statement inside each handler past the parse.
+     * reaching the first door past the parse. Under A3 the diagnosis and voice services read the
+     * owner-scoped media first (`readMediaBytesForOwner`), and the chat service takes its burst slot
+     * (`burstLimiter`) before touching the Data_Access_Layer; either way a door is opened.
      *
      * That tripwire then throws, so the response is a 500. What matters is the pair: the ledger is
      * non-empty here and empty above, which is what makes "before any provider call or quota spend"
@@ -992,10 +980,8 @@ describe('Property 19: an unsupported language code is refused at the request bo
           );
           expect(response.status, where).not.toBe(400);
 
-          /* And it got past the parse: the first door was opened, and it was that one. */
-          expect(seams.opened, `${where} never reached the request client`).toStrictEqual([
-            'supabase.createServerSupabase',
-          ]);
+          /* And it got past the parse: at least one door past the request boundary was opened. */
+          expect(seams.opened.length, `${where} never reached past the parse`).toBeGreaterThan(0);
         },
       ),
       { numRuns: 120 },

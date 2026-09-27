@@ -1,25 +1,23 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { Buffer } from 'node:buffer';
+
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import { EXHAUSTED_CHAIN_CODE } from '@/lib/ai/gateway';
-import {
-  MAX_AUDIO_SECONDS,
-  STORAGE_BUCKETS,
-  TRANSCRIBE_ACCEPTED_CONTAINERS,
-} from '@/lib/config/verified';
+import { MAX_AUDIO_SECONDS, TRANSCRIBE_ACCEPTED_CONTAINERS } from '@/lib/config/verified';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import { AppError, ERROR_SPECS, isAppError, toEnvelope } from '@/lib/errors';
 import { messages } from '@/lib/messages';
 import {
+  OBJECT_ID_HEX_REGEX,
   SUPPORTED_LANGUAGES,
   voiceResponseSchema,
   type Channel,
   type ChatInput,
   type Language,
-  type StorageRef,
+  type MediaRef,
   type VoiceInput,
 } from '@/lib/schemas';
-import type { StorageClientLike } from '@/lib/storage';
 import {
   quotaStatusOf,
   reserveForRequest,
@@ -29,12 +27,11 @@ import {
 import {
   transcribeAndAnswer,
   type ChatAnswerer,
+  type MediaRemover,
   type NestedChatOutcome,
-  type ObjectRemoveClient,
   type VoiceDeps,
   type VoiceStore,
 } from '@/services/voice.service';
-import type { Database, TablesInsert } from '@/types/database';
 
 import {
   providerCallCount,
@@ -60,9 +57,9 @@ import {
  * WHERE THE PROPERTY IS OBSERVED
  * =============================================================================
  *
- * Steps 6 to 8 of `transcribeAndAnswer()` — the transcription call, the empty-transcript branch,
+ * Steps 5 to 8 of `transcribeAndAnswer()` — the transcription call, the empty-transcript branch,
  * and the nested `ChatService` call — driven through the service with every seam injected, so there
- * is no Supabase stack, no HTTP layer and no live provider.
+ * is no HTTP layer and no live provider.
  *
  * **Transcription is stubbed at the adapter seam** (`GroqTranscribeOptions.create`, through
  * `providerStubs()` in `tests/integration/providers.ts`), not at `VoiceDeps.transcribe`. That leaves
@@ -72,6 +69,24 @@ import {
  * happens *between* the provider's bytes and the farmer message, so a seam above that machinery
  * would make the claim true by construction — the stub would hand the service the same string
  * object it hands the assertion.
+ *
+ * =============================================================================
+ * THE A3 SUBSTRATE — GRIDFS BYTES IN, GRIDFS DELETE OUT
+ * =============================================================================
+ *
+ * Under Amendment A3 a `VoiceInput` carries a **Media_Reference** (`{ fileId, kind: 'voice' }`),
+ * not a `{ bucket, path }` storage reference: the recording's bytes live in the one GridFS bucket
+ * and are read by `VoiceDeps.readMedia` (the owner-scoped `readMediaBytesForOwner` in production).
+ * There is no signed URL and no storage client. The `readMedia` seam is stubbed here to return
+ * bytes and the stored MIME type, and the owner-scoped delete is `VoiceDeps.remove`
+ * (`MediaRemover = (ownerId, fileId) => Promise<boolean>`), which records the `fileId` it was asked
+ * to delete. So "the recording is gone" is `remove(userId, audio.fileId)` having been called, and
+ * "the recording is retained" is that list being empty — the direct A3 counterpart of the retired
+ * `storage.remove([path])` observation.
+ *
+ * The farmer message the nested chat call receives carries `transcriptOf` as the same
+ * Media_Reference (`{ fileId, kind: 'voice' }`), which is what a `messages` document stores under A3
+ * in place of the retired storage path.
  *
  * =============================================================================
  * WHAT "PRESERVES" IS ASSERTED AS
@@ -132,11 +147,9 @@ import {
 /* Fixtures                                                                    */
 /* ========================================================================== */
 
-const VOICE_BUCKET = STORAGE_BUCKETS.voiceMessages;
-
-const CONVERSATION_ID = '44444444-4444-4444-8444-444444444444';
-const FARMER_MESSAGE_ID = '55555555-5555-4555-8555-555555555555';
-const ANSWER_MESSAGE_ID = '66666666-6666-4666-8666-666666666666';
+const CONVERSATION_ID = '44444444444444448444444a';
+const FARMER_MESSAGE_ID = '55555555555555558555555a';
+const ANSWER_MESSAGE_ID = '66666666666666668666666a';
 
 /** 2026-09-15T19:30:00Z. Fixed, so the run owns its clock and never reads the wall clock. */
 const NOW_MS = Date.parse('2026-09-15T19:30:00.000Z');
@@ -163,6 +176,17 @@ const LATIN_CLAUSES: readonly string[] = [
 
 /** Whitespace runs, including the non-breaking space `trim()` also removes. */
 const WHITESPACE_RUNS: readonly string[] = [' ', '  ', '\t', '\n', '\r\n', '\u00a0', ' \t\n '];
+
+/**
+ * A GridFS `_id` as its 24-character lowercase hex form — the shape `mediaRefSchema` requires
+ * (`OBJECT_ID_HEX_REGEX`). Derived deterministically from a uuid so a run's ids are stable and a
+ * failure names the same reference twice.
+ */
+function fileIdFrom(seed: string): string {
+  const hex = seed.replace(/[^0-9a-f]/gi, '').toLowerCase().padEnd(24, '0').slice(0, 24);
+  if (!OBJECT_ID_HEX_REGEX.test(hex)) throw new Error(`could not build a 24-hex fileId from "${seed}"`);
+  return hex;
+}
 
 /* ========================================================================== */
 /* The transcript shapes                                                       */
@@ -227,7 +251,8 @@ interface Scenario {
 const scenarioArb: fc.Arbitrary<Scenario> = fc.record({
   shape: fc.constantFrom<Shape>(...SHAPES),
   language: fc.constantFrom<Language>(...SUPPORTED_LANGUAGES),
-  channel: fc.constantFrom<Channel>('web', 'whatsapp'),
+  // A3: the two channels are the browser and Telegram.
+  channel: fc.constantFrom<Channel>('web', 'telegram'),
   userId: fc.uuid(),
   objectId: fc.uuid(),
   /** V10's accepted list, so the pre-flight container guard passes on what a recorder produces. */
@@ -301,21 +326,6 @@ function transcriptFor(scenario: Scenario): string {
 /* ========================================================================== */
 
 /**
- * A tripwire, not a stand-in: every seam is injected, so a read of the request client means the
- * service reached past its dependencies and nothing recorded below can be trusted.
- */
-const unreachableSupabase = new Proxy(
-  {},
-  {
-    get(_target, property) {
-      throw new Error(
-        `the request client was used (read of "${String(property)}"); every seam must be injected`,
-      );
-    },
-  },
-) as unknown as SupabaseClient<Database>;
-
-/**
  * Fails the run if the nested chat call reserves anything of its own.
  *
  * The chat stub hands the coverage it was given to the **real** `reserveForRequest()`, which
@@ -338,9 +348,9 @@ const unreachableRpc: CounterRpc = {
 interface Recorded {
   /** Every nested chat call, in order. Exactly one on the answered path, none on the other two. */
   readonly chatCalls: { readonly input: ChatInput; readonly coverage: QuotaContext }[];
-  /** Object paths handed to `remove()`. Empty means the recording was retained. */
+  /** GridFS file ids handed to `remove()`. Empty means the recording was retained. */
   readonly removed: string[];
-  readonly usage: TablesInsert<'usage_logs'>[];
+  readonly usage: UsageLogInsert[];
 }
 
 interface Harness {
@@ -349,7 +359,7 @@ interface Harness {
   readonly providers: ProviderStubs;
 }
 
-function harness(scenario: Scenario, transcript: string): Harness {
+function harness(scenario: Scenario, transcript: string, audio: MediaRef): Harness {
   const recorded: Recorded = { chatCalls: [], removed: [], usage: [] };
 
   const payload: TranscriptionPayload = {
@@ -367,21 +377,31 @@ function harness(scenario: Scenario, transcript: string): Harness {
       : {}),
   });
 
-  const storage: ObjectRemoveClient & StorageClientLike = {
-    storage: {
-      from: () => ({
-        exists: () => Promise.resolve({ data: true, error: null }),
-        createSignedUrl: (path: string) =>
-          Promise.resolve({
-            data: { signedUrl: `https://storage.test/${path}?token=abc` },
-            error: null,
-          }),
-        remove: (paths: string[]) => {
-          recorded.removed.push(...paths);
-          return Promise.resolve({ data: paths, error: null });
-        },
-      }),
-    },
+  /**
+   * The owner-scoped media read (A3), returning the recording's bytes and its stored MIME type —
+   * the same shape `readMediaBytesForOwner` returns in production. A few bytes are enough: the
+   * transcription seam is stubbed and never inspects them, and the property is about the transcript
+   * that comes back, not about the bytes that went in.
+   */
+  const readMedia: NonNullable<VoiceDeps['readMedia']> = (userId, ref) => {
+    if (userId !== scenario.userId || ref.fileId !== audio.fileId) {
+      // A cross-owner or wrong-reference read is the forbidden path; returning null models the
+      // owner-scoped miss, which the service maps to STORAGE_REF_FORBIDDEN before any spend.
+      return Promise.resolve(null);
+    }
+    return Promise.resolve({
+      bytes: Buffer.from('voice-note-bytes'),
+      mimeType: `audio/${scenario.container}`,
+    });
+  };
+
+  /** The owner-scoped delete (Requirements 8.9, 8.11), recording the fileId it was asked to remove. */
+  const remove: MediaRemover = (userId, fileId) => {
+    if (userId !== scenario.userId) {
+      throw new Error('the delete was scoped to a different farmer than the request');
+    }
+    recorded.removed.push(fileId);
+    return Promise.resolve(true);
   };
 
   /**
@@ -428,10 +448,9 @@ function harness(scenario: Scenario, transcript: string): Harness {
     recorded,
     providers,
     deps: {
-      supabase: unreachableSupabase,
       chat,
-      storage,
-      deleter: storage,
+      readMedia,
+      remove,
       store,
       transcribe: providers.transcribe,
       quota: { rpc, now: new Date(NOW_MS) },
@@ -443,16 +462,17 @@ function harness(scenario: Scenario, transcript: string): Harness {
   };
 }
 
-function voiceInputFor(scenario: Scenario): VoiceInput {
-  const path = `${scenario.userId}/2026/09/${scenario.objectId}.${scenario.container}`;
-  const storageRef: StorageRef = { bucket: VOICE_BUCKET, path };
+function voiceInputFor(scenario: Scenario, audio: MediaRef): VoiceInput {
   return {
     userId: scenario.userId,
-    storageRef,
+    audio,
     language: scenario.language,
     channel: scenario.channel,
     conversationId: CONVERSATION_ID,
     durationSeconds: scenario.durationSeconds,
+    // The stored MIME type the recorder produced (A3 forwards it on the request); the service
+    // prefers it, else the read's. Naming a V10-accepted container keeps the admission guard happy.
+    mimeType: `audio/${scenario.container}`,
   };
 }
 
@@ -488,8 +508,9 @@ describe('Property 18: the voice pipeline preserves the transcript and handles a
         channelsSeen.add(channel);
 
         const transcript = transcriptFor(scenario);
-        const input = voiceInputFor(scenario);
-        const test = harness(scenario, transcript);
+        const audio: MediaRef = { fileId: fileIdFrom(scenario.objectId), kind: 'voice' };
+        const input = voiceInputFor(scenario, audio);
+        const test = harness(scenario, transcript, audio);
         const label = `${shape} / ${language} / ${channel}`;
 
         /* ================================================================== */
@@ -524,9 +545,10 @@ describe('Property 18: the voice pipeline preserves the transcript and handles a
             expect(call.input.message, label).toContain(NFC_UNSTABLE);
           }
 
-          // It arrived as a farmer message from the voice channel, pointing at the recording.
+          // It arrived as a farmer message from the voice channel, pointing at the recording — the
+          // A3 Media_Reference (`{ fileId, kind: 'voice' }`), not a storage path.
           expect(call.input.inputKind, label).toBe('voice');
-          expect(call.input.transcriptOf, label).toBe(input.storageRef.path);
+          expect(call.input.transcriptOf, label).toStrictEqual(audio);
           expect(call.input.language, label).toBe(language);
           expect(call.input.channel, label).toBe(channel);
           expect(call.input.conversationId, label).toBe(CONVERSATION_ID);
@@ -553,9 +575,10 @@ describe('Property 18: the voice pipeline preserves the transcript and handles a
           expect(outcome.answer.content.includes(scenario.marker), label).toBe(false);
 
           // Requirement 8.8 — text only. No audio field exists to return, and the recording is
-          // gone (8.9), which is the observable contrast with the two branches below.
+          // gone (8.9), which is the observable contrast with the two branches below. Under A3 that
+          // is the owner-scoped GridFS delete of this fileId, not a storage `remove([path])`.
           expect(outcome.audio.outcome, label).toBe('deleted');
-          expect(test.recorded.removed, label).toStrictEqual([input.storageRef.path]);
+          expect(test.recorded.removed, label).toStrictEqual([audio.fileId]);
           return;
         }
 
@@ -627,6 +650,6 @@ describe('Property 18: the voice pipeline preserves the transcript and handles a
       'transcription_failed',
     ]);
     expect([...languagesSeen].sort()).toStrictEqual([...SUPPORTED_LANGUAGES].sort());
-    expect([...channelsSeen].sort()).toStrictEqual(['web', 'whatsapp']);
+    expect([...channelsSeen].sort()).toStrictEqual(['telegram', 'web']);
   });
 });
