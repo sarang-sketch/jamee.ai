@@ -242,7 +242,7 @@ describe('the route as a module', () => {
   });
 
   it('compares the secret with the constant-time primitive and never with ===', () => {
-    expect(moduleSource).toContain("import { timingSafeEqualStrings } from '@/lib/whatsapp';");
+    expect(moduleSource).toContain("import { timingSafeEqualStrings } from '@/lib/timing-safe';");
     expect(moduleSource).not.toMatch(/presented\s*[!=]==\s*expectedSecret/);
     expect(moduleSource).not.toMatch(/expectedSecret\s*[!=]==\s*presented/);
   });

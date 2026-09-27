@@ -4,56 +4,48 @@ import type { ConversationDoc } from '@/lib/db/collections';
 import { farmerData } from '@/lib/db/farmer';
 import { AppError } from '@/lib/errors';
 import type { Channel } from '@/lib/schemas';
-import type { ConversationRow } from '@/types/database';
 
 /**
  * Conversation find-or-create. One function, one decision: which thread does this farmer's next
  * message belong to on this channel.
  *
  * Requirements: 7.5 (a diagnosis started without a Conversation identifier gets a Conversation
- *               created and the Diagnosis_Result attached to it), 10.5 (an inbound WhatsApp text is
- *               answered in that Farmer's active WhatsApp Conversation), 10.8 (a follow-up resolves
+ *               created and the Diagnosis_Result attached to it), 10.5 (an inbound Telegram text is
+ *               answered in that Farmer's active Telegram Conversation), 10.8 (a follow-up resolves
  *               against the most recent Diagnosis_Result in the Conversation identified for that
  *               Farmer), 16.5 (`channel` is an input parameter and is recorded on the persisted row)
- * Design: "0003: conversations and messages"; "Conversation find-or-create"
+ * Design: "conversations and messages"; "Conversation find-or-create"
  *
  * ### ONE LONG-RUNNING THREAD PER CHANNEL, AND THAT IS THE POINT
  *
  * `findOrCreateActive` returns the **most recently updated** conversation for `(userId, channel)`
- * and creates one only when there is none. For WhatsApp that deliberately keeps a single
+ * and creates one only when there is none. For Telegram that deliberately keeps a single
  * long-running thread rather than starting a new conversation per image: Requirement 10.8 resolves
  * a follow-up against the most recent Diagnosis_Result *in that conversation*, so a new photo
  * appends a new diagnosis to the thread and "why?" resolves to the latest one. A
  * conversation-per-image would make "why?" ambiguous the moment a farmer sent two photos.
  *
- * Web conversations are **separate rows** (`channel = 'web'`), never the same row as the WhatsApp
+ * Web conversations are **separate rows** (`channel = 'web'`), never the same row as the Telegram
  * thread. The two never bleed into each other while still sharing one identity (Requirement 1.5)
- * and one quota (Requirement 14.2), because the channel is a column on `conversations` (0003) and
- * every read here filters on it.
+ * and one quota (Requirement 14.2), because the channel is a field on `conversations` and every
+ * read here filters on it.
  *
- * ### WHY THE CLIENT IS A PARAMETER
+ * ### WHY THE STORE IS A PARAMETER
  *
- * Both channels call this, and they hold different credentials:
- *
- *  - The **web** path has a farmer session, so it passes the RLS-scoped server client and RLS is
- *    the authorization boundary. That is the default (`rlsScopedConversationStore`).
- *  - The **WhatsApp webhook** has no session at all, so it passes `conversationStoreFrom(
- *    createAdminClient())`. There is no second boundary behind the service-role client, so
- *    `admin.ts`'s rule applies with full force: every query below carries an explicit
- *    `user_id` predicate, and `assertBelongsTo()` re-checks the row that comes back.
- *
- * Same reasoning as `storage.ts` and `knowledge.ts`: one implementation serves both channels
- * because the credential is injected rather than constructed.
+ * Both channels call this. The store is the owner-scoped Data_Access_Layer bound to the caller's
+ * Auth_User_Id (`defaultConversationStore`), so the tenant boundary is the merged owner id rather
+ * than an injected credential: every read carries the owner filter and `assertBelongsTo()`
+ * re-checks the row that comes back. Passing the store as a parameter is what lets a test drive
+ * `findOrCreateActive` against a fake without a database — the same seam `knowledge.ts` uses.
  *
  * ### THE ORDERING IS THE INDEX'S JOB
  *
- * `conversations_user_recent_idx` on `(user_id, updated_at desc)` exists in 0003 precisely to serve
- * this lookup, so the read is `order(updated_at desc).limit(1)` in SQL and **nothing here sorts
- * conversations in application code**. A fetch-all-then-sort would grow with a farmer's history and
- * would leave the index unused.
+ * `conversations_user_recent_idx` on `(ownerId, updatedAt desc)` exists precisely to serve this
+ * lookup, so the read is ordered `updatedAt` desc, limit 1, and **nothing here sorts conversations
+ * in application code**. A fetch-all-then-sort would grow with a farmer's history and would leave
+ * the index unused.
  *
- * `updated_at` only tracks *activity* if something bumps it when a message is appended — the 0003
- * trigger fires on `update`, not on an insert into `messages`. Bumping it belongs to the code that
+ * `updated_at` only tracks *activity* if something bumps it when a message is appended. Bumping it belongs to the code that
  * persists a message (tasks 11.2 / 12.x), not here. Until then the ordering degrades to "most
  * recently created", which is the same row whenever a farmer has one thread on the channel, so
  * find-or-create stays correct either way.
@@ -63,8 +55,23 @@ import type { ConversationRow } from '@/types/database';
 /* The store seam                                                              */
 /* ========================================================================== */
 
-/** A conversation row, exactly as the database defines it. */
-export type Conversation = ConversationRow;
+/**
+ * A conversation row, in the shape every consumer already reads.
+ *
+ * A local interface with the exact field names the consumers and their tests read — `id`,
+ * `user_id`, `channel`, `title`, `created_at`, `updated_at`. Its `channel` is typed from the
+ * `schemas.ts` domain union (`web | telegram` under A3). The Data_Access_Layer stores a
+ * `ConversationDoc` (camelCase, `_id`, `ownerId`, `Date` timestamps); `toConversation()` below is
+ * the one place that maps the layer's document to this row shape.
+ */
+export interface Conversation {
+  readonly id: string;
+  readonly user_id: string;
+  readonly channel: Channel;
+  readonly title: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
 
 /**
  * The two database operations this module makes.
@@ -91,17 +98,15 @@ export interface ConversationStore {
 /**
  * Adapt the Data_Access_Layer into a store.
  *
- * *Amended by Amendment A3:* this was `conversationStoreFrom(client: SupabaseClient)`, a pair of
- * PostgREST queries on an RLS-scoped or service-role client. Under A3 there is no RLS and no
- * service-role client — `conversations` is reachable only through the owner-scoped `FarmerData`
- * accessors (D18), which merge the owning Auth_User_Id into every filter and stamp it on every
- * insert. So the store is built from `farmerData(userId)` per call rather than from a client, and
- * the two predicates that were load-bearing under RLS are now structural: `ownerId` is merged by
- * the layer (it cannot be forgotten), and `channel` is the one filter this store adds to keep the
- * web thread and the Telegram thread from bleeding into each other.
+ * `conversations` is reachable only through the owner-scoped `FarmerData` accessors (D18), which
+ * merge the owning Auth_User_Id into every filter and stamp it on every insert. So the store is
+ * built from `farmerData(userId)` per call rather than from a client, and the two predicates the
+ * store relies on are structural: `ownerId` is merged by the layer (it cannot be forgotten), and
+ * `channel` is the one filter this store adds to keep the web thread and the Telegram thread from
+ * bleeding into each other.
  *
  * The optional `_legacyClient` parameter is accepted and ignored purely so the call sites that
- * still pass `deps.supabase` (the diagnosis service and the Telegram/WhatsApp adapter, ported in a
+ * still pass a legacy data client (the diagnosis service and the Telegram adapter, ported in a
  * later wave) keep compiling through this port — it selects no behaviour. Production callers pass
  * nothing.
  *
@@ -142,7 +147,7 @@ export function conversationStoreFrom(_legacyClient?: unknown): ConversationStor
 }
 
 /**
- * Map a stored conversation document to the `Conversation` (Supabase-row-shaped) view its consumers
+ * Map a stored conversation document to the `Conversation` (row-shaped) view its consumers
  * still read — `id` as the `_id` hex string, `user_id` as `ownerId`, and the timestamps as ISO
  * strings. Kept until the consumers migrate to the document shape in a later wave; one place the
  * translation lives.
@@ -162,13 +167,10 @@ function toConversation(doc: ConversationDoc & { _id: unknown }): Conversation {
 /**
  * The default store: the farmer's own data through the Data_Access_Layer.
  *
- * *Amended by A3:* this was an RLS-scoped store built from the App Router session's Supabase client,
- * imported lazily so the module stayed loadable outside a request. Under A3 the store binds to
- * `farmerData(userId)` per call and reads the cookies through nothing — the owner id the caller
- * passes is the whole scope — so there is no lazy client import to make and this is simply
- * `conversationStoreFrom()`.
+ * The store binds to `farmerData(userId)` per call — the owner id the caller passes is the whole
+ * scope — so there is no client to inject and this is simply `conversationStoreFrom()`.
  */
-export const rlsScopedConversationStore: ConversationStore = conversationStoreFrom();
+export const defaultConversationStore: ConversationStore = conversationStoreFrom();
 
 /* ========================================================================== */
 /* find-or-create                                                              */
@@ -178,7 +180,7 @@ export const rlsScopedConversationStore: ConversationStore = conversationStoreFr
  * The active conversation for this farmer on this channel, creating one when none exists.
  *
  * Requirement 7.5's "create a Conversation and attach the Diagnosis_Result to it" and Requirement
- * 10.5's "the Conversation identifier of that Farmer's active WhatsApp Conversation" are the same
+ * 10.5's "the Conversation identifier of that Farmer's active Telegram Conversation" are the same
  * question asked by two channels, so they get one answer here rather than two lookups that could
  * drift.
  *
@@ -189,7 +191,7 @@ export const rlsScopedConversationStore: ConversationStore = conversationStoreFr
  * Both requests read "no thread", both insert, and the farmer ends up with two threads on one
  * channel. That matters more than a duplicate row usually would: Requirement 10.8 resolves a
  * follow-up against the most recent diagnosis **in the conversation identified for that farmer**,
- * so two WhatsApp threads split the history that "why?" resolves against — one photo's diagnosis
+ * so two Telegram threads split the history that "why?" resolves against — one photo's diagnosis
  * lands in thread A, the next in thread B, and the answer to "why?" depends on which thread the
  * ordering happens to pick.
  *
@@ -199,11 +201,10 @@ export const rlsScopedConversationStore: ConversationStore = conversationStoreFr
  *  1. **A unique constraint on `(user_id, channel)` — rejected, and it would be wrong, not merely
  *     out of scope.** It would forbid a farmer from ever having a second web conversation, but
  *     Requirement 7.5 creates a conversation per diagnosis started without one, so a returning web
- *     farmer legitimately accumulates threads. Both the design and 0003 say "the most recently
- *     updated conversation", never "the conversation" — the plural is deliberate. A partial index
- *     limited to `channel = 'whatsapp'` would avoid that objection, but it is a change to an
- *     already-written migration and it would encode a WhatsApp-only invariant in a table both
- *     channels share.
+ *     farmer legitimately accumulates threads. Both the design and the data model say "the most
+ *     recently updated conversation", never "the conversation" — the plural is deliberate. A
+ *     partial index limited to `channel = 'telegram'` would avoid that objection, but it would
+ *     encode a Telegram-only invariant in a collection both channels share.
  *  2. **Retry on conflict — rejected as a consequence of 1.** With no constraint there is no
  *     conflict to retry: both inserts succeed. `upsert(onConflict)` needs the same constraint and
  *     inherits the same objection.
@@ -219,7 +220,7 @@ export const rlsScopedConversationStore: ConversationStore = conversationStoreFr
  * both callers read back, each returns its own row and the history really is split for that pair of
  * messages. The window is one farmer's first two *simultaneous* messages on a channel — every
  * message after the first finds an existing thread and never reaches the create path at all — and
- * on WhatsApp the `whatsapp_inbound` idempotency insert already serializes the redelivery case,
+ * on Telegram the inbound-idempotency insert already serializes the redelivery case,
  * which is the realistic source of same-instant duplicates (Requirement 11.5). Closing it properly
  * needs a database-side guarantee, i.e. option 1 done as a migration with the web semantics thought
  * through; until then a bounded, empty-row residual is the honest trade rather than a lock this
@@ -231,7 +232,7 @@ export const rlsScopedConversationStore: ConversationStore = conversationStoreFr
 export async function findOrCreateActive(
   userId: string,
   channel: Channel,
-  store: ConversationStore = rlsScopedConversationStore,
+  store: ConversationStore = defaultConversationStore,
 ): Promise<Conversation> {
   const existing = await store.mostRecent(userId, channel);
   if (existing !== null) return assertBelongsTo(existing, userId, channel);

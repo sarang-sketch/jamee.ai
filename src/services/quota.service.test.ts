@@ -17,7 +17,7 @@ import {
   type VerifiedCondition,
 } from '@/lib/schemas';
 import { dayWindowKey } from '@/lib/time';
-import { failureReply } from '@/lib/whatsapp-dispatch';
+import { failureReply } from '@/lib/channel-reply';
 import { chatTurn, type ChatTurnDeps, type ChatWriteStore, type MessageInsert } from '@/services/chat.service';
 import type { Conversation, ConversationStore } from '@/services/conversation.service';
 import { diagnose, type DiagnosisDeps, type DiagnosisStore } from '@/services/diagnosis.service';
@@ -38,7 +38,7 @@ import {
   type CounterRpcResponse,
   type QuotaReservation,
 } from '@/services/quota.service';
-import type { TablesInsert } from '@/types/database';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 
 /**
  * Unit tests for `src/services/quota.service.ts` with the RPC layer stubbed.
@@ -197,16 +197,16 @@ describe('reserve', () => {
 
   it('keys the counter with no channel component, so channels share one limit', async () => {
     // Requirement 14.2 is satisfied by OMISSION: there is no channel argument to pass, no channel
-    // key in what reaches the RPC, and no channel column in the primary key (migration 0007). A
-    // web request and a WhatsApp request are indistinguishable here, which is the point.
+    // key in what reaches the RPC, and no channel component in the counter key. A
+    // web request and a Telegram request are indistinguishable here, which is the point.
     const web = recordingRpc({ tryIncrement: 1 });
-    const whatsapp = recordingRpc({ tryIncrement: 2 });
+    const telegram = recordingRpc({ tryIncrement: 2 });
 
     await reserve(USER, 'image', { rpc: web.rpc, now: EARLY_IST });
-    await reserve(USER, 'image', { rpc: whatsapp.rpc, now: EARLY_IST });
+    await reserve(USER, 'image', { rpc: telegram.rpc, now: EARLY_IST });
 
     const webArgs = onlyCall(web.calls).args;
-    expect(webArgs).toEqual(onlyCall(whatsapp.calls).args);
+    expect(webArgs).toEqual(onlyCall(telegram.calls).args);
     expect(Object.keys(webArgs as object).sort()).toEqual([
       'limit',
       'operation',
@@ -665,17 +665,17 @@ describe('the QUOTA_EXCEEDED envelope', () => {
 
 /**
  * The fourth writer. `diagnose`, `chatTurn` and `transcribeAndAnswer` each assert their own
- * decline (and their own untouched provider seam) in their own suites; the WhatsApp adapter adds no
+ * decline (and their own untouched provider seam) in their own suites; the Telegram adapter adds no
  * reserve and no provider call of its own — it forwards whatever the shared service raised.
  *
  * What that leaves worth checking is the *rendering*, because this channel has no HTTP envelope:
- * `failureReply` is the only thing between `QUOTA_EXCEEDED` and the message Meta delivers. It goes
- * through the same `toEnvelope` leak boundary, so the assertion is that the sentence is complete
- * there too — an unfilled `{resetsAt}` would reach a farmer as a WhatsApp message rather than as a
- * JSON field nobody reads.
+ * `failureReply` is the only thing between `QUOTA_EXCEEDED` and the message the platform delivers.
+ * It goes through the same `toEnvelope` leak boundary, so the assertion is that the sentence is
+ * complete there too — an unfilled `{resetsAt}` would reach a farmer as a chat message rather than
+ * as a JSON field nobody reads.
  */
 describe('the decline on the channel with no HTTP envelope', () => {
-  it('renders the same complete sentence for a WhatsApp reply', async () => {
+  it('renders the same complete sentence for a Telegram reply', async () => {
     const error = await declineFor('image');
 
     for (const language of SUPPORTED_LANGUAGES) {
@@ -894,7 +894,7 @@ const failingKnowledge: KnowledgeReader = () =>
 /* -------------------------------------------------------------------------- */
 
 interface Audit {
-  readonly rows: TablesInsert<'usage_logs'>[];
+  readonly rows: UsageLogInsert[];
 }
 
 /**
@@ -1218,7 +1218,7 @@ describe('the spend rule over every pre-provider exit', () => {
       }
 
       expect(audit.rows, `${exit.name}: audit`).toHaveLength(1);
-      const row = audit.rows[0] as TablesInsert<'usage_logs'>;
+      const row = audit.rows[0] as UsageLogInsert;
       expect(row.outcome, exit.name).toBe(exit.outcome);
       expect(row.quota_spent, exit.name).toBe(false);
       expect(row.model_provider, exit.name).toBe('none');
@@ -1369,7 +1369,7 @@ describe('an out-of-scope chat referral', () => {
     // The audit's half of the biconditional: no provider was reached, so nothing was spent — and the
     // outcome is not a failure, because the request worked.
     expect(audit.rows).toHaveLength(1);
-    const row = audit.rows[0] as TablesInsert<'usage_logs'>;
+    const row = audit.rows[0] as UsageLogInsert;
     expect(row.quota_spent).toBe(false);
     expect(row.model_provider).toBe('none');
     expect(row.outcome).toBe('inconclusive');

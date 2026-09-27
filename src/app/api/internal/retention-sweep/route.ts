@@ -1,6 +1,6 @@
 import { serverEnv } from '@/lib/env';
 import { ERROR_SPECS } from '@/lib/errors';
-import { timingSafeEqualStrings } from '@/lib/whatsapp';
+import { timingSafeEqualStrings } from '@/lib/timing-safe';
 import { runRetentionSweep } from '@/services/retention.service';
 
 /**
@@ -73,9 +73,9 @@ type Refusal = 'header_absent' | 'scheme_not_bearer' | 'token_absent' | 'token_m
  * Decide whether a request may run a sweep. Pure apart from the environment read, and it returns a
  * reason rather than a `Response` so the ordering — decide, log, *then* act — is visible.
  *
- * The token comparison is `timingSafeEqualStrings` from `src/lib/whatsapp.ts`, which is the one
+ * The token comparison is `timingSafeEqualStrings` from `src/lib/timing-safe.ts`, which is the one
  * constant-time string comparison in the codebase (it is the only caller of `crypto.timingSafeEqual`,
- * and `whatsapp.test.ts` asserts that structurally). Reusing it rather than writing a second one is
+ * and `timing-safe.test.ts` covers it directly). Reusing it rather than writing a second one is
  * the point: this endpoint is public, unauthenticated by construction, and retriable without limit,
  * so a comparison that returned early would answer "how many leading characters did I get right?"
  * about a credential that authorizes deletion.
@@ -136,7 +136,7 @@ function configuredSecret(): string | undefined {
  *
  * The status comes from `SWEEP_UNAUTHORIZED` in `ERROR_SPECS` rather than from a literal, so the
  * taxonomy stays the one place an HTTP code for this condition is written down — the same
- * arrangement the WhatsApp webhook's bodiless 401 uses. What the taxonomy does *not* supply here is
+ * arrangement the Telegram webhook's bodiless 401 uses. What the taxonomy does *not* supply here is
  * a body: `toEnvelope` would add a machine-readable statement of which part failed, and there is no
  * farmer on this path to localize for (see the module header on why that would be an oracle).
  */

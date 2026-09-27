@@ -83,7 +83,7 @@ export interface MessageCatalog {
   loading: {
     uploading: string;
     /**
-     * The voice equivalent of `uploading`, bound to the open `voice-messages` upload.
+     * The voice equivalent of `uploading`, bound to the open recording upload to GridFS.
      *
      * A separate key rather than a reuse of `uploading`, because that string names a photo
      * ("Uploading your photo…") in all three languages. A farmer who just spoke a question and
@@ -96,16 +96,6 @@ export interface MessageCatalog {
     thinking: string;
     listening: string;
     /**
-     * The two sign-in waits (task 6.1). They are catalog entries rather than component
-     * literals for the same reason everything else here is: a farmer signing in has not
-     * reached a profile yet, so this is the FIRST text they read, and hardcoding it in
-     * `SignInForm.tsx` would put English in front of a Marathi speaker at the one screen
-     * they cannot skip. Both are bound to an open `signInWithOtp` / `verifyOtp` request
-     * (Requirement 15.2) — nothing here is driven by a timer.
-     */
-    sendingCode: string;
-    verifyingCode: string;
-    /**
      * The profile save (task 6.4), bound to the open `profiles` update. Here for the same reason
      * the two sign-in waits are: the profile screen is where a farmer chooses their language, so
      * the wait text on it is read by someone who has not yet told Jamee they read Marathi.
@@ -117,11 +107,10 @@ export interface MessageCatalog {
   ui: {
     appName: string;
     tagline: string;
-    signInHeading: string;
     /**
-     * The Google sign-in button label (Amendment A1: web sign-in is Google OAuth, not phone OTP).
-     * `GoogleSignInButton` reads it. A catalog entry rather than a component literal because the
-     * sign-in screen is the FIRST text a farmer reads, before any preferred language is known.
+     * The Google sign-in button label (web sign-in is Google OAuth). `GoogleSignInButton` reads
+     * it. A catalog entry rather than a component literal because the sign-in screen is the FIRST
+     * text a farmer reads, before any preferred language is known.
      */
     googleSignIn: string;
     /**
@@ -131,14 +120,6 @@ export interface MessageCatalog {
      * renders it directly rather than through the API error envelope.
      */
     signInDidNotComplete: string;
-    phoneLabel: string;
-    phoneHint: string;
-    sendCode: string;
-    otpLabel: string;
-    otpHint: string;
-    verifyCode: string;
-    resendCode: string;
-    changeNumber: string;
     signOut: string;
     navDiagnose: string;
     navChat: string;
@@ -199,7 +180,7 @@ export interface MessageCatalog {
     /**
      * The detail view's way back to the list (Requirement 12.3 is reached *from* 12.1, so the
      * return trip is part of the same screen pair). A link label rather than a browser-back
-     * instruction, because a farmer arriving from a WhatsApp deep link has no history entry to
+     * instruction, because a farmer arriving from a Telegram deep link has no history entry to
      * go back to.
      */
     backToHistory: string;
@@ -209,16 +190,14 @@ export interface MessageCatalog {
     severityLabel: string;
     /**
      * Requirement 12.1 — the term for the channel an entry arrived through, so `channelWeb` and
-     * `channelWhatsapp` read as an answer rather than as a bare word next to a photo. Without
-     * it a screen reader announces "WhatsApp" with nothing to say what that describes.
+     * `channelTelegram` read as an answer rather than as a bare word next to a photo. Without
+     * it a screen reader announces "Telegram" with nothing to say what that describes.
      */
     channelLabel: string;
     channelWeb: string;
-    channelWhatsapp: string;
     /**
      * Requirement 12.1 — the term for an entry that arrived through the Telegram channel, so a
-     * Telegram-originated diagnosis reads as an answer in history rather than a bare word. Added by
-     * Amendment A1 alongside `channelWhatsapp` (which is retained only for not-yet-deleted modules).
+     * Telegram-originated diagnosis reads as an answer in history rather than a bare word.
      */
     channelTelegram: string;
     /** Requirement 12.1 — the term for an entry's creation timestamp, for the same reason. */
@@ -254,38 +233,6 @@ export interface MessageCatalog {
     photoThumbnailOnly: string;
     /** Requirement 12.10 — neither derivative survives. */
     photoNoLongerStored: string;
-  };
-
-  /**
-   * Replies the WhatsApp adapter sends. Localized from the resolved profile's preferred
-   * language; the unresolvable-number case has no profile, so it falls back to `en`.
-   *
-   * RETIRED by Amendment A1 — the channel is Telegram now (see `telegram` below). This block is
-   * kept only because the not-yet-retired WhatsApp modules still read it; task 44 deletes it with
-   * `src/lib/whatsapp.ts` and `src/lib/whatsapp-dispatch.ts`.
-   */
-  whatsapp: {
-    /** Requirement 10.3 — the sender has no Profile. */
-    signInFirst: string;
-    /** Requirement 10.9 — a message type outside text, image and audio. */
-    unsupportedType: string;
-    /**
-     * A voice note Jamee cannot transcribe because of the container it arrived in — the
-     * V10-versus-V14 discrepancy documented in `src/lib/whatsapp.ts`.
-     *
-     * **Why this is not `unsupportedType`.** Requirement 10.9's sentence names voice notes as
-     * something Jamee accepts, and an `aac` voice note *is* a voice note — replying "Jamee
-     * accepts photos, text and voice notes" to one would be both confusing and untrue.
-     *
-     * **Why it is not `errors.TRANSCRIPTION_FAILED` either.** That code is `retryable: true`,
-     * and Requirement 15.4 makes the flag mean "the same request could plausibly succeed".
-     * WhatsApp chooses the recording container, not the farmer, so re-sending the identical
-     * voice note fails identically forever. The only thing the farmer can actually do is type
-     * the question instead, so that is what this sentence says.
-     */
-    voiceNoteFormatUnsupported: string;
-    /** D11's soft-deadline branch — the row is marked `failed` and 200 is still returned. */
-    takingLonger: string;
   };
 
   /**
@@ -360,13 +307,13 @@ export interface MessageCatalog {
      */
     lapsedWindow: string;
     /**
-     * Requirement 10.9 — a message type outside text, photo and voice note. Same intent as the
-     * retired whatsapp.unsupportedType, now for the Telegram channel.
+     * Requirement 10.9 — a message type outside text, photo and voice note, for the Telegram
+     * channel.
      */
     unsupportedType: string;
     /**
-     * D11's soft-deadline branch — the row is marked `failed` and 200 is still returned. Same
-     * intent as the retired whatsapp.takingLonger, now for the Telegram channel.
+     * D11's soft-deadline branch — the row is marked `failed` and 200 is still returned, for the
+     * Telegram channel.
      */
     takingLonger: string;
     /**

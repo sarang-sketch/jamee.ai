@@ -113,9 +113,8 @@ import styles from './VoiceRecorder.module.css';
  * recording codec, and because it is the smallest of the candidates at speech bitrates — which
  * is what keeps a 120 s recording far below the 10 MB ceiling.
  *
- * **`audio/aac` and `audio/amr` are deliberately absent.** V14 documents both as containers
- * WhatsApp delivers, and task 22.2 confirmed that **neither is in V10's accepted list** and
- * corrected `docs/VERIFIED_VALUES.md` accordingly. Adding either here would produce a recording
+ * **`audio/aac` and `audio/amr` are deliberately absent.** Neither is in V10's accepted list.
+ * Adding either here would produce a recording
  * the Transcription_Provider refuses, discovered as a provider error after the farmer has spoken
  * and after the upload — which is the opposite of failing loudly. `3gp`/`3gpp` is absent for the
  * same reason: MDN mentions it for Firefox for Android, V10 does not list it.

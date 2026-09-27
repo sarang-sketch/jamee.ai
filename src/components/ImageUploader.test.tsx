@@ -36,11 +36,11 @@ import {
  *               thumbnail still sends the diagnosis), 15.5 (a failed full-image upload sends nothing)
  *
  * Under A3 the uploader returns a Media_Reference (`{ fileId, kind }`) from `POST /api/media`, not a
- * Supabase storage path — so there is no path convention to assert and the posted body carries a
+ * storage path — so there is no path convention to assert and the posted body carries a
  * reference plus an optional thumbnail reference.
  *
  * The DOM half is left to the accessibility pass and the manual plan, following
- * `SignInForm.test.tsx`: this project has no React testing library, and the rules that matter here
+ * `GoogleSignInButton.test.tsx`: this project has no React testing library, and the rules that matter here
  * are about sequencing. `encodeCropImage` is never called: jsdom has neither `createImageBitmap` nor
  * a canvas encoder, so what IS tested is the pure resolution decision `scaledSize`.
  */

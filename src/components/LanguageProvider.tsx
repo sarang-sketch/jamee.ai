@@ -61,9 +61,9 @@ import {
  * two writers of one column is how a control ends up fighting the screen that owns it. Two
  * further reasons this is the right split rather than a shortcut:
  *
- *  - The profile's `language` is what the **WhatsApp** adapter localizes replies from
+ *  - The profile's `language` is what the **Telegram** adapter localizes replies from
  *    (`messages/types.ts`, Requirement 10). A farmer switching the web UI to English for one
- *    explanation has said nothing about which language they want their WhatsApp replies in, and
+ *    explanation has said nothing about which language they want their Telegram replies in, and
  *    a silent profile write would re-language a channel they were not looking at.
  *  - Requirements 9.1 and 9.2 ask for a selectable set and for the selection to reach
  *    subsequent requests. Neither asks for persistence. The cookie already carries the

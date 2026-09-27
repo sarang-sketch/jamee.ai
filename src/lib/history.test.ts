@@ -103,7 +103,7 @@ describe('resolveHistoryImage', () => {
    */
   it('falls back to the Full_Size_Image when no derivative exists', async () => {
     const { full } = ids();
-    const row = diagnosis({ channel: 'whatsapp', mediaRef: { fileId: full, kind: 'crop-image' } });
+    const row = diagnosis({ channel: 'telegram', mediaRef: { fileId: full, kind: 'crop-image' } });
     const reads = readsOver([row]);
 
     const image = await resolveHistoryImage(row, reads);
@@ -170,7 +170,7 @@ describe('readHistory', () => {
   it('carries every listed field, for both channels and both row shapes', async () => {
     const { full, thumb } = ids();
     const identified = diagnosis({
-      channel: 'whatsapp',
+      channel: 'telegram',
       severity: 'high',
       createdAt: new Date('2026-09-14T00:00:00.000Z'),
       mediaRef: { fileId: full, kind: 'crop-image' },
@@ -195,7 +195,7 @@ describe('readHistory', () => {
     expect(first.severity).toBe('high');
     // Requirement 12.2 — a diagnosis from another channel is in the list on the same footing as web
     // (the read applies no channel filter at all).
-    expect(first.channel).toBe('whatsapp');
+    expect(first.channel).toBe('telegram');
     expect(first.createdAt).toBe('2026-09-14T00:00:00.000Z');
     expect(first.image).toEqual({ kind: 'thumbnail', url: `/api/media/${thumb.toHexString()}` });
 

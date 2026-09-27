@@ -3,8 +3,12 @@ import 'server-only';
 import type { DiseaseKnowledgeDoc } from '@/lib/db/collections';
 import { knowledgeReads } from '@/lib/db/reads';
 import { AppError } from '@/lib/errors';
-import { VERIFIED_CONDITIONS, type VerifiedCondition, type KnowledgePayload } from '@/lib/schemas';
-import type { DiseaseKnowledgeRow } from '@/types/database';
+import {
+  VERIFIED_CONDITIONS,
+  type VerifiedCondition,
+  type KnowledgePayload,
+  type Severity,
+} from '@/lib/schemas';
 
 /**
  * The knowledge base, read side. Canonical-name lookup and scope resolution over the five
@@ -35,26 +39,24 @@ import type { DiseaseKnowledgeRow } from '@/types/database';
  * scope vocabulary below is **derived** from the imported list rather than written out.
  *
  * =============================================================================
- * AMENDMENT A3 — THE READER NOW GOES THROUGH THE DATA_ACCESS_LAYER, NOT SUPABASE
+ * THE READER GOES THROUGH THE DATA_ACCESS_LAYER (Amendment A3)
  * =============================================================================
  *
- * Under Supabase this module read `disease_knowledge` through an RLS-scoped or service-role
- * PostgREST client. Under A3 there is no Supabase and no RLS: the knowledge base is reached only
- * through the Data_Access_Layer's read-only `knowledgeReads()` accessor (`src/lib/db/reads.ts`),
- * which is the ONE holder of the driver for this collection (D18) and exposes a read and no write
- * at all (Requirement 13.4).
+ * The knowledge base is reached only through the Data_Access_Layer's read-only `knowledgeReads()`
+ * accessor (`src/lib/db/reads.ts`), which is the ONE holder of the driver for this collection (D18)
+ * and exposes a read and no write at all (Requirement 13.4).
  *
  * The base belongs to no farmer, so the accessor is deliberately NOT owner-scoped — and that is
  * safe for exactly the reason the owner-scoping discipline exists: `disease_knowledge` holds no
- * tenant data, so a read of it cannot cross a tenant boundary. The old "which Supabase client, and
- * why" reasoning collapses to a single fact: there is one accessor, it reads the five shared rows,
- * and every caller — the web screen, the chat turn, the Telegram adapter — uses it.
+ * tenant data, so a read of it cannot cross a tenant boundary. There is one accessor, it reads the
+ * five shared rows, and every caller — the web screen, the chat turn, the Telegram adapter — uses
+ * it.
  *
  * ### THE SEAM IS UNCHANGED, SO ITS CALLERS AND TESTS ARE UNCHANGED
  *
  * `KnowledgeReader` is still a plain `(names) => Promise<KnowledgeEntry[]>`, and `KnowledgeEntry`
- * is still the same row shape. The port lives entirely in the DEFAULT reader (`rlsScopedReader`,
- * name kept so no consumer moves) and in `knowledgeReaderFrom`, which now maps the layer's document
+ * is still the same row shape. The read lives entirely in the DEFAULT reader
+ * (`defaultKnowledgeReader`) and in `knowledgeReaderFrom`, which maps the layer's document
  * to the seam's row shape. `resolveScope`, `lookupCondition`, `knowledgePayloadOf`,
  * `matchConditions` and `hasTreatmentContent` are byte-for-byte the same decisions over the same
  * shape, which is why the unit tests that stub `KnowledgeReader` need no change.
@@ -67,20 +69,35 @@ import type { DiseaseKnowledgeRow } from '@/types/database';
 /**
  * A knowledge-base row, in the shape every consumer already reads.
  *
- * Kept as `DiseaseKnowledgeRow` (the field names `resolveScope`, `knowledgePayloadOf` and the
- * detail screen already read: `disease_name`, `symptoms`, `causes`, `treatment`, `prevention`,
- * `source`, …) so the seam, its consumers and its tests are untouched by the A3 storage change.
- * The Data_Access_Layer stores a `DiseaseKnowledgeDoc` (camelCase, `_id`); `docToEntry()` below is
- * the one place that maps the layer's document to this row shape, so the mapping lives once.
+ * This local interface has the exact field names `resolveScope`, `knowledgePayloadOf` and the
+ * detail screen read — `disease_name`, `symptoms`, `causes`, `treatment`, `prevention`, `source`,
+ * … — so the seam, its consumers and its tests are untouched by the A3 storage change. Its
+ * enumerated fields are typed from the `schemas.ts` domain unions rather than re-spelled as
+ * literals, the same single-source discipline `collections.ts` follows. The Data_Access_Layer
+ * stores a `DiseaseKnowledgeDoc` (camelCase, `_id`); `docToEntry()` below is the one place that
+ * maps the layer's document to this row shape, so the mapping lives once.
  */
-export type KnowledgeEntry = DiseaseKnowledgeRow;
+export interface KnowledgeEntry {
+  readonly id: string;
+  readonly disease_name: VerifiedCondition;
+  readonly crop: 'tomato' | 'potato';
+  readonly scientific_name: string | null;
+  readonly symptoms: string[];
+  readonly causes: string[];
+  readonly treatment: string[];
+  readonly prevention: string[];
+  readonly default_severity: Severity;
+  readonly source: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
 
 /**
  * The only read this module makes: given canonical names, return their rows.
  *
  * A **function** rather than a mirrored driver builder, deliberately: there is one read, and
  * mirroring the accessor structurally would mean a test had to reproduce it to assert something
- * about scope resolution. The real read lives once in `rlsScopedReader` below.
+ * about scope resolution. The real read lives once in `defaultKnowledgeReader` below.
  */
 export type KnowledgeReader = (
   names: readonly VerifiedCondition[],
@@ -114,9 +131,9 @@ function docToEntry(doc: DiseaseKnowledgeDoc): KnowledgeEntry {
  * Adapt the Data_Access_Layer's read-only knowledge accessor into a `KnowledgeReader`.
  *
  * `legacyClient` is an IGNORED optional legacy parameter, kept so callers written against the
- * Supabase signature (`knowledgeReaderFrom(deps.supabase)`) still compile through the A3 port
- * without every call site changing at once — the same shape the quota port kept for its counter
- * RPC. The Data_Access_Layer is the only source of rows; nothing here reads the argument.
+ * former data-client signature (`knowledgeReaderFrom(deps.supabase)`) still compile through the
+ * port without every call site changing at once — the same shape the quota port kept for its
+ * counter RPC. The Data_Access_Layer is the only source of rows; nothing here reads the argument.
  *
  * A failure THROWS rather than reading as "no rows": an empty result means the row is not there, an
  * error means Jamee could not find out, and reporting "no verified content" for a database failure
@@ -142,11 +159,10 @@ export function knowledgeReaderFrom(legacyClient?: unknown): KnowledgeReader {
 /**
  * The default reader: the read-only knowledge accessor.
  *
- * Name kept from the Supabase era (`rlsScopedReader`) so no consumer's import moves during the
- * port. Under A3 there is no RLS and no separate service-role read — there is one accessor for the
- * one shared, farmer-less collection — so this is simply `knowledgeReaderFrom()` with no argument.
+ * The DEFAULT reader. There is one accessor for the one shared, farmer-less collection, so this is
+ * simply `knowledgeReaderFrom()` with no argument.
  */
-export const rlsScopedReader: KnowledgeReader = knowledgeReaderFrom();
+export const defaultKnowledgeReader: KnowledgeReader = knowledgeReaderFrom();
 
 /* ========================================================================== */
 /* Lookup by canonical name (Requirement 4.3)                                  */
@@ -178,7 +194,7 @@ export type KnowledgeLookup =
  */
 export async function lookupCondition(
   name: VerifiedCondition,
-  read: KnowledgeReader = rlsScopedReader,
+  read: KnowledgeReader = defaultKnowledgeReader,
 ): Promise<KnowledgeLookup> {
   const rows = await read([name]);
   const entry = rows.find((row) => row.disease_name === name);
@@ -273,7 +289,7 @@ export interface ScopeQuery {
  */
 export async function resolveScope(
   query: ScopeQuery,
-  read: KnowledgeReader = rlsScopedReader,
+  read: KnowledgeReader = defaultKnowledgeReader,
 ): Promise<KnowledgeScope> {
   const wanted = new Set<VerifiedCondition>();
   if (query.condition !== null && query.condition !== undefined) wanted.add(query.condition);

@@ -118,8 +118,6 @@ export const hi: MessageCatalog = {
     analyzing: 'जामी आपकी फसल की फोटो देख रहा है…',
     thinking: 'जामी सोच रहा है…',
     listening: 'जामी आपकी रिकॉर्डिंग सुन रहा है…',
-    sendingCode: 'कोड भेजा जा रहा है…',
-    verifyingCode: 'कोड जाँचा जा रहा है…',
     saving: 'आपकी जानकारी सहेजी जा रही है…',
   },
 
@@ -127,17 +125,8 @@ export const hi: MessageCatalog = {
     /** Not translated: it is the product's name. */
     appName: 'Jamee',
     tagline: 'टमाटर और आलू के किसानों के लिए फसल रोग सहायता।',
-    signInHeading: 'अपने मोबाइल नंबर से साइन इन करें',
     googleSignIn: 'Google से जारी रखें',
     signInDidNotComplete: 'साइन इन पूरा नहीं हुआ। कृपया फिर से साइन इन करें।',
-    phoneLabel: 'मोबाइल नंबर',
-    phoneHint: 'देश का कोड भी लिखें, जैसे +919876543210।',
-    sendCode: 'कोड भेजें',
-    otpLabel: 'छह अंकों का कोड',
-    otpHint: 'अपने फोन पर SMS से आया कोड लिखें।',
-    verifyCode: 'कोड जाँचें',
-    resendCode: 'नया कोड भेजें',
-    changeNumber: 'दूसरा नंबर इस्तेमाल करें',
     signOut: 'साइन आउट',
     navDiagnose: 'फसल जाँचें',
     navChat: 'प्रश्न पूछें',
@@ -172,7 +161,6 @@ export const hi: MessageCatalog = {
     severityLabel: 'गंभीरता',
     channelLabel: 'माध्यम',
     channelWeb: 'वेबसाइट',
-    channelWhatsapp: 'WhatsApp',
     channelTelegram: 'Telegram',
     dateLabel: 'तारीख',
     symptomsHeading: 'क्या देखना है',
@@ -191,16 +179,6 @@ export const hi: MessageCatalog = {
     cropPhotoAlt: 'आपने भेजी हुई फसल की फोटो',
     photoThumbnailOnly: 'पूरी फोटो अब सहेजी नहीं है। यह छोटी प्रति है।',
     photoNoLongerStored: 'इस परिणाम की फोटो अब सहेजी नहीं है।',
-  },
-
-  whatsapp: {
-    signInFirst:
-      'जामी में स्वागत है। कृपया पहले इसी मोबाइल नंबर से जामी की वेबसाइट पर साइन इन करें, फिर यहाँ फसल की फोटो भेजें।',
-    unsupportedType: 'जामी फोटो, लिखित संदेश और वॉइस नोट स्वीकार करता है।',
-    voiceNoteFormatUnsupported:
-      'जामी इस वॉइस नोट को सुन नहीं सका। कृपया अपना सवाल यहाँ लिखकर भेजें।',
-    takingLonger:
-      'जामी को इस फोटो में सामान्य से अधिक समय लग रहा है। कृपया कुछ देर बाद फिर भेजें।',
   },
 
   /**

@@ -38,7 +38,7 @@ const CONVERSATION = '7d1a4c2e-5b6f-4a8d-9c3e-2f1b0a9d8c7b';
 /**
  * Media_References under Amendment A3 (D1 amended): a GridFS `{ fileId, kind }` pair, where
  * `fileId` is a 24-character lowercase-hex ObjectId. The old `{ bucket, path }` storage reference
- * retired with Supabase Storage — there is no path to fabricate here, only a hex id and a kind,
+ * predates GridFS — there is no path to fabricate here, only a hex id and a kind,
  * and `diagnoseRequestSchema`/`voiceRequestSchema` refine which kind each endpoint accepts.
  */
 const IMAGE_REF = {

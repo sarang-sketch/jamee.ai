@@ -26,7 +26,7 @@ import { SIGN_IN_PATH, isProtectedScreenPath } from '@/lib/auth/protected-paths'
  * resolves is turned into a redirect or a 401. A farmer whose cookie is present but stale therefore
  * gets past this proxy and is stopped by the page — which is the intended split, not a hole.
  *
- * This is what makes the file "clean" of the old backend: there is no Supabase client, no
+ * This is what makes the file "clean" of the old backend: there is no database client, no
  * `createServerClient`, no `getUser()` round trip, and no session-refresh cookie dance. Better
  * Auth refreshes its own session through `/api/auth/**` (the catch-all handler), so the proxy has
  * no refresh to preserve and returns a plain `NextResponse.next()`.

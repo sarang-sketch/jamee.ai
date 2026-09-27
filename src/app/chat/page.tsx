@@ -34,15 +34,15 @@ import styles from './page.module.css';
  *          and its messages via the Data_Access_Layer plus a client `ChatComposer`
  *
  * =============================================================================
- * AMENDMENT A3 — THE DATA_ACCESS_LAYER REPLACES THE RLS-SCOPED SUPABASE CLIENT
+ * AMENDMENT A3 — THE DATA_ACCESS_LAYER REPLACES THE RETIRED RLS-SCOPED CLIENT
  * =============================================================================
  *
- * Under Supabase this shell held an RLS-scoped `messages` query. Under A3 it holds no client: the
+ * The retired design held an RLS-scoped `messages` query. Under A3 this shell holds no client: the
  * thread is read through the owner-scoped `farmerReads(userId).conversationMessages(...)` accessor
  * (D18), whose merged `ownerId` is the tenant boundary, and each `MessageDoc` is mapped to the
  * `ChatMessageRow` view the thread renders. The design's rule of thumb still applies literally — no
  * route handler is called just to read data a server component can query directly — so `/api/chat`
- * is only ever asked to *write* a turn, and it uses no Supabase client.
+ * is only ever asked to *write* a turn, and it uses no database client.
  *
  * ### The conversation id is resolved here, and that is the point
  *

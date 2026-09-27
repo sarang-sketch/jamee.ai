@@ -260,7 +260,7 @@ deadline = min( getDeadline() − 15 s ,  requestStart + 45 s )
 
 The 15 s terminal reserve is not slack. It is the time the request still needs *after* the budget
 expires: build and localize the error envelope, write the `usage_logs` row with `outcome = 'timeout'`,
-mark the `whatsapp_inbound` row on the WhatsApp path and send the farmer a message. V16 records that
+mark the `telegram_inbound` row on the Telegram path and send the farmer a message. V16 records that
 `SIGTERM` grants only **~500 ms** of cleanup, so none of that work can be deferred to shutdown — it
 has to happen inside the invocation, before the platform's own limit, which is exactly what the
 reserve buys.
@@ -292,9 +292,9 @@ storage and database round trips around them (design: *DiagnosisService* pipelin
 
 | Step | Planned | Notes |
 | --- | --- | --- |
-| Ownership check + object existence probe | 1.0 s | `assertOwnership`, before any spend (Property 5) |
-| Quota reserve | 0.5 s | one `counter_try_increment` RPC |
-| Signed URL mint | 0.5 s | `createSignedUrl(path, expiresIn)`, `expiresIn` in **seconds** (V3) |
+| Ownership check + media existence probe | 1.0 s | `assertOwnership` on the GridFS `metadata.ownerId`, before any spend (Property 5) |
+| Quota reserve | 0.5 s | one Data_Access_Layer `findOneAndUpdate` counter reserve (V28, `returnDocument: 'after'`) |
+| Read media bytes from GridFS | 0.5 s | `openDownloadStream` on the `Media_Reference` (V29); bytes are then sent **inline** to the provider (V34) — there is no signed-URL mint under A3 |
 | `vision-classify` | 20.0 s | one attempt at its ceiling |
 | Stage 1 + stage 2 validation, knowledge-base read | 0.5 s | shape check is local; the KB read is one indexed query |
 | `text-generate` rephrase | 15.0 s | identified results only |
@@ -342,16 +342,16 @@ Uniform, and deliberately unforgiving about the quota:
    `used_fallback`, `channel` and `latency_ms` (Requirements 14.6, 14.7; D10).
 4. **The quota unit stays spent — `quota_spent = true`, no refund.** The refund path in
    `QuotaService.refund()` exists only for failures occurring *before the first provider call is
-   attempted*: an ownership rejection, a signed-URL failure, an unreadable object, a knowledge-base
+   attempted*: an ownership rejection, a GridFS media-read failure, an unreadable object, a knowledge-base
    read failure (task 10.3). A timeout happens after a provider call was issued, so the call was real
    and the unit is consumed. Refunding it would let a farmer with a reliably slow connection or a
    pathological image spend unlimited provider calls for zero quota.
-5. On the WhatsApp path the same deadline drives D11's soft-deadline branch — the farmer receives
+5. On the Telegram path the same deadline drives D11's soft-deadline branch — the farmer receives
    "Jamee is taking longer than usual on this photo — please send it again in a moment", the
-   `whatsapp_inbound` row is marked `failed`, and the delivery is still acknowledged 200.
+   `telegram_inbound` row is marked `failed`, and the delivery is still acknowledged 200.
 
 The routes that must export `maxDuration = 60`: `/api/diagnose`, `/api/chat`, `/api/voice`, and the
-WhatsApp webhook. V17 also records that `runtime` and `preferredRegion` are deprecated on the same
+Telegram webhook. V17 also records that `runtime` and `preferredRegion` are deprecated on the same
 config object and that `runtime = 'edge'` is unsupported from Next.js 16.3, so all four stay on the
 Node.js runtime — which is also what `waitUntil()` and `getDeadline()` require (V18).
 
@@ -397,8 +397,8 @@ confirms the retry behaviour it now reasons about. (The precise age-out bound is
 U-V24 — but the acknowledgement decision does not depend on it: the `update_id` claim makes any
 number of redeliveries harmless.)
 
-**2. The work fits.** One `vision-classify` call, one `text-generate` call, and a couple of Supabase
-round trips. Section 3 allocates that at 39.5 s planned inside a 45 s budget under a 60 s ceiling,
+**2. The work fits.** One `vision-classify` call, one `text-generate` call, and a couple of MongoDB
+round trips (through the Data_Access_Layer). Section 3 allocates that at 39.5 s planned inside a 45 s budget under a 60 s ceiling,
 for a single update. There is no capacity argument for deferring.
 
 **3. `waitUntil` converts a visible failure into a silent one.** V18 records the caveat directly: with
@@ -493,6 +493,27 @@ allowance. The design is explicit that provider free-tier numbers are never enco
 logic: Jamee reacts to a rate-limit *signal* (Requirement 14.4) and does not model a provider's quota.
 This section is a sizing note, not an input to any code path.
 
+> **Amended by Amendment A1 (Telegram) and Amendment A3 (MongoDB).** This section was first written
+> against the pre-amendment stack, so its *storage* arithmetic below was sized against **Supabase**
+> (500 MB database, separate 1 GB object storage, 5 GB monthly egress) and its second channel was
+> **WhatsApp**. Both are superseded and the current substrate is:
+> - **The second channel is Telegram, not WhatsApp** (A1). The shared-quota reasoning is unchanged —
+>   one per-farmer quota counts both channels — but the media-relay and 24-hour-window paragraphs
+>   below describe the retired WhatsApp channel and are kept only as the record of why the reasoning
+>   held; Telegram file retrieval is a single `getFile` (V25) with a 20 MB bot-download ceiling.
+> - **Records and media both live in MongoDB Atlas M0, not Supabase** (A3). There is no Supabase
+>   database, no separate object-storage bucket, and no signed-URL egress: uploaded files are in
+>   **GridFS inside the same M0 database**, and analysis reads those bytes and sends them **inline**
+>   to the provider (V34) rather than handing over a signed URL. The binding limit is therefore the
+>   **single M0 512 MB (0.5 GB) cluster budget shared by records *and* GridFS media** (V32), which is
+>   *tighter* than the retired Supabase split of 500 MB records + 1 GB storage. The current retention
+>   arithmetic against that 512 MB budget lives in
+>   [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) step 10 and is the authority; the Supabase-era tables
+>   below are retained as the prior analysis, not as current instruction.
+> - The AI-call sizing (request load, model calls, Gemini/Groq allowances, Vercel Hobby) is
+>   **unchanged by either amendment** — no provider that resolves those numbers was touched — so it
+>   still stands as written.
+
 ### Request load
 
 | Operation | Per farmer / day | × 6 farmers |
@@ -502,9 +523,9 @@ This section is a sizing note, not an input to any code path.
 | Voice messages | 20 | **120** |
 | **Total requests** | 90 | **540 / day** → **16,200 / 30 days** |
 
-One quota, both channels: Requirement 14.2 counts web and WhatsApp against one shared per-farmer
-limit, and the counter key carries no channel component (task 10.1). Adding WhatsApp adds no load
-above these numbers.
+One quota, both channels: Requirement 14.2 counts the web channel and the Telegram channel against one
+shared per-farmer limit, and the counter key carries no channel component (task 10.1). Adding the
+second channel adds no load above these numbers.
 
 ### Model calls, which is the number that matters
 
@@ -625,19 +646,47 @@ not record that as configurable on Hobby, so it is not assumed here.
 
 **Active CPU** cannot be computed from `VERIFIED_VALUES.md`, because it bills measured CPU time rather
 than wall-clock, and Jamee's functions spend nearly all their wall-clock waiting on provider and
-Supabase I/O. The 0.89 CPU-s per-request budget is the figure to watch. JSON parsing, HMAC-SHA256 over
-a webhook body (V13) and Zod validation of a few KB sit far below it. The path that could threaten it
-is the **WhatsApp media relay**: V14's two-step retrieval means the function downloads media bytes and
-re-uploads them to Supabase storage, bounded by Meta's inbound caps of **5 MB per image** and **16 MB
-per audio** (V14). That is I/O-bound rather than CPU-bound, so it should be fine, but it is the only
-path where bytes move through a function and therefore the only one worth measuring. Note V16's 4.5 MB
-limit does not bind it: that limit applies to the request or response body of the function itself, and
-the webhook POST body is JSON metadata only.
+MongoDB I/O. The 0.89 CPU-s per-request budget is the figure to watch. JSON parsing, the
+HMAC-SHA256 over a webhook body (the Razorpay payment webhook, V27) and Zod validation of a few KB
+sit far below it. The path where bytes move through a function is the **media relay**: under Amendment
+A3 the browser now uploads a re-encoded file to Jamee's authenticated Media_Endpoint, which writes it
+to **GridFS** (there is no browser-reachable object store anymore), and the Telegram channel downloads
+inbound media with a single `getFile` (V25, 20 MB bot-download ceiling) before writing it to the same
+GridFS bucket. That relay is I/O-bound rather than CPU-bound, so it should be fine, but it is the path
+worth measuring. Note V16's 4.5 MB limit binds the Media_Endpoint upload (which is why the A3 voice
+cap is 3 MB), but the Telegram webhook POST body is JSON metadata only.
 
-The web path never handles media bytes in a function at all — browser-direct upload to Supabase
-(design: *Browser-direct upload*) and signed-URL reads (V3) keep them out.
+> *Retired detail (pre-A3/A1):* under the earlier stack this relay was the WhatsApp media path —
+> V14's two-step retrieval downloaded media bytes and re-uploaded them to **Supabase** storage,
+> bounded by Meta's inbound caps of 5 MB per image and 16 MB per audio. Both the WhatsApp retrieval
+> and the Supabase object store are gone; the CPU concern (bytes crossing a function) survives the
+> substrate change, which is why it is re-stated above on the current GridFS path.
 
-### Supabase Free (V19)
+The web path never handles media bytes in a plain analysis request: the browser uploads once to the
+Media_Endpoint (which streams to GridFS), and the diagnosis/voice *analysis* requests then carry only
+a small `Media_Reference` in their JSON body, so the analysis handlers stay tiny even though the media
+now transits a Jamee function on the upload leg (design: *Amendment A3*, the Media_Endpoint).
+
+### Storage budget — current substrate is Atlas M0, not Supabase (V19, V32)
+
+> **The current storage constraint is the single MongoDB Atlas M0 512 MB (0.5 GB) cluster budget,
+> shared by records *and* GridFS media** (V32, A3). The authoritative retention arithmetic against
+> that number is in [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md) step 10:
+> `(media bytes/day) × (retention days) + thumbnails + records < 512 MB`, which at ~400 KB images
+> plus small thumbnails and 3 MB-capped voice notes leaves a **7-day** window comfortably inside
+> 512 MB for the ~6-farmer pilot. Because that budget is a *single shared* pool — tighter than the
+> retired Supabase split of a 500 MB database plus a separate 1 GB object store — retention is more
+> load-bearing under A3, not less (P8-2 flags `MEDIA_RETENTION_DAYS` for early review).
+>
+> The **Supabase Free** tables and arithmetic that follow are the **retired pre-A3 analysis**, kept
+> because the *shape* of the reasoning — that media accumulation, not records, is the binding
+> dimension, and that a fixed byte budget with no retention window is a deadline rather than a limit —
+> carried directly across to the M0 substrate. Read them as the record of how the retention
+> requirement was reached, not as current allowances: there is no Supabase database, egress meter, or
+> object-storage bucket in the deployed system, and analysis sends bytes **inline** to the provider
+> (V34) rather than minting a signed URL.
+
+#### Retired pre-A3 analysis — Supabase Free (V19)
 
 | Dimension | Free allowance | Jamee worst case | Reading |
 | --- | --- | --- | --- |
@@ -722,17 +771,16 @@ user's decision.
 | Constraint | Status at worst-case 6-farmer load |
 | --- | --- |
 | Vercel invocations, edge requests, transfer | Wide headroom — ~1.6% of the invocation allowance |
-| Vercel Active CPU | Expected wide; unmeasurable from documented values. Watch the WhatsApp media relay |
+| Vercel Active CPU | Expected wide; unmeasurable from documented values. Watch the GridFS media relay (the upload leg through the Media_Endpoint, and Telegram `getFile`) |
 | Vercel Provisioned Memory | 20% at ~8 s average, **113% if every request ran the full 45 s budget** — duration is the lever |
-| Supabase database | ~37 MB/month against 500 MB — comfortable |
-| Supabase egress | Fits **only** with average media under ~700 KB — requires client-side downscaling |
-| Supabase storage | **Binding. ~6 days to fill 1 GB.** Needs a retention decision |
+| Atlas M0 cluster storage (records + GridFS media, one 512 MB pool) | **Binding.** Sized by the retention window in `docs/DEPLOYMENT.md` step 10; a 7-day window fits at pilot scale. Tighter than the retired Supabase split, so retention is load-bearing |
 | Gemini free tier | **UNRESOLVED (U-V19a)** — record at deployment; code needs no change |
 | Groq free tier | **UNRESOLVED (U-V19b)** — record at deployment; code needs no change |
 
 Requirement 17.7 ("operate within the free tiers ... for a load of 6 Farmers") is satisfiable, with two
-conditions that are not yet anywhere in the plan: **downscale images client-side**, and **decide a
-media retention window**.
+conditions: **downscale images client-side** (the ~400 KB Downscale_Target, now enforced in the browser
+before the Media_Endpoint upload), and **a bounded media retention window** against the M0 512 MB
+budget (default 7 days, `MEDIA_RETENTION_DAYS`).
 
 ---
 
@@ -747,24 +795,23 @@ business service, the plan is wrong and the numbers in section 5 no longer apply
 exceeding a Hobby usage limit generally means waiting out a 30-day window, which matters given how
 close provisioned memory can get.
 
-**The WhatsApp 24-hour customer service window is open by construction, so the normal flow needs no
-message template.** V15 confirms the window constrains replies: a 24-hour timer starts when a user
-messages or calls the business and **resets on each subsequent user message or call**; while open,
-free-form service messages need no pre-approval; when it closes, **only pre-approved templates may be
-sent**. Every Jamee reply answers an inbound message, so the window is open whenever Jamee replies —
-**no template is required for the normal flow**, and none needs to be created or approved for the
-pilot. Three caveats to record:
+**The Telegram channel has no reply window and needs no message template (A1).** The second channel is
+Telegram (Amendment A1), and Telegram imposes **no 24-hour customer-service window and no template
+requirement** — a reply is a plain `sendMessage` (V24), so a late reply is a latency problem, not an
+undeliverable message. There is therefore **nothing to record in `docs/DEPLOYMENT.md` about reply
+windows or template pre-approval**; the only send-side facts that matter are the 4096-character text
+cap (V24), which the diagnosis formatter truncates or splits below, and Telegram's non-200 redelivery
+of the same `update_id`, which the idempotency claim already handles (section 4).
 
-- **A deferred reply beyond 24 hours would be rejected without a template.** This is the direct
-  consequence for section 4: any future design that replies later than the invocation — a retry queue,
-  a scheduled follow-up, an operator-triggered resend — needs a pre-approved template. D11's inline
-  processing keeps every reply inside the invocation and therefore inside the window by construction.
-  The recommended strategy has no template dependency; a deferred strategy could acquire one.
-- **A send can fail inside an apparently open window.** V15 records a known issue to that effect, so
-  send failures must be handled rather than treated as impossible.
-- **Acceptance is not delivery.** V15: the 200 from the send endpoint confirms acceptance only;
-  delivery arrives later as a `statuses[]` webhook. Also, `text.body` caps at **4,096 characters**, so
-  the diagnosis formatter must truncate or split below it, and messaging requires prior opt-in.
+> *Retired constraint (pre-A1 — WhatsApp).* The earlier stack's second channel was WhatsApp, whose
+> **24-hour customer-service window** did bind replies: a timer started on each inbound user
+> message/call and reset on the next, free-form service messages were allowed while it was open, and
+> only pre-approved templates could be sent once it closed (V15, retired). Because every Jamee reply
+> answered an inbound message, the window was open by construction and no template was needed for the
+> normal flow — but a deferred reply beyond 24 hours would have needed one, a send could fail inside
+> an apparently-open window, and a send 200 confirmed acceptance not delivery. All of this retired
+> with the channel: it is kept only to explain why section 4's inline-processing decision never
+> acquired a template dependency. On Telegram none of it applies.
 
 ---
 
@@ -781,10 +828,12 @@ Every item is `UNRESOLVED` in `VERIFIED_VALUES.md`. None is substituted with a p
 | **U-V10** | No documented maximum audio duration for Groq transcription | Derives the transcribe budget from the size cap and the app's own 120 s recording rule | Never present a duration limit to a farmer as a provider limit. Derive the recording cap from size plus the app's own rule |
 | **U-V20** | Which container/codec `MediaRecorder` actually records on target Android browsers | Treats audio size, not container, as the transcribe budget driver | Probe an ordered candidate list with `isTypeSupported()`, record the first supported type, send the observed `mimeType`, and validate it against V10's accepted container list |
 
-Two items are noted rather than tabled because they touch this document only indirectly: **U-V12**
+Two items are noted rather than tabled because they touch this document only historically: **U-V12**
 (inbound image/audio webhook field paths) and **U-V13** (the `X-Hub-Signature-256` byte encoding) both
-gate the WhatsApp path that section 4 discusses, and both are resolved empirically against a real
-delivery during deployment. Neither affects the acknowledgement decision.
+gated the **retired** WhatsApp path that section 4 now discusses only as history — both are closed by
+retirement (Amendment A1), not by resolution, and neither has any current code path. Telegram's
+equivalents are resolved (V24–V26), and the payment webhook's signature encoding is resolved
+(U-V27a, lowercase hex). Neither affects the acknowledgement decision.
 
 ### Gaps this document surfaced that are not yet V-items
 
@@ -797,7 +846,7 @@ the next person does not rediscover them.
 | Whether `waitUntil` work can extend an invocation **past `maxDuration`** — V18 says the handler lifetime is extended for the promise's duration, and calls `getDeadline()` the *shared* invocation deadline, but does not reconcile the two | Section 4 assumes it cannot, which is the conservative reading and the one that keeps the acknowledgement question a UX question | V18 |
 | The `@google/genai` JS SDK's **internal retry defaults** — V11 records the Python SDK's (4 attempts, ~1 s initial, 60 s max) but not the JS SDK's | Section 3's abort-signal requirement; a 60 s internal cap exceeds the whole 45 s budget | V11, at task 8.2 |
 | Whether Groq's rate limits are **per-model or per-account** — U-V19b's table lists limits per model without saying which scope applies | Section 5's sanity check, shown both ways because both fit | V19 / U-V19b, at deployment |
-| Whether Supabase Free offers an **image transformation or resize** capability | Section 5's history-thumbnail egress amplifier — a resized derivative would cut it substantially | new V-item, only if egress becomes binding |
+| ~~Whether Supabase Free offers an image transformation or resize capability~~ — **moot under A3.** There is no Supabase and no per-read egress meter; analysis sends bytes inline (V34) and history thumbnails are a small derivative stored in GridFS at upload (`metadata.kind = 'thumbnail'`, D17), so no server-side resize capability is needed | Was section 5's history-thumbnail egress amplifier under Supabase; removed by the A3 substrate change | n/a — closed by A3 |
 
 The Whisper models' **tier** (Preview vs. production) is a fifth, smaller gap, described in the tier
 note in section 1. It matters only if a config gate is ever wanted for the voice path.

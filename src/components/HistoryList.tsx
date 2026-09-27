@@ -11,7 +11,7 @@ import styles from './HistoryList.module.css';
  *
  * Requirements: 12.1 (each entry carries the crop image thumbnail, the reported condition or the
  *               inconclusive label, the Severity_Value, the channel, and the creation timestamp),
- *               12.2 (WhatsApp entries appear on the same footing as web ones), 12.3 (selecting an
+ *               12.2 (Telegram entries appear on the same footing as web ones), 12.3 (selecting an
  *               entry opens its detail view — this component provides the link), 12.5 (the image
  *               URL is a Signed_URL, minted server-side before it reaches this component),
  *               12.10 (an entry with no surviving image says so in plain language), 9.4 (a
@@ -55,7 +55,6 @@ export function HistoryList({ entries, language }: HistoryListProps) {
    */
   const channelNames: Record<Channel, string> = {
     web: ui.channelWeb,
-    whatsapp: ui.channelWhatsapp,
     telegram: ui.channelTelegram,
   };
 
@@ -115,7 +114,7 @@ export function HistoryList({ entries, language }: HistoryListProps) {
 
                 {/*
                   Each fact is a label and a value, both as text. Requirement 12.1 names four
-                  fields, and a bare "WhatsApp" or "Moderate" next to a photo does not say which
+                  fields, and a bare "Telegram" or "Moderate" next to a photo does not say which
                   field it is — least of all to a screen reader reading the link's accessible name
                   as one run of text. Severity in particular is label text plus a non-colour icon,
                   never colour alone (design: "Mobile layout and accessibility").

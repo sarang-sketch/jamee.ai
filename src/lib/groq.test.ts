@@ -623,9 +623,8 @@ describe('normalizeAudioContainer', () => {
       expect(isAcceptedAudioContainer(container)).toBe(true);
       expect(isAcceptedAudioContainer(`audio/${container}`)).toBe(true);
     }
-    // V14 lists these two among WhatsApp inbound audio types and asserts they are inside V10's
-    // list. They are not literal members of it, so they are refused rather than assumed — see
-    // `isAcceptedAudioContainer`.
+    // A messaging channel may deliver audio in these containers; they are not literal members of
+    // V10's accepted list, so they are refused rather than assumed — see `isAcceptedAudioContainer`.
     expect(isAcceptedAudioContainer('audio/aac')).toBe(false);
     expect(isAcceptedAudioContainer('audio/amr')).toBe(false);
     expect(isAcceptedAudioContainer('video/mp4')).toBe(true);

@@ -138,15 +138,15 @@ import {
  * =============================================================================
  *
  * Requirement 13.8 names "the diagnosis, chat, and voice endpoints", and that is exactly where a
- * limiter is bound: `/api/diagnose`, `/api/chat`, `/api/voice`. **The WhatsApp webhook is not burst
+ * limiter is bound: `/api/diagnose`, `/api/chat`, `/api/voice`. **The Telegram webhook is not burst
  * -limited**, and that is the requirement's scope rather than an omission — an inbound webhook is
- * rate-controlled by Meta's own delivery behaviour, its duplicates are already refused by the
- * `whatsapp_inbound` idempotency insert (Requirement 11.5) at a step *above* this one, and its
- * per-farmer daily cost is bounded by the shared counter it writes with the web channel.
+ * rate-controlled by the platform's own delivery behaviour, its duplicates are already refused by
+ * the inbound idempotency guard (Requirement 11.5) at a step *above* this one, and its per-farmer
+ * daily cost is bounded by the shared counter it writes with the web channel.
  *
  * The counters do not care: the key has no channel component, so binding `burstLimiter()` in the
- * WhatsApp adapter later needs no change here — it would simply share the same minute row. What
- * would need deciding first is the refusal's shape, because a 429 to Meta is a redelivery request
+ * Telegram adapter needs no change here — it simply shares the same minute row. What would need
+ * deciding first is the refusal's shape, because a 429 to the platform is a redelivery request
  * rather than a message to a farmer, and Requirement 10.11 wants an acknowledgement.
  */
 

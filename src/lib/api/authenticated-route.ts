@@ -70,8 +70,8 @@ export interface FarmerSession {
 
 /**
  * How the identity is resolved. A seam rather than a direct call so the guard is testable without
- * a cookie store or an Auth round trip — the same structural-seam approach `lib/storage.ts` and
- * `auth/callback/ensure-profile.ts` take.
+ * a cookie store or an Auth round trip — the same structural-seam approach the profile bootstrap
+ * (`src/lib/auth/bootstrap.ts`) takes.
  *
  * `null` means "no valid session". A resolver that throws is a *different* thing (the Auth service
  * is unreachable, an env var is missing) and is treated as one: it becomes `INTERNAL_ERROR`, and

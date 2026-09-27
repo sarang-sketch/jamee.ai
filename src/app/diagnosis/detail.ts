@@ -38,15 +38,15 @@ import { QUOTA_TIME_ZONE } from '@/lib/time';
  * class to a glob — the test runner's `src/**` pattern reaches this path without that hazard.
  *
  * =============================================================================
- * AMENDMENT A3 — THE DATA_ACCESS_LAYER AND THE MEDIA_ENDPOINT REPLACE SUPABASE
+ * AMENDMENT A3 — THE DATA_ACCESS_LAYER AND THE MEDIA_ENDPOINT REPLACE THE RETIRED STORE
  * =============================================================================
  *
- * Under Supabase this module took PostgREST select strings and a storage client, minted a
+ * The retired design took PostgREST select strings and a storage client, minted a
  * Signed_URL, derived the thumbnail path by convention and probed storage for presence. Under A3
- * there is neither PostgREST nor Storage: the page reads the diagnosis and its messages through the
- * owner-scoped Data_Access_Layer, so this module takes the layer's DOCUMENTS, and the image is the
- * constant `/api/media/<fileId>` from `mediaUrl` (no minting, no expiry, no probe). Thumbnail
- * presence is a stored link — the derivative's `metadata.sourceRef` — resolved by
+ * there is neither PostgREST nor a separate object store: the page reads the diagnosis and its
+ * messages through the owner-scoped Data_Access_Layer, so this module takes the layer's DOCUMENTS,
+ * and the image is the constant `/api/media/<fileId>` from `mediaUrl` (no minting, no expiry, no
+ * probe). Thumbnail presence is a stored link — the derivative's `metadata.sourceRef` — resolved by
  * `FarmerReads.thumbnailFileIdFor`, not a derived path plus an `exists()` call.
  */
 

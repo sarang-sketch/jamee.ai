@@ -48,9 +48,13 @@ describe('isProtectedScreenPath', () => {
     expect(isProtectedScreenPath('/')).toBe(false);
   });
 
-  it('leaves the callback route open, since it is what establishes the profile', () => {
-    /** `/auth/callback` runs D8's upsert for a farmer who has just signed in. */
-    expect(isProtectedScreenPath('/auth/callback')).toBe(false);
+  it('does not gate the Better Auth callback, since it is what establishes the session', () => {
+    /**
+     * Better Auth's OAuth callback is `/api/auth/callback/google` (task A1/A3). It lives under
+     * `/api/**`, so it is not a protected screen path — the API half of the gate governs it, and a
+     * visitor mid-sign-in must be able to reach it without a session.
+     */
+    expect(isProtectedScreenPath('/api/auth/callback/google')).toBe(false);
   });
 
   it('does not claim the API surface', () => {
@@ -61,7 +65,7 @@ describe('isProtectedScreenPath', () => {
     expect(isProtectedScreenPath('/api/diagnose')).toBe(false);
     expect(isProtectedScreenPath('/api/chat')).toBe(false);
     expect(isProtectedScreenPath('/api/voice')).toBe(false);
-    expect(isProtectedScreenPath('/api/whatsapp')).toBe(false);
+    expect(isProtectedScreenPath('/api/telegram')).toBe(false);
   });
 
   it('matches on whole segments rather than raw prefixes', () => {
@@ -105,18 +109,19 @@ describe('proxy matcher', () => {
     expect(matched('/diagnosis/8f14e45f-ceea-467a-a3f3-4c9e2c0b9e11')).toBe(true);
   });
 
-  it('admits the unprotected pages too, because that is where a session gets refreshed', () => {
+  it('admits the unprotected landing page too, because that is where a session gets refreshed', () => {
     /**
      * V1's reason for the Proxy existing: a Server Component render cannot write a rotated
-     * session cookie, so the refresh has to happen in front of `/` and `/auth/callback` as well.
+     * session cookie, so the Better Auth session refresh has to happen in front of `/` as well.
      */
     expect(matched('/')).toBe(true);
-    expect(matched('/auth/callback')).toBe(true);
   });
 
   it('excludes the API surface, so exactly one half of the gate answers a given request', () => {
     expect(matched('/api/diagnose')).toBe(false);
-    expect(matched('/api/whatsapp')).toBe(false);
+    expect(matched('/api/telegram')).toBe(false);
+    // Better Auth's OAuth callback lives under /api/auth/**, so the Proxy never sees it.
+    expect(matched('/api/auth/callback/google')).toBe(false);
   });
 
   it('excludes framework assets and static files', () => {

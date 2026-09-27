@@ -83,7 +83,7 @@ function kolkataParts(now: Date): KolkataParts {
  * The daily counter key: `YYYY-MM-DD` in Asia/Kolkata.
  *
  * This is the whole of Requirement 14.2's cross-channel sharing, by omission — there is no
- * channel component anywhere in the key, so a web request and a WhatsApp request land on the same
+ * channel component anywhere in the key, so a web request and a Telegram request land on the same
  * counter row automatically rather than by a rule someone has to remember.
  */
 export function dayWindowKey(now: Date = new Date()): string {

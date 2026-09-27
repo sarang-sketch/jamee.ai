@@ -24,41 +24,6 @@
  */
 
 /* ========================================================================== */
-/* Supabase                                                                    */
-/* ========================================================================== */
-
-/** The two private buckets. No `video-inputs` bucket exists — Requirement 19 is deferred. */
-export const STORAGE_BUCKETS = {
-  cropImages: 'crop-images',
-  voiceMessages: 'voice-messages',
-} as const;
-
-export type StorageBucket = (typeof STORAGE_BUCKETS)[keyof typeof STORAGE_BUCKETS];
-
-/**
- * `createSignedUrl(path, expiresIn)` — **V3: `expiresIn` is a number of SECONDS**, not
- * milliseconds. Getting the unit wrong by a factor of 1000 fails in the forgiving direction
- * (a URL that lives 10 minutes instead of 0.6 seconds), which is exactly why it needs to be
- * stated rather than inferred.
- *
- * 600 s is Jamee's choice, not a documented value. It has to outlive the longest thing that
- * reads the object: a provider fetching image bytes inside the 45 s request budget
- * (`docs/PROVIDER_CAPABILITIES.md` section 3), and a farmer's history page finishing its
- * render. Ten minutes clears both with room, and stays short enough that a leaked URL from a
- * shared screenshot is stale by the time anyone tries it.
- */
-export const SIGNED_URL_EXPIRY_SECONDS = 600;
-
-/**
- * Storage RLS extracts the first path segment with `(storage.foldername(name))[1]` — **V4**,
- * and Postgres arrays are 1-indexed, which is why the migration says `[1]` and not `[0]`.
- * Recorded here because the application-side ownership check in `src/lib/storage.ts` must
- * compare the SAME segment the database policy compares; a mismatch would leave one of the
- * two boundaries checking a different thing.
- */
-export const STORAGE_OWNER_PATH_SEGMENT_INDEX = 0 as const; // 0-based in JS; `[1]` in SQL
-
-/* ========================================================================== */
 /* Gemini — primary for `vision-classify` and `text-generate`                  */
 /* ========================================================================== */
 
@@ -210,9 +175,9 @@ export const TRANSCRIBE_ACCEPTED_CONTAINERS = [
 
 /**
  * **V10.** 25 MB on the free tier (100 MB on dev). Jamee's own 10 MB recording ceiling
- * (Requirement 8.2) sits well below it, so this is a guard against a WhatsApp-sourced audio
- * object rather than a browser recording — V14 caps inbound WhatsApp audio at 16 MB, which
- * is under 25 MB but over Jamee's 10 MB.
+ * (Requirement 8.2) sits well below it, so this is a guard against a messaging-channel-sourced
+ * audio object rather than a browser recording — an inbound Telegram audio file can exceed
+ * Jamee's 10 MB while still sitting under the provider's 25 MB.
  */
 export const TRANSCRIBE_PROVIDER_MAX_BYTES = 25 * 1024 * 1024;
 
@@ -331,7 +296,7 @@ export const HAS_PLATFORM_DEADLINE_API = true;
 
 /**
  * These four are Requirements 2.3, 2.4, 8.2 and 8.3 — Jamee's own rules. They are in this
- * file because the uploader, the recorder, the WhatsApp adapter and the error messages must
+ * file because the uploader, the recorder, the Telegram adapter and the error messages must
  * all quote the SAME numbers, and a farmer-facing message that disagrees with the check that
  * produced it is a defect. They are NOT V-items and carry no V annotation.
  */

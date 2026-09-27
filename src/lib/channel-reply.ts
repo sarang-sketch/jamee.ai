@@ -6,8 +6,8 @@ import type { DiagnosisResult, Language } from '@/lib/schemas';
 
 /**
  * The channel-agnostic reply formatters — the ONE place a service result becomes the text a
- * messaging channel sends, so the Telegram and (until wave 6 deletes it) WhatsApp channels format
- * an identical Diagnosis_Result identically.
+ * messaging channel sends, so the Telegram channel formats an identical Diagnosis_Result
+ * identically to the Web_App.
  *
  * Requirements: 10.7 / 10.13 (channel parity: the same Diagnosis_Result content a given crop image
  *               produces on the Web_App is what the messaging reply carries), 8.6 (a voice reply
@@ -17,17 +17,14 @@ import type { DiagnosisResult, Language } from '@/lib/schemas';
  * Design: D7 (channel parity is one code path and identical structured fields, not identical prose)
  *
  * =============================================================================
- * WHY THESE MOVED OUT OF `src/lib/whatsapp-dispatch.ts`
+ * WHY THE FORMATTERS LIVE IN A CHANNEL-NEUTRAL MODULE
  * =============================================================================
  *
  * D7's parity is "same service invocation, same knowledge-base row, identical structured fields".
  * The formatters below add nothing to a service result — they arrange fields the service already
- * grounded and localized — so both channels must render through the SAME formatter or "identical"
- * is a claim two copies can silently break. The functions were authored on the WhatsApp path;
- * Amendment A1 makes Telegram the live channel and wave 6 deletes `whatsapp-dispatch.ts`, so the
- * formatters live here, in a channel-neutral module both adapters import. This file is a **copy**
- * of the WhatsApp definitions rather than a re-export from them, precisely because the WhatsApp
- * module is being deleted — a re-export would break the moment it went.
+ * grounded and localized — so a channel must render through the SAME formatter or "identical"
+ * is a claim two copies can silently break. They live here, in a channel-neutral module the
+ * Telegram adapter imports, so any future channel renders through the same one code path.
  *
  * Nothing here reaches a model, a network call, or `process.env`: a reply is arranged from the
  * fields a service already produced, and a failure sentence is read from the catalog through the
@@ -35,7 +32,7 @@ import type { DiagnosisResult, Language } from '@/lib/schemas';
  */
 
 /**
- * Blank line between blocks. Telegram (like WhatsApp) renders `\n` literally in a plain-text
+ * Blank line between blocks. Telegram renders `\n` literally in a plain-text
  * message, so paragraphs are made explicit rather than left to a renderer.
  */
 const BLOCK = '\n\n';

@@ -10,13 +10,13 @@ import {
 
 /**
  * Unit tests for `src/services/conversation.service.ts` with the database stubbed at the
- * `ConversationStore` seam — two plain async functions, so nothing here reproduces a PostgREST
+ * `ConversationStore` seam — two plain async functions, so nothing here reproduces a query
  * builder chain or casts its way past a client type.
  *
  * Requirements: 7.5, 10.5, 10.8
  *
- * `conversationStoreFrom()` is deliberately not exercised: it is the one place a real Supabase
- * client is touched, and whether `.eq()` and `.order()` behave is a question about a live database
+ * `conversationStoreFrom()` is deliberately not exercised: it is the one place a real database
+ * client is touched, and whether the find and the order behave is a question about a live database
  * and its index, not about logic. The fake below **mirrors** that query — the same two predicates
  * and the same total order — so these tests pin the find-or-create decision that sits on top of it.
  * The integration project is where the real query and `conversations_user_recent_idx` get checked.
@@ -94,7 +94,7 @@ function conversation(overrides: Partial<Conversation> & { id: string }): Conver
   const stamp = overrides.updated_at ?? at(0);
   return {
     user_id: FARMER,
-    channel: 'whatsapp',
+    channel: 'telegram',
     title: null,
     created_at: stamp,
     updated_at: stamp,
@@ -114,7 +114,7 @@ describe('findOrCreateActive', () => {
       conversation({ id: 'middle', updated_at: at(20) }),
     ]);
 
-    const found = await findOrCreateActive(FARMER, 'whatsapp', store);
+    const found = await findOrCreateActive(FARMER, 'telegram', store);
 
     expect(found.id).toBe('newest');
     // Requirement 10.8: a follow-up must resolve inside the existing thread, so the create path
@@ -130,8 +130,8 @@ describe('findOrCreateActive', () => {
     ]);
 
     const [first, second] = await Promise.all([
-      findOrCreateActive(FARMER, 'whatsapp', store),
-      findOrCreateActive(FARMER, 'whatsapp', store),
+      findOrCreateActive(FARMER, 'telegram', store),
+      findOrCreateActive(FARMER, 'telegram', store),
     ]);
 
     expect(first?.id).toBe('c2');
@@ -144,15 +144,15 @@ describe('findOrCreateActive', () => {
 
   it("ignores the other channel's rows even when they are more recent", async () => {
     const store = fakeStore([
-      conversation({ id: 'whatsapp-thread', channel: 'whatsapp', updated_at: at(10) }),
+      conversation({ id: 'telegram-thread', channel: 'telegram', updated_at: at(10) }),
       conversation({ id: 'web-thread', channel: 'web', updated_at: at(50) }),
     ]);
 
     // The web row is the most recently updated row this farmer has, and it must still not be the
-    // answer for WhatsApp — otherwise the two threads bleed into each other.
-    const whatsapp = await findOrCreateActive(FARMER, 'whatsapp', store);
-    expect(whatsapp.id).toBe('whatsapp-thread');
-    expect(whatsapp.channel).toBe('whatsapp');
+    // answer for Telegram — otherwise the two threads bleed into each other.
+    const telegram = await findOrCreateActive(FARMER, 'telegram', store);
+    expect(telegram.id).toBe('telegram-thread');
+    expect(telegram.channel).toBe('telegram');
 
     const web = await findOrCreateActive(FARMER, 'web', store);
     expect(web.id).toBe('web-thread');
@@ -164,12 +164,12 @@ describe('findOrCreateActive', () => {
   it('creates a separate row when the farmer has a thread on the other channel only', async () => {
     const store = fakeStore([conversation({ id: 'web-thread', channel: 'web', updated_at: at(50) })]);
 
-    const whatsapp = await findOrCreateActive(FARMER, 'whatsapp', store);
+    const telegram = await findOrCreateActive(FARMER, 'telegram', store);
 
-    expect(whatsapp.id).not.toBe('web-thread');
-    expect(whatsapp.channel).toBe('whatsapp');
+    expect(telegram.id).not.toBe('web-thread');
+    expect(telegram.channel).toBe('telegram');
     expect(store.created).toBe(1);
-    // The web thread is untouched: a WhatsApp message cannot land in it.
+    // The web thread is untouched: a Telegram message cannot land in it.
     expect(store.rows.filter((row) => row.channel === 'web')).toHaveLength(1);
   });
 
@@ -192,10 +192,10 @@ describe('findOrCreateActive', () => {
   it('returns the same conversation on the next call instead of creating a second one', async () => {
     const store = fakeStore();
 
-    const first = await findOrCreateActive(FARMER, 'whatsapp', store);
-    const second = await findOrCreateActive(FARMER, 'whatsapp', store);
+    const first = await findOrCreateActive(FARMER, 'telegram', store);
+    const second = await findOrCreateActive(FARMER, 'telegram', store);
 
-    // The single long-running WhatsApp thread of Requirement 10.8: a second message appends to the
+    // The single long-running Telegram thread of Requirement 10.8: a second message appends to the
     // thread the first one created.
     expect(second.id).toBe(first.id);
     expect(store.created).toBe(1);
@@ -211,7 +211,7 @@ describe('findOrCreateActive', () => {
       conversation({ id: 'ours', user_id: FARMER, updated_at: at(10) }),
     ]);
 
-    const found = await findOrCreateActive(FARMER, 'whatsapp', store);
+    const found = await findOrCreateActive(FARMER, 'telegram', store);
 
     expect(found.id).toBe('ours');
     expect(found.user_id).toBe(FARMER);
@@ -222,7 +222,7 @@ describe('findOrCreateActive', () => {
       conversation({ id: 'theirs', user_id: OTHER_FARMER, updated_at: at(50) }),
     ]);
 
-    const found = await findOrCreateActive(FARMER, 'whatsapp', store);
+    const found = await findOrCreateActive(FARMER, 'telegram', store);
 
     expect(found.id).not.toBe('theirs');
     expect(found.user_id).toBe(FARMER);
@@ -230,8 +230,8 @@ describe('findOrCreateActive', () => {
   });
 
   it('rejects a row from a store that ignored the predicates rather than returning it', async () => {
-    // The service-role path has no RLS behind it, so a dropped `.eq()` must fail loudly instead of
-    // becoming a cross-tenant read.
+    // The Data_Access_Layer scopes reads by farmer id rather than a database policy, so a store
+    // that dropped a predicate must fail loudly instead of becoming a cross-tenant read.
     const leaky: ConversationStore = {
       mostRecent: async () =>
         conversation({ id: 'theirs', user_id: OTHER_FARMER, updated_at: at(50) }),
@@ -240,8 +240,8 @@ describe('findOrCreateActive', () => {
       },
     };
 
-    await expect(findOrCreateActive(FARMER, 'whatsapp', leaky)).rejects.toBeInstanceOf(AppError);
-    await expect(findOrCreateActive(FARMER, 'whatsapp', leaky)).rejects.toMatchObject({
+    await expect(findOrCreateActive(FARMER, 'telegram', leaky)).rejects.toBeInstanceOf(AppError);
+    await expect(findOrCreateActive(FARMER, 'telegram', leaky)).rejects.toMatchObject({
       code: 'INTERNAL_ERROR',
       status: 500,
     });
@@ -255,7 +255,7 @@ describe('findOrCreateActive', () => {
       },
     };
 
-    await expect(findOrCreateActive(FARMER, 'whatsapp', wrongChannel)).rejects.toMatchObject({
+    await expect(findOrCreateActive(FARMER, 'telegram', wrongChannel)).rejects.toMatchObject({
       code: 'INTERNAL_ERROR',
     });
   });
@@ -268,8 +268,8 @@ describe('findOrCreateActive', () => {
     const store = fakeStore();
 
     const [first, second] = await Promise.all([
-      findOrCreateActive(FARMER, 'whatsapp', store),
-      findOrCreateActive(FARMER, 'whatsapp', store),
+      findOrCreateActive(FARMER, 'telegram', store),
+      findOrCreateActive(FARMER, 'telegram', store),
     ]);
 
     // Both callers read "no thread" and both inserted, so a duplicate row exists — that is the
@@ -285,10 +285,10 @@ describe('findOrCreateActive', () => {
     const store = fakeStore();
 
     const [winner] = await Promise.all([
-      findOrCreateActive(FARMER, 'whatsapp', store),
-      findOrCreateActive(FARMER, 'whatsapp', store),
+      findOrCreateActive(FARMER, 'telegram', store),
+      findOrCreateActive(FARMER, 'telegram', store),
     ]);
-    const later = await findOrCreateActive(FARMER, 'whatsapp', store);
+    const later = await findOrCreateActive(FARMER, 'telegram', store);
 
     expect(later.id).toBe(winner?.id);
     expect(store.created).toBe(2);
@@ -310,7 +310,7 @@ describe('findOrCreateActive', () => {
       },
     };
 
-    await expect(findOrCreateActive(FARMER, 'whatsapp', failingRead)).rejects.toBeInstanceOf(
+    await expect(findOrCreateActive(FARMER, 'telegram', failingRead)).rejects.toBeInstanceOf(
       AppError,
     );
     // A failed read must not be read as "no thread exists": creating one then would split the
@@ -329,7 +329,7 @@ describe('findOrCreateActive', () => {
       create: async () => inserted,
     };
 
-    const found = await findOrCreateActive(FARMER, 'whatsapp', blindStore);
+    const found = await findOrCreateActive(FARMER, 'telegram', blindStore);
 
     expect(found).toEqual(inserted);
     expect(reads).toBe(2);
@@ -340,7 +340,7 @@ describe('findOrCreateActive', () => {
 /* Channel coverage                                                            */
 /* ========================================================================== */
 
-describe.each<Channel>(['web', 'whatsapp'])('findOrCreateActive on the %s channel', (channel) => {
+describe.each<Channel>(['web', 'telegram'])('findOrCreateActive on the %s channel', (channel) => {
   it('records the requested channel on the created row', async () => {
     const store = fakeStore();
 

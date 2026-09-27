@@ -103,16 +103,16 @@ import type { BindOutcome } from '@/lib/access-schemas';
  * in `src/lib/db/telegram-inbound.ts` (which re-exports `farmer.ts`'s system accessors) or a shared
  * service that itself goes through the owner-scoped Data_Access_Layer. It reimplements no image
  * analysis, grounding, rephrasing, or transcription — Requirements 16.1/16.2 are satisfied by
- * importing `diagnose`, `chatAnswerer`, and `transcribeAndAnswer`, exactly as the WhatsApp adapter
- * did, so `check:shared-implementation` sees a consumer rather than a second implementation.
+ * importing `diagnose`, `chatAnswerer`, and `transcribeAndAnswer`, so `check:shared-implementation`
+ * sees a consumer rather than a second implementation.
  */
 
 /** The one channel literal this adapter passes (Requirement 16.5). */
 const CHANNEL = 'telegram' as const;
 
 /**
- * Jamee's soft deadline as a fraction of the 60 s ceiling, the same posture the WhatsApp adapter
- * and the gateway take (D11). Left generous because Telegram redelivers a non-200 and the claim at
+ * Jamee's soft deadline as a fraction of the 60 s ceiling, the same posture the gateway takes
+ * (D11). Left generous because Telegram redelivers a non-200 and the claim at
  * step 3 already makes a redelivery a no-op — the deadline is a courtesy to the farmer (a reply
  * instead of a killed function), not a correctness lever.
  */
@@ -481,8 +481,8 @@ async function handleRecharge(
 
 /**
  * Route a `photo`/`text`/`voice` to its shared service and return the reply body. All three run
- * through the SAME service functions and the SAME formatters the web and (until deleted) WhatsApp
- * paths use, which is what makes D7's parity structural rather than promised. `deadlineMs` and
+ * through the SAME service functions and the SAME formatters the web path uses, which is what
+ * makes D7's parity structural rather than promised. `deadlineMs` and
  * `now` are handed to each service so the media download above and the provider call below count
  * against the same budget rather than each service computing a fresh 45 s of its own.
  */

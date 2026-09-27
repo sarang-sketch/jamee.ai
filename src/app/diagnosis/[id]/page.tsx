@@ -188,7 +188,7 @@ export default async function DiagnosisDetailPage({ params }: DiagnosisDetailPag
           */}
           <time dateTime={detail.createdAt}>{formatTimestamp(detail.createdAt, language)}</time>
           {' · '}
-          {detail.channel === 'web' ? catalog.ui.channelWeb : catalog.ui.channelWhatsapp}
+          {detail.channel === 'web' ? catalog.ui.channelWeb : catalog.ui.channelTelegram}
         </p>
       </header>
 

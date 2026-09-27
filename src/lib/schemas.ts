@@ -3,7 +3,6 @@ import { z } from 'zod';
 import {
   ACCEPTED_IMAGE_TYPES,
   MAX_AUDIO_SECONDS,
-  STORAGE_BUCKETS,
 } from '@/lib/config/verified';
 
 /**
@@ -52,7 +51,7 @@ export const VERIFIED_CONDITIONS = [
 export const verifiedConditionSchema = z.enum(VERIFIED_CONDITIONS);
 export const severitySchema = z.enum(['none', 'low', 'moderate', 'high']);
 export const languageSchema = z.enum(['en', 'hi', 'mr']);
-export const channelSchema = z.enum(['web', 'whatsapp', 'telegram']);
+export const channelSchema = z.enum(['web', 'telegram']);
 
 export type VerifiedCondition = z.infer<typeof verifiedConditionSchema>;
 export type Severity = z.infer<typeof severitySchema>;
@@ -96,21 +95,12 @@ export const usageOutcomeSchema = z.enum([
   'duplicate_ignored',
 ]);
 
-/** `whatsapp_inbound.status` — mirrors `0008_whatsapp_inbound.sql`. */
-export const whatsappInboundStatusSchema = z.enum([
-  'received',
-  'processed',
-  'failed',
-  'rejected',
-]);
-
 export type MessageRole = z.infer<typeof messageRoleSchema>;
 export type InputKind = z.infer<typeof inputKindSchema>;
 export type Operation = z.infer<typeof operationSchema>;
 export type ModelProvider = z.infer<typeof modelProviderSchema>;
 export type WindowKind = z.infer<typeof windowKindSchema>;
 export type UsageOutcome = z.infer<typeof usageOutcomeSchema>;
-export type WhatsappInboundStatus = z.infer<typeof whatsappInboundStatusSchema>;
 
 /* ========================================================================== */
 /* Vision model output — two stages (D2)                                       */
@@ -270,67 +260,23 @@ export type InconclusiveResult = z.infer<typeof inconclusiveResultSchema>;
 export type DiagnosisResult = z.infer<typeof diagnosisResultSchema>;
 
 /* ========================================================================== */
-/* Storage references                                                          */
-/* ========================================================================== */
-
-/**
- * `{user_id}/{YYYY}/{MM}/{uuid}.{ext}` — the object path convention both channels share.
- *
- * **The regex enforces SHAPE ONLY. It does not prove ownership.** Ownership is a runtime
- * comparison of the first path segment against the session user id, plus an object-exists
- * probe, and it runs before any quota reserve (Requirements 2.5, 2.6; Property 5). Treating
- * this schema as an authorization check would be the classic mistake: the shape is
- * client-supplied.
- *
- * **The single-dot rule is deliberate and must not be relaxed.** `[a-z0-9]{2,5}` after exactly
- * one `\.` means a path containing the `.thumb` infix FAILS this schema. Two consequences,
- * both wanted:
- *  - a client cannot submit a Thumbnail_Derivative as the object to diagnose, and
- *  - a client cannot submit a fabricated derived path at all.
- *
- * A thumbnail path is only ever computed server-side by `thumbPathFor()` in
- * `src/lib/storage.ts`, from an original path that has already passed this schema AND the
- * ownership check. Widening the regex to "accommodate thumbnails" would remove both
- * protections to solve a problem that does not exist.
- *
- * The uuid character classes are `[0-9a-f-]{36}` rather than a strict UUID grammar, matching
- * the design verbatim. That is intentionally permissive about dash placement: `auth.users.id`
- * is a real uuid, so a stricter pattern would gain nothing while adding a way for a
- * legitimate path to be rejected.
- */
-export const STORAGE_PATH_REGEX =
-  /^[0-9a-f-]{36}\/\d{4}\/\d{2}\/[0-9a-f-]{36}\.[a-z0-9]{2,5}$/;
-
-export const storageRefSchema = z.object({
-  bucket: z.enum([STORAGE_BUCKETS.cropImages, STORAGE_BUCKETS.voiceMessages]),
-  path: z
-    .string()
-    .min(1)
-    .max(512)
-    .regex(STORAGE_PATH_REGEX, 'path must be {user_id}/{YYYY}/{MM}/{uuid}.{ext}'),
-});
-export type StorageRef = z.infer<typeof storageRefSchema>;
-
-/* ========================================================================== */
 /* Media references (Amendment A3 — GridFS)                                    */
 /* ========================================================================== */
 
 /**
- * A Media_Reference — the `{ fileId, kind }` pair that replaces a Supabase storage path under
+ * A Media_Reference — the `{ fileId, kind }` pair that Jamee's media contract is built on under
  * Amendment A3 (D17). `fileId` is a GridFS file `_id` as its 24-character lowercase hex string;
  * `kind` is one of the three media kinds one bucket holds, told apart by `metadata.kind`.
  *
- * Added **additively** in this wave: `storageRefSchema` above and the diagnose/chat/voice request
- * schemas are deliberately left untouched, because the routes switch over to Media_References in a
- * later wave (task 54.2/54.3). Until then this schema exists so `src/lib/media/*` (task 54.1) can
- * validate the reference shape at its own boundary without any request contract depending on it
- * yet.
+ * The diagnose/chat/voice request schemas below carry a Media_Reference: the browser uploads to the
+ * Media_Endpoint, which returns `{ fileId, kind }`, and `src/lib/media/*` (task 54.1) validates the
+ * reference shape at its own boundary.
  *
  * The `fileId` regex is the ObjectId hex grammar — exactly 24 hex digits — which is all a client
- * could ever legitimately send, and it carries NO path, no dots, and no `.thumb` infix to fabricate
- * (the whole class of storage-path forgery `storageRefSchema` had to guard is simply not
- * expressible here). `kind` is a closed enum, so a request naming a kind Jamee does not store fails
- * to parse; the application wrapper additionally refines which kind a given endpoint accepts.
+ * could ever legitimately send, and it carries NO path, no dots, and no `.thumb` infix to fabricate,
+ * so a reference cannot name a fabricated derived object. `kind` is a closed enum, so a request
+ * naming a kind Jamee does not store fails to parse; the application wrapper additionally refines
+ * which kind a given endpoint accepts.
  *
  * The kinds mirror `MEDIA_KINDS` in `@/lib/db/names` character-for-character. That module is
  * dependency-free (the node-run setup script imports it), so its list is the canonical one and this
@@ -562,9 +508,9 @@ export const ERROR_CODES = [
    * The audio counterpart of `FILE_TYPE_UNSUPPORTED`, added because the alternative was
    * `TRANSCRIPTION_FAILED`, which is `retryable: true`: re-sending the identical bytes in the
    * identical container fails identically forever, so that flag was a lie every time it was
-   * reached. WhatsApp is what makes the case routine rather than theoretical — V14 has Meta
-   * delivering `audio/aac` and `audio/amr`, and neither is in V10's list, and the farmer does not
-   * choose what WhatsApp records in.
+   * reached. The case is routine rather than theoretical — a browser `MediaRecorder` (V20)
+   * may settle on a container outside V10's list, and the farmer does not choose what their
+   * device records in.
    */
   'AUDIO_FORMAT_UNSUPPORTED', //    400  8.4, 10.6
   'RATE_LIMITED', //                429  13.8
@@ -649,7 +595,7 @@ export const audioCandidateSchema = z.object({
 /**
  * `channel` is a REQUIRED parameter on all three service inputs, which is what makes
  * Requirement 16.5 structurally true rather than a convention: a caller cannot forget it, and
- * both the route handlers and the WhatsApp adapter pass a literal.
+ * both the route handlers and the Telegram adapter pass a literal.
  *
  * These are interfaces rather than schemas because they describe an in-process call, not a
  * wire format. Nothing crosses a trust boundary here — the wire formats above already did the

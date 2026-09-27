@@ -132,17 +132,15 @@ import {
  * The retention sweep is the collector for both retained cases.
  *
  * =============================================================================
- * WHY THIS SERVICE NO LONGER HOLDS A CLIENT (Amendment A3)
+ * WHY THIS SERVICE HOLDS NO CLIENT (Amendment A3)
  * =============================================================================
  *
- * Under A3 there is no Supabase Storage, no service-role client, and no RLS. Farmer isolation is the
- * Data_Access_Layer (D18). So reads and writes go through owner-scoped accessors — the audit row
- * through `usageLogWriterFrom()`, the recording's bytes and its deletion through `src/lib/media`
- * (`readMediaBytesForOwner` / `removeMediaForOwner`, which delegate to the GridFS store in
- * `src/lib/db/media`) — and no client is a parameter. The delete used to run on the service-role
- * client because a farmer session had no storage `delete` policy; under A3 the only writer is the
- * owner-scoped layer accessor, so "only server-side, only the owner's file" holds by construction and
- * `deleteVoiceOriginal` is a thin wrapper over it. This module stays `server-only`.
+ * Farmer isolation is the Data_Access_Layer (D18). Reads and writes go through owner-scoped
+ * accessors — the audit row through `usageLogWriterFrom()`, the recording's bytes and its deletion
+ * through `src/lib/media` (`readMediaBytesForOwner` / `removeMediaForOwner`, which delegate to the
+ * GridFS store in `src/lib/db/media`) — and no client is a parameter. The delete runs only through
+ * the owner-scoped layer accessor, so "only server-side, only the owner's file" holds by
+ * construction and `deleteVoiceOriginal` is a thin wrapper over it. This module stays `server-only`.
  */
 
 /** This service reserves, and audits, exactly one operation type. */
@@ -285,11 +283,10 @@ export async function deleteVoiceOriginal(
 export type VoiceStore = UsageLogWriter;
 
 /**
- * The Data_Access_Layer-backed audit writer. *Amended by A3:* this was
- * `voiceStoreFrom(auditClient: SupabaseClient)`, an insert on the service-role client whose absent
- * write policy on `usage_logs` was the "append-only" enforcement. Under A3 the row is reachable only
- * through the owner-scoped `FarmerData.insertUsageLog` (D18), so this takes no client — the layer is
- * the boundary — and simply returns `usageLogWriterFrom()`.
+ * The Data_Access_Layer-backed audit writer. The row is reachable only through the owner-scoped
+ * `FarmerData.insertUsageLog` (D18), so this takes no client — the layer is the boundary — and
+ * simply returns `usageLogWriterFrom()`. "Append-only" is structural: there is no code path to a
+ * `usage_logs` update or delete.
  */
 export function voiceStoreFrom(): VoiceStore {
   return usageLogWriterFrom();

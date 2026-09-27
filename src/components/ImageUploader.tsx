@@ -377,8 +377,8 @@ export async function encodeCropImage(file: Blob): Promise<EncodedCropImage> {
  * keeps the decision about what a failed upload means, and a test needs neither a network nor a
  * `fetch` stub wired through the component. **Amendment A3:** the object goes to
  * `POST /api/media` (authenticated, owner-stamped from the session) instead of browser-direct to a
- * Supabase bucket — there is no bucket, and no path a client could forge. The route admits the
- * bytes (kind + MIME type + size) and returns the reference the diagnosis request then carries.
+ * storage bucket — under GridFS there is no bucket, and no path a client could forge. The route
+ * admits the bytes (kind + MIME type + size) and returns the reference the diagnosis request then carries.
  */
 export type MediaUploader = (input: { body: Blob; kind: MediaKind }) => Promise<MediaRef>;
 

@@ -57,7 +57,7 @@ export interface SocialSignInClient {
 /**
  * Start Google sign-in through the given client. Extracted from the component so the "calls
  * `signIn.social` exactly once with provider google" contract is unit-testable without a DOM
- * renderer — the same decision-extraction pattern `SignInForm` uses for `signInErrorCode`.
+ * renderer — the decision-extraction pattern this component uses for `signInErrorCode`.
  *
  * Returns `'ok'` when the flow started (the happy path is a full-page redirect, so control usually
  * does not return here at all) and `'failed'` when it could not start or resolved with an error —

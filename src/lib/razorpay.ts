@@ -41,8 +41,8 @@ import { serverEnv } from '@/lib/env';
  * ### SECRETS ARE READ LAZILY, AND EVERY FUNCTION ACCEPTS THEM AS A PARAMETER
  *
  * `keyId`, `keySecret`, and `webhookSecret` default to `serverEnv(...)`, evaluated only when the
- * argument is omitted — the pattern `src/lib/whatsapp.ts` used. A test passes them explicitly and
- * never touches the environment.
+ * argument is omitted — the same lazy-credential pattern `src/lib/telegram.ts` uses. A test passes
+ * them explicitly and never touches the environment.
  *
  * ### U-V27a — the signature encoding
  *

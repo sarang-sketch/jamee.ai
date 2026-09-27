@@ -31,8 +31,8 @@ import styles from './page.module.css';
 /**
  * The session and the profile row decide what renders, so this page must never be prerendered.
  *
- * `cookies()` inside `createServerSupabase()` and `activeLanguage()` already forces a dynamic
- * render; stating it is the honest version of that, and it keeps a build without Supabase
+ * `cookies()` inside the auth-session read and `activeLanguage()` already forces a dynamic
+ * render; stating it is the honest version of that, and it keeps a build without runtime
  * credentials from failing on a page whose output could not have been reused anyway. Same
  * reasoning as `/` and `/profile`.
  */

@@ -12,7 +12,7 @@ import { chatTurn } from '@/services/chat.service';
  *               message and the Jamee answer are persisted as Messages in the same Conversation),
  *               9.5 (a language code outside the Supported_Languages is HTTP 400 naming the
  *               supported codes), 14.1 (one chat message spends exactly one chat unit), 16.2 (one
- *               chat implementation serves the Web_App and the WhatsApp channel), 16.5 (`channel` is
+ *               chat implementation serves the Web_App and the Telegram channel), 16.5 (`channel` is
  *               an input parameter and is recorded on the persisted rows), 15.3 (every failure
  *               leaves through the one localized error envelope)
  * Design: "Route handlers (thin)"; D9; "Quota enforcement" → *When a unit is reserved, finalized, or
@@ -24,7 +24,7 @@ import { chatTurn } from '@/services/chat.service';
  * Session check (the wrapper) → read the body → parse it → **one** service call → serialize the
  * result. No agronomy, no prompt text, no provider call, no SQL, no quota arithmetic, and no second
  * call to anything: every judgement a farmer sees was made by `ChatService`, which is what keeps the
- * web and WhatsApp channels answering identically (Requirements 7.7, 16.2) rather than by agreement
+ * web and Telegram channels answering identically (Requirements 7.7, 16.2) rather than by agreement
  * between two handlers.
  *
  * The ordering that matters is not maintained here either — it is the wrapper's. The handler body is
@@ -47,20 +47,17 @@ import { chatTurn } from '@/services/chat.service';
  *
  * ### What the service is given, and what it is not
  *
- * `deps` is `{ supabase, burst }` — the RLS-scoped server client, and Requirement 13.8's burst
- * limiter, bound here because this is one of the three endpoints that requirement names. The service
- * owns the check's **position** (step 2, before the reserve, so a refusal costs nothing) and skips it
- * altogether for a turn that is `covered` by an outer reservation; this file owns the decision to
- * enforce it at all. Two consequences of the client, both wanted:
+ * `deps` is `{ burst }` — Requirement 13.8's burst limiter, bound here because this is one of the
+ * three endpoints that requirement names. The service owns the check's **position** (step 2, before
+ * the reserve, so a refusal costs nothing) and skips it altogether for a turn that is `covered` by an
+ * outer reservation; this file owns the decision to enforce it at all.
  *
- *  - The two `messages` inserts, the conversation-ownership lookup and the activity bump all run
- *    under the farmer's own session, so **RLS is a second boundary** behind the `user_id` the service
- *    supplies — a forgotten predicate cannot reach another farmer's rows on this path.
- *  - The `usage_logs` insert is deliberately NOT this route's business. Migration `0006` grants
- *    `authenticated` no insert policy, so the audit row is only writable with the service role, and
- *    `chatWriteStoreFrom` splits the two clients for that reason. The service builds its audit client
- *    itself, lazily; passing one from here would put the service-role key in the request path of
- *    every chat turn for no gain.
+ * *Amendment A3:* the route builds and passes no database client. Under A3 there is no relational
+ * RLS layer; `chatTurn` reads and writes through the owner-scoped Data_Access_Layer, scoped by the
+ * `userId` the service supplies, which is the sole tenant boundary. The two `messages` writes, the
+ * conversation-ownership lookup and the activity bump all run through that layer, and the `usage_logs`
+ * audit write is likewise the service's own business through the same layer — this route neither
+ * builds nor holds a credential for it.
  */
 
 /**
@@ -72,7 +69,7 @@ import { chatTurn } from '@/services/chat.service';
  * Written as a literal because Next.js reads route segment config by static analysis, so an imported
  * constant is not usable here. `route.test.ts` asserts this literal equals
  * `JAMEE_MAX_DURATION_SECONDS`, which is what stops the two drifting apart — the same guard the
- * diagnose and WhatsApp routes carry.
+ * diagnose and Telegram routes carry.
  */
 export const maxDuration = 60;
 
@@ -150,7 +147,7 @@ export const POST = authenticatedRoute(async (request, session) => {
        * 'text'` is likewise a literal — a typed question is text, and the voice path sets `'voice'`
        * on its own call so the transcript is distinguishable afterwards (Requirement 8.4).
        *
-       * *Amendment A3:* no Supabase client is built or passed. `chatTurn` writes and reads through
+       * *Amendment A3:* no database client is built or passed. `chatTurn` writes and reads through
        * the owner-scoped Data_Access_Layer, scoped by `userId`, so `deps` carries only Requirement
        * 13.8's burst limiter (bound here because this is one of the three endpoints that requirement
        * names). `skipQuotaReserve` is deliberately absent and no `QuotaContext` is passed: this

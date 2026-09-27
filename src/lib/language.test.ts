@@ -109,17 +109,19 @@ describe('resolveLanguage', () => {
   });
 
   /**
-   * The pre-profile default and the column default have to be the same value, or a farmer's
-   * first screen and their first saved Profile would disagree about a language they never chose.
+   * The pre-profile default and the persisted-profile default have to be the same value, or a
+   * farmer's first screen and their first saved Profile would disagree about a language they never
+   * chose. Under Amendment A3 the persisted default is the `$setOnInsert` the Data_Access_Layer's
+   * profile bootstrap writes (`src/lib/db/farmer.ts`), not a SQL column default.
    */
-  it('shares its fallback with the profiles.language column default', () => {
+  it('shares its fallback with the Data_Access_Layer profile bootstrap default', () => {
     // `process.cwd()` rather than `import.meta.url`: the unit project runs in jsdom, where
     // `import.meta.url` is not a `file:` URL. Vitest's cwd is the project root.
-    const migration = readFileSync(
-      resolve(process.cwd(), 'supabase', 'migrations', '0002_profiles.sql'),
+    const farmerModule = readFileSync(
+      resolve(process.cwd(), 'src', 'lib', 'db', 'farmer.ts'),
       'utf8',
     );
-    const match = /language\s+text not null default '(\w+)'/.exec(migration);
+    const match = /language:\s*'(\w+)'/.exec(farmerModule);
     expect(match).not.toBeNull();
     expect(match?.[1]).toBe(DEFAULT_LANGUAGE);
   });

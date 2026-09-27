@@ -35,7 +35,7 @@ import { POST, maxDuration } from './route';
  *
  * `voice.service.test.ts` decides what a voice turn *is*. What only this file decides is what the
  * **route** does with it, so the service is a spy and the assertions are about the boundary. Under
- * A3 the route holds no Supabase client and reads no object size — the service reads the recording
+ * A3 the route holds no database client and reads no object size — the service reads the recording
  * from GridFS through the Data_Access_Layer — so `deps` is `{ chat, burst, deadlineMs }`.
  */
 

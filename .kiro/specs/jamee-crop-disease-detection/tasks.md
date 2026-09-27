@@ -1547,13 +1547,13 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - Valid signature over the raw body passes; flipped byte, truncated digest, absent header, unconfigured secret, and a re-serialized body all fail, comparison constant-time; two concurrent verified webhooks with one `provider_payment_id` grant/extend exactly once; a browser-reported success grants nothing; the window extends by `max(now, currentExpiry) + 7 days` and a redelivery does not double-extend
     - _Requirements: 22.5, 22.6, 22.7, 22.10, 22.11_
 
-- [ ] 60. Delete the Supabase, WhatsApp, and phone-OTP modules and the working-tree remnants
+- [x] 60. Delete the Supabase, WhatsApp, and phone-OTP modules and the working-tree remnants
   - This is not deferrable cleanup: `npm run check:shared-implementation` fails on a second implementation, `scripts/check-data-access.ts` fails if a Supabase client survives, typecheck currently fails in ~12 files (mostly WhatsApp and phone-OTP code awaiting deletion), and a half-migration fails the suites.
-  - [ ] 60.1 Remove the WhatsApp and phone-OTP artifacts
+  - [x] 60.1 Remove the WhatsApp and phone-OTP artifacts
     - The ten WhatsApp-named files listed in task 44.1 and their directory; `SignInForm.tsx`/`.test.tsx`/`.module.css`; the `toE164`/`E164_PHONE`/trigger-regex blocks; then assert no `whatsapp` name/identifier/import/route/comment survives under `src/`, `tests/`, or the setup script, and `profiles.phone` has no reader outside `scripts/db-setup.ts`
     - _Requirements: 1.1, 1.9, 16.1, 16.2, 16.3_
 
-  - [ ] 60.2 Remove every Supabase client module, dependency, directory, and Supabase-only test
+  - [x] 60.2 Remove every Supabase client module, dependency, directory, and Supabase-only test
     - Delete `src/lib/supabase/{client,server,admin}.ts` and every importer's Supabase path, `src/types/database.ts` (the Supabase-generated types), `src/lib/storage.ts`'s Supabase Storage/signed-URL helpers (`thumbPathFor`/`originalPathFor` and the bucket path builders) superseded by `src/lib/media/*`; remove `@supabase/*` from `package.json`; delete the `supabase/` directory (migrations `0001`–`0014`, `config.toml`, `[auth.sms]`) — it becomes historical, applied to nothing; delete Supabase-only tests (RLS-scoped fixtures, the admin-client isolation test, the migration-regex test)
     - Then assert no `@supabase`, `supabase.`, `createClient`, `SUPABASE_`, or `service_role` reference survives under `src/` or `tests/`, and that the only surviving mentions in the repo are the retired V-item rows and the historical tasks in this plan
     - _Requirements: 13.7, 16.1, 16.2, 16.3, 17.8_
@@ -1582,7 +1582,7 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - _Requirements: 10.4, 10.5, 10.6, 10.9, 10.10, 11.5, 13.9, 14.4, 14.5, 21.6, 21.7, 21.8, 22.10, 22.13, 22.17, 22.19, 22.21_
 
 - [ ] 63. Update the deployment package, the documentation, and the CI guards
-  - [ ] 63.1 Rewrite `docs/DEPLOYMENT.md` as the ten A3 steps
+  - [x] 63.1 Rewrite `docs/DEPLOYMENT.md` as the ten A3 steps
     - Create the Atlas M0 cluster and record `MONGODB_URI`, noting the accepted `0.0.0.0/0` academic trade-off and the M0 limits (V32); choose the auth library by reading `node_modules/next/dist/docs` first (V35, D18a), configure Google + MongoDB adapter, register callback redirects, record the library/Google secrets — no SMS provider; run `npm run db:setup` and assert count = 5, the GridFS bucket, and the indexes/validators across all collections; obtain provider keys and record model identifiers and inline-byte limits (V34); create the Telegram bot (BotFather) and generate the secret token; create the Razorpay account, register the webhook, subscribe to captured/failed events, and record **test mode** (O22-3 resolved by A3); deploy to Vercel with all variables and confirm `maxDuration`; `setWebhook` and confirm a no-secret-token POST returns 401; smoke-test the acceptance sequence pay→link→photo; record the ₹20 price, the retention arithmetic against the shared ~512 MB M0 budget, and that the Payment_Provider adds no fixed/recurring cost
     - _Requirements: 17.1, 17.3, 22.4, 22.25, 22.26_
     - _Depends on: V16, V19, V27, V30, V32, V34, V35_
@@ -1591,11 +1591,11 @@ Two items are **BLOCKED on a verification outcome, not a product decision**, and
     - Generate from `src/lib/schemas.ts` so it cannot drift; add `/api/media` (upload + owner-checked serve), `/api/telegram`, `/api/link/token` (POST+DELETE), `/api/payment/order`, and `/api/payment/webhook`; document the two webhook routes and the multipart Media_Endpoint by their authentication mechanism in place of a request schema; keep the quota-semantics note
     - _Requirements: 17.2, 17.4_
 
-  - [ ] 63.3 Rewrite `docs/TESTING_REPORT.md`
+  - [x] 63.3 Rewrite `docs/TESTING_REPORT.md`
     - Record the image/chat/voice/Telegram/linking/payment automated outcomes; Google sign-in on a real device incl. the cancel path; Telegram end to end in the fixed pay→link→photo order (a photo-first tester correctly sees the gated reply); **one real checkout in test mode** (O22-3 resolved), recording that a captured payment opened a previously gated/lapsed sender; the Hindi/Marathi transcription-quality and screen-reader entries unchanged
     - _Requirements: 1.3, 10.7, 12.2, 17.5, 22.18, 22.19_
 
-  - [ ] 63.4 Complete `.env.example` and `about-project.md`
+  - [x] 63.4 Complete `.env.example` and `about-project.md`
     - `.env.example`: `MONGODB_URI`, the auth library secret and Google client id/secret, the Telegram and Razorpay names, `RETENTION_SWEEP_SECRET`, and the two public names — no Supabase names, no `BOT_UNLOCK_PRICE`/`LINK_TOKEN_TTL_MINUTES`. `about-project.md`: MongoDB Atlas + GridFS backend, Google sign-in via the in-app auth library, Telegram gated behind a weekly ₹20 recharge while the web app stays free, and the zero-standing-cost claim (SMS removed; the payment fee is per-transaction out of a farmer's money)
     - _Requirements: 1.10, 17.1, 17.2, 22.17, 22.26_
 

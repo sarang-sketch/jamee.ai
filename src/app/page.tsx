@@ -54,10 +54,7 @@ export default async function Page() {
         <LanguageSwitcher />
         <h1 className={styles.appName}>{ui.appName}</h1>
         <p className={styles.tagline}>{ui.tagline}</p>
-        {/*
-         * One control, one provider (Requirement 1.1). The phone-OTP `SignInForm` is retained in
-         * the tree but unused — Google is the only sign-in now.
-         */}
+        {/* One control, one provider (Requirement 1.1): Google is the only sign-in. */}
         <GoogleSignInButton language={language} />
       </LanguageProvider>
     </main>

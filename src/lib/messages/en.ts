@@ -14,7 +14,7 @@ export const en: MessageCatalog = {
   errors: {
     AUTH_REQUIRED: 'Please sign in to continue.',
     /**
-     * Requirement 1.3, as amended by A1. Google sign-in did not complete — cancelled, a provider
+     * Requirement 1.3. Google sign-in did not complete — cancelled, a provider
      * error, or a callback with nothing to exchange. The farmer's one action is to sign in again,
      * so the sentence says exactly that and names none of Google's internals.
      */
@@ -70,8 +70,9 @@ export const en: MessageCatalog = {
      * code, not prose, and these responses carry no body content — so these strings exist only to
      * keep `Record<ErrorCode, string>` total, and are never rendered to a farmer.
      * `WEBHOOK_SIGNATURE_INVALID` is the payment route (raw-body signature); the Telegram route's
-     * `WEBHOOK_SECRET_TOKEN_INVALID` is the header secret. The old verify-token code retired with
-     * the WhatsApp GET handshake.
+     * `WEBHOOK_SECRET_TOKEN_INVALID` is the header secret. There is no verify-token / GET-handshake
+     * code — the Telegram channel registers its webhook with an outbound `setWebhook` call and has
+     * no verification handshake to answer.
      */
     WEBHOOK_SIGNATURE_INVALID: 'Request signature could not be verified.',
     WEBHOOK_SECRET_TOKEN_INVALID: 'Webhook secret token did not match.',
@@ -160,10 +161,6 @@ export const en: MessageCatalog = {
     thinking: 'Jamee is thinking\u2026',
     /** Requirement 15.7 — a state indicating Jamee is listening to the recording. */
     listening: 'Jamee is listening to your recording\u2026',
-    /** Bound to the open `signInWithOtp` request (Requirements 1.1, 15.2). */
-    sendingCode: 'Sending your code\u2026',
-    /** Bound to the open `verifyOtp` request (Requirements 1.2, 15.2). */
-    verifyingCode: 'Checking your code\u2026',
     /** Bound to the open `profiles` update (Requirements 1.8, 15.2). */
     saving: 'Saving your details\u2026',
   },
@@ -171,17 +168,8 @@ export const en: MessageCatalog = {
   ui: {
     appName: 'Jamee',
     tagline: 'Crop disease help for tomato and potato farmers.',
-    signInHeading: 'Sign in with your phone number',
     googleSignIn: 'Continue with Google',
     signInDidNotComplete: 'Sign-in did not complete. Please try signing in again.',
-    phoneLabel: 'Phone number',
-    phoneHint: 'Include your country code, for example +919876543210.',
-    sendCode: 'Send code',
-    otpLabel: 'Six-digit code',
-    otpHint: 'Enter the code sent to your phone by SMS.',
-    verifyCode: 'Verify code',
-    resendCode: 'Send a new code',
-    changeNumber: 'Use a different number',
     signOut: 'Sign out',
     navDiagnose: 'Check a crop',
     navChat: 'Ask a question',
@@ -217,7 +205,6 @@ export const en: MessageCatalog = {
     severityLabel: 'Severity',
     channelLabel: 'Sent from',
     channelWeb: 'Website',
-    channelWhatsapp: 'WhatsApp',
     channelTelegram: 'Telegram',
     dateLabel: 'Date',
     symptomsHeading: 'What to look for',
@@ -238,26 +225,9 @@ export const en: MessageCatalog = {
     photoNoLongerStored: 'The photo for this result is no longer stored.',
   },
 
-  whatsapp: {
-    /** Requirement 10.3. */
-    signInFirst:
-      'Welcome to Jamee. Please sign in on the Jamee website with this same phone number first, then send your crop photo here.',
-    /** Requirement 10.9 — names exactly what Jamee accepts. */
-    unsupportedType: 'Jamee accepts photos, text and voice notes.',
-    /**
-     * The V10-versus-V14 container discrepancy. The farmer cannot change what WhatsApp records
-     * in, so the one actionable instruction is to type the question instead.
-     */
-    voiceNoteFormatUnsupported:
-      'Jamee could not use this voice note. Please type your question here instead.',
-    /** D11's soft deadline. The farmer's next send is a new message id, so it is processed. */
-    takingLonger:
-      'Jamee is taking longer than usual on this photo. Please send it again in a moment.',
-  },
-
   /**
-   * Telegram replies (Amendment A1). Static, in-repository copy — no model call is reachable
-   * (D5). The four outcomes here are successful handling, not errors (37.4). English is also the
+   * Telegram replies (Amendment A1). Static, in-repository copy — no model call is reachable (D5).
+   * The four outcomes here are successful handling, not errors (37.4). English is also the
    * fallback for a `/start` from a sender on no Profile, who has no resolved language.
    */
   telegram: {

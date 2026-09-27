@@ -19,7 +19,7 @@ import {
   type DiagnosisStore,
 } from '@/services/diagnosis.service';
 import type { CounterRpc } from '@/services/quota.service';
-import type { TablesInsert } from '@/types/database';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 
 /**
  * Unit tests for `src/services/diagnosis.service.ts` (Amendment A3), with the gateway and the
@@ -168,12 +168,12 @@ function modelStub(
 interface StoreStub {
   readonly store: DiagnosisStore;
   readonly diagnoses: DiagnosisInsert[];
-  readonly usage: TablesInsert<'usage_logs'>[];
+  readonly usage: UsageLogInsert[];
 }
 
 function storeStub(options: { ownsConversation?: boolean } = {}): StoreStub {
   const diagnoses: DiagnosisInsert[] = [];
-  const usage: TablesInsert<'usage_logs'>[] = [];
+  const usage: UsageLogInsert[] = [];
 
   return {
     diagnoses,
@@ -313,7 +313,7 @@ function harness(
 }
 
 function request(
-  overrides: { language?: Language; channel?: 'web' | 'whatsapp' | 'telegram'; conversationId?: string; image?: MediaRef } = {},
+  overrides: { language?: Language; channel?: 'web' | 'telegram'; conversationId?: string; image?: MediaRef } = {},
 ): import('@/lib/schemas').DiagnoseInput {
   return {
     userId: USER,
@@ -334,7 +334,7 @@ async function failure(promise: Promise<unknown>): Promise<AppError> {
   throw new Error('expected the call to reject with an AppError');
 }
 
-function onlyUsageRow(store: StoreStub): TablesInsert<'usage_logs'> {
+function onlyUsageRow(store: StoreStub): UsageLogInsert {
   expect(store.usage).toHaveLength(1);
   const row = store.usage[0];
   if (row === undefined) throw new Error('no usage_logs row was written');
@@ -564,10 +564,10 @@ describe('diagnose — identified results are grounded only in the matching row'
   it('writes the supplied channel to every persisted row (Requirement 16.5)', async () => {
     const test = harness();
 
-    await diagnose(request({ channel: 'whatsapp' }), test.deps);
+    await diagnose(request({ channel: 'telegram' }), test.deps);
 
-    expect(onlyDiagnosisRow(test.store).channel).toBe('whatsapp');
-    expect(onlyUsageRow(test.store).channel).toBe('whatsapp');
+    expect(onlyDiagnosisRow(test.store).channel).toBe('telegram');
+    expect(onlyUsageRow(test.store).channel).toBe('telegram');
   });
 
   it('refuses a conversation id that is not this farmer’s', async () => {

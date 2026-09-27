@@ -97,7 +97,7 @@ export interface ErrorBannerError {
  *    `onRetry`. For a screen with no adjacent control of its own.
  *  - `control` — **a control already on screen is the retry**, with the farmer's input restored:
  *    `ImageUploader`'s submit with the photo still selected, `ChatComposer`'s Send with the text
- *    back in the box, `ProfileForm`'s Save, `SignInForm`'s submit. A second button here would be
+ *    back in the box, `ProfileForm`'s Save, `GoogleSignInButton`'s button. A second button here would be
  *    two controls doing one thing, which is worse for a screen reader and for a thumb.
  *  - `none` — **nothing retries this operation**, and saying so is a decision rather than an
  *    omission. `VoicePanel` is the case: it never holds the recording, and re-posting a reference

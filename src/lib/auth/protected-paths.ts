@@ -11,7 +11,7 @@
  * `src/proxy.ts` is a Next.js convention file: its export surface is `proxy` plus `config`, so
  * anything exported from it for a test to read would be a export the framework does not expect.
  * Keeping the list and the predicate in a module with **no imports at all** also means the whole
- * decision is unit-testable without a request, a cookie store, or a Supabase client — see
+ * decision is unit-testable without a request, a cookie store, or an auth client — see
  * `protected-paths.test.ts`.
  *
  * ### Why a list rather than a check inside each page
@@ -24,12 +24,13 @@
  */
 
 /**
- * Where a gated visitor lands. `/` renders `SignInForm` (task 6.1), which is what Requirement
- * 1.6's "present the sign-in screen instead" means concretely.
+ * Where a gated visitor lands. `/` renders the sign-in screen (task 6.1), which is what
+ * Requirement 1.6's "present the sign-in screen instead" means concretely.
  *
- * `src/app/auth/callback/ensure-profile.ts` declares the same constant for its own no-session
- * branch. It is not imported here: `src/lib/**` never imports from `src/app/**` (design, project
- * structure), and that rule is worth more than deduplicating the string `'/'`.
+ * Better Auth establishes the profile in its own bootstrap (`src/lib/auth/bootstrap.ts`) rather
+ * than in an app-route callback, so no module under `src/app/**` re-declares this constant. Even
+ * if one did, it would not be imported here: `src/lib/**` never imports from `src/app/**` (design,
+ * project structure), and that rule is worth more than deduplicating the string `'/'`.
  */
 export const SIGN_IN_PATH = '/';
 
@@ -43,8 +44,9 @@ export const SIGN_IN_PATH = '/';
  *    screen with an id in the path, so leaving it open would gate the list and not the row;
  *  - `/profile` shows and edits the farmer's own display name and language (Requirement 1.8).
  *
- * RLS would return nothing to an anonymous request on any of them (Requirement 13.2), so an
- * ungated page could not leak a row — it would render an empty screen instead of a sign-in
+ * The Data_Access_Layer scopes every read to the requesting farmer's id (Requirement 13.2), so an
+ * anonymous request on any of them has no session id to scope by and would surface no row — an
+ * ungated page could not leak data, it would render an empty screen instead of a sign-in
  * prompt, which is a worse answer to the same question.
  *
  * **`/api/**` is deliberately absent.** An unauthenticated API request must receive the

@@ -33,7 +33,7 @@ import { POST, maxDuration } from './route';
  * `diagnosis.service.test.ts` decides what a diagnosis *is*. What only this file decides is what the
  * **route** does with it, so the service is a spy here and the assertions are about the boundary:
  * was it reached, how many times, with whose identity, and what came back on the wire. Under A3 the
- * route holds no Supabase client — the service reads the image from GridFS through the
+ * route holds no database client — the service reads the image from GridFS through the
  * Data_Access_Layer — so `deps` is `{ burst }` alone.
  */
 
@@ -163,8 +163,8 @@ describe('POST /api/diagnose with a valid body', () => {
      *  - `userId` is the resolved session id, never read from the body (Requirement 13.2).
      *  - `image` is the Media_Reference the body carried (A3).
      *  - `channel: 'web'` populates Requirement 16.5's column.
-     * `deps` is `{ burst }` and nothing else — under A3 the service holds no client, so there is no
-     * `supabase` to pass; `burst` is Requirement 13.8's limiter the API_Layer binds.
+     * `deps` is `{ burst }` and nothing else — under A3 the service holds no database client, so
+     * there is no client to pass; `burst` is Requirement 13.8's limiter the API_Layer binds.
      */
     const expectedInput: DiagnoseInput = {
       userId: USER,

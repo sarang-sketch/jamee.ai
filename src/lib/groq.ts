@@ -316,9 +316,9 @@ export interface TextGenerateRequest {
 /** What the conditional `vision-classify` adapter takes. */
 export interface VisionClassifyRequest {
   /**
-   * **V9:** a public URL or a `data:image/jpeg;base64,…` URI. Jamee mints a Storage signed URL
-   * (V3, `SIGNED_URL_EXPIRY_SECONDS`), so the bytes are fetched by the provider and the request
-   * itself stays small.
+   * **V9:** a public URL or a `data:image/jpeg;base64,…` URI. Under A3 there is no Storage and no
+   * signed URL to mint, so Jamee passes the Full_Size_Image bytes as a base64 data URI read from
+   * GridFS through the Data_Access_Layer (V34).
    *
    * Exactly one image, which is inside both candidate models' per-request cap (3 on
    * `qwen/qwen3.8-27b`, 5 on `qwen/qwen3.6-27b`) and costs one `GROQ_VISION_IMAGE_INPUT_TOKENS`
@@ -725,13 +725,11 @@ export function normalizeAudioContainer(value: string): string | undefined {
 /**
  * Whether V10 accepts this container.
  *
- * **A cross-check worth knowing about, not papered over here.** V14 lists WhatsApp inbound audio
- * as `audio/aac`, `audio/amr`, `audio/mpeg`, `audio/mp4` and `audio/ogg`, and asserts all of them
- * are inside V10's accepted list. `mpeg`, `mp4` and `ogg` are; **`aac` and `amr` are not** literal
- * members of V10's `flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm`. Rather than widen the list to
- * make V14's sentence true, this function refuses them and the WhatsApp audio task resolves the
- * discrepancy against V10 and V14 — inventing a container Groq may not accept would turn a loud
- * pre-flight refusal into a provider 400 discovered in production.
+ * **A cross-check worth knowing about, not papered over here.** A messaging channel can deliver
+ * audio in a container outside V10's accepted list of `flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav,
+ * webm`. Rather than widen the list to accommodate one, this function refuses an unknown container
+ * — inventing a container Groq may not accept would turn a loud pre-flight refusal into a provider
+ * 400 discovered in production.
  */
 export function isAcceptedAudioContainer(value: string): boolean {
   const container = normalizeAudioContainer(value);

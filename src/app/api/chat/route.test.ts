@@ -47,7 +47,7 @@ const spies = vi.hoisted(() => ({
  * Amendment A3 rewire: `authenticatedRoute` resolves identity through `@/lib/auth/session`'s
  * `currentUserId` (Better Auth), so that is the only seam stubbed here. Mocking the module rather
  * than the wrapper keeps the real guard under test — the route imports the real `authenticatedRoute`,
- * and only the answer to "who is signed in" is stubbed. The route builds NO Supabase client of its
+ * and only the answer to "who is signed in" is stubbed. The route builds NO database client of its
  * own under A3 (it reads and writes through the owner-scoped Data_Access_Layer), so there is no
  * request-client factory to mock.
  */
@@ -135,7 +135,7 @@ describe('POST /api/chat with no session', () => {
 
     /**
      * The clause that matters: no domain service is invoked. **Amendment A3:** the route builds no
-     * request-scoped Supabase client at all — identity is resolved by the wrapper through Better
+     * request-scoped database client at all — identity is resolved by the wrapper through Better
      * Auth (`@/lib/auth/session`) and every read/write is the owner-scoped Data_Access_Layer — so
      * "not even the request-scoped client" collapses into "`chatTurn` was never entered", which is
      * Requirement 1.7's actual claim on this path.
@@ -149,7 +149,7 @@ describe('POST /api/chat with no session', () => {
 /* ========================================================================== */
 
 describe('POST /api/chat with a valid body', () => {
-  it('calls the service once with the session user id, web channel, and no Supabase client', async () => {
+  it('calls the service once with the session user id, web channel, and no database client', async () => {
     spies.chatTurn.mockResolvedValue(RESULT);
 
     const response = await post(validBody());
@@ -167,8 +167,8 @@ describe('POST /api/chat with a valid body', () => {
      *  - `skipQuotaReserve` is ABSENT. Requirement 14.1's nesting rule only ever relaxes the reserve
      *    for a turn nested inside a voice request, and an extra key here would fail this assertion.
      *  - `deps` is `{ burst }` and nothing else. **Amendment A3:** the route builds and passes no
-     *    Supabase client — `chatTurn` reads and writes through the owner-scoped Data_Access_Layer,
-     *    scoped by `userId` (D18), so there is no request-scoped RLS client to hand it, and no store
+     *    database client — `chatTurn` reads and writes through the owner-scoped Data_Access_Layer,
+     *    scoped by `userId` (D18), so there is no request-scoped client to hand it, and no store
      *    or admin client either. `burst` is Requirement 13.8's limiter, which the API_Layer binds
      *    because it is the API_Layer the requirement is written about; the *position* of the check
      *    (before the reserve) stays the service's.

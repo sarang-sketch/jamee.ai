@@ -26,7 +26,7 @@ import { diagnose } from '@/services/diagnosis.service';
  * Session check (the wrapper) → read the body → parse it → **one** service call → serialize the
  * result. No agronomy, no prompt text, no provider call, no SQL, and no second call to anything:
  * every judgement a farmer sees was made by `DiagnosisService`, which is what keeps the web and
- * WhatsApp channels answering identically (Requirements 3.8, 16.1, 16.3) rather than by agreement
+ * Telegram channels answering identically (Requirements 3.8, 16.1, 16.3) rather than by agreement
  * between two handlers.
  *
  * The ordering that matters is not maintained here either — it is the wrapper's. The handler body
@@ -37,23 +37,21 @@ import { diagnose } from '@/services/diagnosis.service';
  * ### Why the body is JSON and stays tiny (D1)
  *
  * Requirement 2.3 allows a 10 MB image and Requirement 2.7 keeps request bodies under the 4.5 MB
- * platform ceiling (V16); a multipart upload cannot satisfy both. So the browser uploads directly
- * to the `crop-images` bucket and posts a ~200-byte reference. **No multipart parsing and no media
- * bytes appear in this file**, and `request.formData()` is never called.
+ * platform ceiling (V16); a multipart upload cannot satisfy both. So the browser uploads the
+ * re-encoded image to the Media_Endpoint, which writes it to GridFS, and posts a ~200-byte
+ * Media_Reference. **No multipart parsing and no media bytes appear in this file**, and
+ * `request.formData()` is never called.
  *
  * ### What the service is given, and what it is not
  *
- * `deps` is `{ supabase, burst }` — the RLS-scoped server client, and Requirement 13.8's burst
- * limiter. Two consequences of the client, both wanted:
+ * `deps` is `{ burst }` — Requirement 13.8's burst limiter, bound here because this is one of the
+ * three endpoints that requirement names.
  *
- *  - The `diagnoses` insert and the conversation-ownership lookup run under the farmer's own
- *    session, so **RLS is a second boundary** behind the `user_id` the service supplies — a
- *    forgotten predicate cannot reach another farmer's rows on this path.
- *  - The `usage_logs` insert is deliberately NOT this route's business. Migration `0006` grants
- *    `authenticated` no insert policy, so the audit row is only writable with the service role, and
- *    `diagnosisStoreFrom` splits the two clients for that reason. The service builds its audit
- *    client itself, lazily; passing one from here would put the service-role key in the request
- *    path of every diagnosis for no gain.
+ * *Amendment A3:* the route builds and passes no database client. Under A3 there is no relational
+ * RLS layer; `diagnose` reads and writes through the owner-scoped Data_Access_Layer, scoped by the
+ * `userId` the service supplies, which is the sole tenant boundary. The `diagnoses` write, the
+ * conversation-ownership lookup and the `usage_logs` audit write are all the service's own business
+ * through that layer — this route neither builds nor holds a credential for them.
  *
  * ### Why the burst limiter is bound here and not inside the service
  *
@@ -61,9 +59,9 @@ import { diagnose } from '@/services/diagnosis.service';
  * The service owns the **position** of the check — step 2, between ownership and the reserve, which
  * is what makes a refusal cost nothing — and the endpoint owns the **decision to enforce**. Binding
  * it here keeps that split honest in both directions: `burstLimiter()` reaches the counter through
- * the service-role client it builds lazily, and a `DiagnosisService` constructed by anything other
- * than a farmer-facing endpoint (a unit test, a future internal tool) is not silently rate-limited by
- * a default it did not ask for.
+ * the Data_Access_Layer, and a `DiagnosisService` constructed by anything other than a farmer-facing
+ * endpoint (a unit test, a future internal tool) is not silently rate-limited by a default it did not
+ * ask for.
  *
  * Constructed per request, which costs an object: it holds no client until its first call, and its
  * only state is the prune schedule (`rate-limit.ts`).
@@ -78,7 +76,7 @@ import { diagnose } from '@/services/diagnosis.service';
  * Written as a literal because Next.js reads route segment config by static analysis, so an
  * imported constant is not usable here. `route.test.ts` asserts this literal equals
  * `JAMEE_MAX_DURATION_SECONDS`, which is what stops the two drifting apart — the same guard the
- * WhatsApp route carries.
+ * Telegram route carries.
  */
 export const maxDuration = 60;
 

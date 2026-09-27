@@ -1,11 +1,9 @@
 import 'server-only';
 
-import { Buffer } from 'node:buffer';
-import { timingSafeEqual } from 'node:crypto';
-
 import { z } from 'zod';
 
 import { serverEnv } from '@/lib/env';
+import { timingSafeEqualStrings } from '@/lib/timing-safe';
 
 /**
  * The Telegram Bot API provider — the pure half.
@@ -13,7 +11,7 @@ import { serverEnv } from '@/lib/env';
  * This module decides three things and nothing else: whether an inbound request is Telegram's
  * (the secret-token header), what Telegram said (the `Update` → dispatch shape parse), and how
  * to move bytes and text over the Bot API (`getFile` + download, and `sendMessage`). It talks to
- * no database, imports nothing from `src/lib/supabase` or a MongoDB module, resolves no profile,
+ * no database, imports no MongoDB module, resolves no profile,
  * consults no entitlement, and picks no farmer-facing copy. Storage is the caller's job, and so
  * is dispatch — this is task 57.1's `src/lib/telegram.ts` half, and the ordered inbound pipeline
  * (task 57.2) lives in `src/lib/telegram-dispatch.ts`.
@@ -43,9 +41,8 @@ import { serverEnv } from '@/lib/env';
  * ### SECRETS ARE READ LAZILY, AND EVERY FUNCTION ACCEPTS THEM AS A PARAMETER
  *
  * The bot token and the webhook secret default to `serverEnv(...)`, evaluated only when the
- * argument is omitted, exactly as `src/lib/whatsapp.ts` did for the Meta credentials. A test
- * passes them explicitly and never touches the environment; production omits them and reads
- * through the one accessor that fails loudly on an absent value.
+ * argument is omitted. A test passes them explicitly and never touches the environment; production
+ * omits them and reads through the one accessor that fails loudly on an absent value.
  */
 
 /* ========================================================================== */
@@ -64,25 +61,11 @@ export const TELEGRAM_SECRET_TOKEN_HEADER = 'x-telegram-bot-api-secret-token';
  * turns guessing the token from one infeasible search into many short ones. One comparison
  * removes that oracle.
  *
- * **An absent header takes the same time as a wrong one.** `presented === null` is compared
- * against a fixed-length dummy so a missing header does not short-circuit to a faster `false`
- * than a mismatch would — the timing of the two cases must not differ either. The length guard
- * that `timingSafeEqual` requires still returns early on a length mismatch, and that is fine: the
- * only fact it leaks is the length of a value the caller itself supplied.
+ * The implementation lives in `@/lib/timing-safe` — the one module that calls
+ * `crypto.timingSafeEqual` — and is re-exported here under its historical name so this module's
+ * callers and `telegram.test.ts` keep working unchanged.
  */
-export function timingSafeEqualStr(presented: string | null | undefined, configured: string): boolean {
-  // A dummy of the configured length keeps the absent-header path from being observably faster
-  // than a wrong-value path; the boolean is discarded, only the work matters.
-  if (presented === null || presented === undefined) {
-    const dummy = 'x'.repeat(configured.length);
-    timingSafeEqualStr(dummy, configured);
-    return false;
-  }
-  const left = Buffer.from(presented, 'utf8');
-  const right = Buffer.from(configured, 'utf8');
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
-}
+export const timingSafeEqualStr = timingSafeEqualStrings;
 
 /**
  * Verify the `X-Telegram-Bot-Api-Secret-Token` header against the configured token.

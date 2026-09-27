@@ -46,7 +46,7 @@ import styles from './ChatThread.module.css';
  * The message fields the thread renders, as an Amendment A3 view row.
  *
  * *Amended by A3:* this was a `Pick<MessageRow, …>` paired with a PostgREST `CHAT_MESSAGES_SELECT`
- * string. Under A3 there is no PostgREST and no Supabase row type — the chat server shell reads
+ * string. Under A3 there is no PostgREST and no generated row type — the chat server shell reads
  * `messages` through the owner-scoped Data_Access_Layer and maps each `MessageDoc` to this shape.
  * So the select-string export is gone (nothing parses one now), and this is a small explicit view
  * model in the fields the thread actually uses: the row `id` as a hex string, `role`, `content`,

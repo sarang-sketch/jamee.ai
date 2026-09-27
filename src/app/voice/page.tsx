@@ -35,7 +35,7 @@ import styles from './page.module.css';
  * `voiceRequestSchema` requires a `conversationId`, and `/api/voice` answers
  * `CONVERSATION_NOT_FOUND` for anything that is not a uuid this farmer owns. So it cannot come
  * from the browser, and it is resolved with `findOrCreateActive(userId, 'web')` — the same
- * find-or-create `/chat`, the diagnosis path and the WhatsApp adapter use. A spoken question **is**
+ * find-or-create `/chat`, the diagnosis path and the Telegram adapter use. A spoken question **is**
  * a chat turn (`voice.service.ts` hands the transcript to the ChatService verbatim), so it belongs
  * in the farmer's one long-running web thread rather than in a thread of its own: ask a question
  * aloud, then type a follow-up on `/chat`, and Requirement 7.1's Conversation_Context resolves it.
@@ -55,9 +55,9 @@ import styles from './page.module.css';
 
 /**
  * The session, the profile row and the farmer's conversation decide the entire output, so this page
- * must never be prerendered. `cookies()` inside `createServerSupabase()` and `activeLanguage()`
+ * must never be prerendered. `cookies()` inside the auth-session read and `activeLanguage()`
  * already force a dynamic render; saying so is the honest version of that, and it keeps a build
- * without Supabase credentials from failing on a page whose output could not have been reused.
+ * without runtime credentials from failing on a page whose output could not have been reused.
  * Same reasoning as `/`, `/diagnose`, `/chat`, `/history` and `/profile`.
  */
 export const dynamic = 'force-dynamic';

@@ -12,7 +12,7 @@ import { severityIndicator } from '@/lib/severity';
  * Unit tests for what the history markup actually says.
  *
  * Requirements: 12.1 (every entry carries the thumbnail, the condition or the inconclusive label,
- *               the Severity_Value, the channel and the creation timestamp), 12.2 (a WhatsApp entry
+ *               the Severity_Value, the channel and the creation timestamp), 12.2 (a Telegram entry
  *               is labelled as one), 12.4 (the empty state invites a first upload), 12.10 (no
  *               surviving image says so in plain language), 9.4 (a canonical name is not
  *               translated), 15.4 / 26.2 (severity is conveyed by label text, not colour)
@@ -30,7 +30,7 @@ const ENTRY: HistoryEntry = {
   severity: 'moderate',
   channel: 'web',
   createdAt: '2026-09-14T05:00:00.000Z',
-  image: { kind: 'thumbnail', url: 'https://signed.test/crop-images/a.thumb.jpg?token=t' },
+  image: { kind: 'thumbnail', url: '/api/media/a-thumb' },
 };
 
 function render(entries: readonly HistoryEntry[], language: Language = 'en'): string {
@@ -55,8 +55,8 @@ describe('HistoryList', () => {
     expect(markup).toContain('dateTime="2026-09-14T05:00:00.000Z"');
   });
 
-  /** Requirement 12.1's thumbnail, loaded from the signed URL the page minted (12.5). */
-  it('renders the thumbnail from the signed URL, with real alt text', () => {
+  /** Requirement 12.1's thumbnail, loaded from the Media_Endpoint URL the page resolved (12.5). */
+  it('renders the thumbnail from the media URL, with real alt text', () => {
     const markup = render([ENTRY]);
 
     expect(markup).toContain(`src="${ENTRY.image?.url ?? ''}"`);
@@ -66,25 +66,17 @@ describe('HistoryList', () => {
   });
 
   /**
-   * Requirement 12.2. A WhatsApp-originated diagnosis is in the list and says where it came from —
-   * the point of the requirement is that the farmer can tell, not that it is hidden.
-   */
-  it('labels a WhatsApp-originated entry with its channel', () => {
-    const markup = render([{ ...ENTRY, channel: 'whatsapp' }]);
-    expect(markup).toContain(messages('en').ui.channelWhatsapp);
-  });
-
-  /**
    * Requirement 12.1 as amended by A1: Telegram is the live messaging channel, so a
    * Telegram-originated diagnosis appears in history on the same footing as a web one and says where
-   * it came from. The `Record<Channel, string>` map is exhaustive, so this also guards that the
-   * widened `channelSchema` has a rendered label rather than an `undefined` next to the photo.
+   * it came from — the point of the requirement is that the farmer can tell, not that it is hidden.
+   * The `Record<Channel, string>` map is exhaustive, so this also guards that the `channelSchema`
+   * (web and telegram) has a rendered label rather than an `undefined` next to the photo.
    */
   it('labels a Telegram-originated entry with its channel', () => {
     const markup = render([{ ...ENTRY, channel: 'telegram' }]);
     expect(markup).toContain(messages('en').ui.channelTelegram);
-    // The web/whatsapp labels are not what a telegram entry shows.
-    expect(markup).not.toContain(messages('en').ui.channelWhatsapp);
+    // A telegram entry shows its own label, not the web one.
+    expect(markup).not.toContain(messages('en').ui.channelWeb);
   });
 
   /** Requirement 12.1's "or inconclusive label" — localized, unlike the condition name. */

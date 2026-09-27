@@ -4,7 +4,7 @@
  * Design: "Mobile layout and accessibility" — single column, tap targets at least 44×44 px,
  * body text in relative units so it scales with the OS font setting, contrast at WCAG 2.1 AA.
  *
- * Same two rules as `SignInForm.module.css`, for the same reasons:
+ * Same two rules as `GoogleSignInButton.module.css`, for the same reasons:
  *
  *  - **No `px` on anything a farmer reads or taps.** Every size is `rem`, and the tap-target
  *    floor is `--tap-target-min` from `globals.css` — 44 px at the default root size, growing

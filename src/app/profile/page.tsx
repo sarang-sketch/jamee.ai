@@ -20,11 +20,11 @@ import styles from './page.module.css';
  * Design: "Frontend" — `/profile` is a server shell plus client forms/cards; D8, D13, D14, D18
  *
  * =============================================================================
- * AMENDMENT A3 — THE READ GOES THROUGH THE DATA_ACCESS_LAYER, NOT SUPABASE
+ * AMENDMENT A3 — THE READ GOES THROUGH THE DATA_ACCESS_LAYER
  * =============================================================================
  *
- * Under Supabase this page read the row with an RLS-scoped browser-shaped client and let the
- * database decide which row was visible. A3 removes Supabase: there is no RLS. `requireFarmer()`
+ * The retired design read the row with an RLS-scoped browser-shaped client and let the
+ * database decide which row was visible. A3 removes RLS entirely. `requireFarmer()`
  * validates the session against the store (never a decoded cookie) and `redirect()`s a signed-out
  * visitor; the reads then go through the owner-scoped Data_Access_Layer (`farmerData(userId)` and
  * `accessData(userId)`), which merges the owning Auth_User_Id into every query by construction (D18)

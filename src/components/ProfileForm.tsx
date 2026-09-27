@@ -25,8 +25,9 @@ import styles from './ProfileForm.module.css';
  * AMENDMENT A3 — THE WRITE GOES THROUGH A ROUTE, NOT A BROWSER DATABASE CLIENT
  * =============================================================================
  *
- * Under Supabase this form wrote to Postgres directly and RLS authorized it. A3 removes the browser
- * database client entirely (there is no RLS to lean on). So the form POSTs to `POST /api/profile`,
+ * Under the old backend this form wrote to Postgres directly and row-level security authorized it.
+ * A3 removes the browser database client entirely (there is no RLS to lean on). So the form POSTs
+ * to `POST /api/profile`,
  * which resolves the farmer from the server-confirmed session and writes through the
  * Data_Access_Layer's owner-scoped `setProfileFields` (D18). The `userId` is never sent from the
  * browser — the route reads it from the session — so a tampered client cannot write another

@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
  * Design: "Frontend"; D8, D18a; V30
  *
  * The DOM half of the button (the disabled state, the `role="alert"` message) is left to the
- * accessibility pass rather than faked, exactly as `SignInForm.test.tsx` leaves its DOM to the
+ * accessibility pass rather than faked, leaving its DOM to the
  * manual plan. What is asserted here is the substantive contract the task names: the control calls
  * `signIn.social` EXACTLY ONCE with `provider: 'google'`, and maps the outcomes to Requirement
  * 1.3. The browser auth client is mocked so no real flow starts.

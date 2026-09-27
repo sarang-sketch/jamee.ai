@@ -18,11 +18,12 @@ import {
   usageLogWriterFrom,
   writeUsageLog,
   type UsageFacts,
+  type UsageLogInsert,
 } from '@/lib/db/usage-log';
 import { AppError, isAppError } from '@/lib/errors';
 import {
   resolveScope,
-  rlsScopedReader,
+  defaultKnowledgeReader,
   type KnowledgeEntry,
   type KnowledgeReader,
   type KnowledgeScope,
@@ -52,23 +53,22 @@ import {
   type QuotaReservation,
 } from '@/services/quota.service';
 import type { ChatAnswerer } from '@/services/voice.service';
-import type { TablesInsert } from '@/types/database';
 
 /**
  * Conversation_Context assembly — the read half of `ChatService`.
  *
  * Requirements: 7.1 (context is built from the recent Messages **and** the most recent
  *               Diagnosis_Result of that Conversation), 7.2 (context is keyed on the Conversation
- *               identifier), 7.7 (one implementation serves the Web_App and the WhatsApp channel)
- * Design: "Chat over conversation context"; "0003: conversations and messages"; "0005: diagnoses"
- * Depends on: `messages_conversation_idx` (0003), `diagnoses_conversation_idx` (0005)
+ *               identifier), 7.7 (one implementation serves the Web_App and the Telegram channel)
+ * Design: "Chat over conversation context"; "conversations and messages"; "diagnoses"
+ * Depends on: `messages_conversation_idx`, `diagnoses_conversation_idx`
  *
  * ### KEYED ON THE CONVERSATION. NOT ON THE FARMER, NOT ON THE CHANNEL.
  *
  * Requirement 7.2 is a statement about the key, and `ConversationScope` below is that statement in
  * the type system: the only identifier a caller can ask a window for is a conversation id. The
  * farmer id travels alongside it as an **authorization predicate**, never as a grouping key — a
- * read keyed on the farmer would pull that farmer's WhatsApp thread into their web thread's window
+ * read keyed on the farmer would pull that farmer's Telegram thread into their web thread's window
  * (Requirement 10.5 keeps those separate rows, `conversation.service.ts`), and a read keyed on the
  * channel would do the same thing one level up. Both are the failure Property 15 names: a message
  * from another conversation entering the window.
@@ -83,28 +83,25 @@ import type { TablesInsert } from '@/types/database';
  * every Hindi and Marathi question (that module's `tokenize` matches Latin letters only, and says
  * so). Ship the window without the diagnosis and "why?" becomes an out-of-scope referral.
  *
- * ### WHY THE CLIENT IS A PARAMETER
+ * ### WHY THE STORE IS A PARAMETER
  *
- * Same reasoning as `conversation.service.ts`, `knowledge.ts` and `storage.ts`, and Requirement 7.7
- * is the reason it matters here: one implementation serves both channels because the credential is
- * injected rather than constructed.
- *
- *  - The **web** path has a farmer session and passes the RLS-scoped server client, so RLS is a
- *    second boundary behind the predicates. That is the default (`rlsScopedContextStore`).
- *  - The **WhatsApp webhook** has no session at all and passes
- *    `contextStoreFrom(createAdminClient())`. There is nothing behind the service-role client, so
- *    `admin.ts`'s rule applies with full force: every query below carries an explicit `user_id`
- *    predicate, and `assertInScope()` re-checks every row that comes back.
+ * Requirement 7.7 is the reason it matters here: one implementation serves both channels because
+ * the read store is injected rather than constructed. The store is the owner-scoped
+ * Data_Access_Layer bound to the caller's Auth_User_Id (`defaultContextStore`), so the tenant
+ * boundary is the merged owner id rather than an injected credential: every query below carries
+ * that owner filter and `assertInScope()` re-checks every row that comes back. Passing the store
+ * as a parameter is the seam a test drives without a database — the same one
+ * `conversation.service.ts` and `knowledge.ts` use.
  *
  * ### THE ORDERING AND THE WINDOW ARE THE INDEX'S JOB
  *
- * `messages_conversation_idx` on `(conversation_id, created_at desc)` and
- * `diagnoses_conversation_idx` on `(conversation_id, created_at desc)` exist in 0003 and 0005
- * precisely to serve these two reads, so both are `eq → eq → order → limit` in SQL and **nothing
- * here fetches a conversation and sorts it in application code**. 0003's own comment calls the
- * context read "the hottest path in the product", which is why the two reads also go out
- * concurrently: they are independent, and paying two serial round trips for them would be a
- * self-inflicted latency floor on every chat turn.
+ * `messages_conversation_idx` on `(conversationId, createdAt desc)` and
+ * `diagnoses_conversation_idx` on `(conversationId, createdAt desc)` exist precisely to serve
+ * these two reads, so both are keyed reads ordered newest-first with a limit and **nothing
+ * here fetches a conversation and sorts it in application code**. The context read is the hottest
+ * path in the product, which is why the two reads also go out concurrently: they are independent,
+ * and paying two serial round trips for them would be a self-inflicted latency floor on every chat
+ * turn.
  *
  * The one array operation that remains is a `reverse()` of at most `CONTEXT_MESSAGE_LIMIT` rows.
  * That is not a sort: "the last N messages" is only expressible in SQL as newest-first with a
@@ -119,7 +116,7 @@ import type { TablesInsert } from '@/types/database';
 /**
  * **N — the row cap on the read.** Twelve messages, i.e. six farmer/Jamee turns.
  *
- * This is the cap that keeps the query cost constant in the length of a conversation: a WhatsApp
+ * This is the cap that keeps the query cost constant in the length of a conversation: a Telegram
  * thread is deliberately long-lived (`conversation.service.ts`), so an uncapped read would grow
  * without limit for the farmers who use Jamee most. Six turns covers a complete exchange about one
  * photo, which is what the window is for — Requirement 7.3's subject travels in `condition`, not in
@@ -148,7 +145,7 @@ export const CONTEXT_MESSAGE_LIMIT = 12;
  * ordinary path. Both numbers are Jamee's, derived from Jamee's own contracts.
  *
  * One asymmetry worth naming rather than assuming away: the 1000-character figure is the **web**
- * contract, and the WhatsApp adapter invokes `ChatService` directly rather than through
+ * contract, and the Telegram adapter invokes `ChatService` directly rather than through
  * `chatRequestSchema`, so an inbound text can be longer than any web question. That is what the
  * newest-first trim and the floor of one message in `applyTokenBudget()` are for — a verbose
  * inbound turn shortens the window instead of overrunning the budget.
@@ -201,7 +198,8 @@ export function estimateTokens(text: string): number {
  * The key (Requirement 7.2) plus the authorization predicate every read carries.
  *
  * `userId` is not a grouping key and must never become one — see the module header. It is here so
- * that a service-role read, which has no RLS behind it, still cannot return another farmer's rows.
+ * that every read carries the owner filter through the Data_Access_Layer and cannot return another
+ * farmer's rows.
  */
 export interface ConversationScope {
   readonly conversationId: string;
@@ -211,7 +209,7 @@ export interface ConversationScope {
 /**
  * A message in the window, exactly as the Data_Access_Layer stores it (`MessageRecord`).
  *
- * Amendment A3: the document rather than a Supabase row. The prompt needs `role`, `content` and
+ * A3: a MongoDB document rather than a relational row. The prompt needs `role`, `content` and
  * `language`, and the document carries those under the same names; the id is `_id` and the tenant
  * anchor is `ownerId`. `MessageRecord` is the layer's own re-export of the stored document with its
  * `_id` (so this module needs no `mongodb` import — D18).
@@ -275,8 +273,8 @@ export interface ConversationContext {
  * The two reads this module makes.
  *
  * Two **functions** rather than a mirrored builder, following `ConversationStore` and
- * `KnowledgeReader`. Under Amendment A3 the real queries live once in `contextStoreFrom()`, over the
- * owner-scoped Data_Access_Layer (`src/lib/db/reads.ts`) rather than a PostgREST client.
+ * `KnowledgeReader`. The real queries live once in `contextStoreFrom()`, over the owner-scoped
+ * Data_Access_Layer (`src/lib/db/reads.ts`).
  */
 export interface ContextStore {
   /**
@@ -309,17 +307,14 @@ function readFailure(
 /**
  * Adapt the Data_Access_Layer into a context store.
  *
- * *Amended by Amendment A3:* this was `contextStoreFrom(client: SupabaseClient)`, two PostgREST
- * reads on an RLS-scoped or service-role client. Under A3 there is no RLS and no service-role
- * client — `messages` and `diagnoses` are reached only through the owner-scoped read accessors
+ * `messages` and `diagnoses` are reached only through the owner-scoped read accessors
  * (`farmerReads`, D18), which merge the bound `ownerId` into every filter so the tenant boundary
- * cannot be forgotten. The two predicates that were load-bearing under RLS are now structural:
- * `conversationId` is Requirement 7.2's key (passed to the accessor), and `ownerId` is merged by
- * the layer.
+ * cannot be forgotten. The two predicates the store relies on are structural: `conversationId`
+ * is Requirement 7.2's key (passed to the accessor), and `ownerId` is merged by the layer.
  *
  * The optional `_legacyClient` is accepted and ignored purely so a caller still written against the
- * Supabase signature keeps compiling through this port — it selects no behaviour, exactly as the
- * quota and conversation ports kept theirs. Production callers pass nothing.
+ * former data-client signature keeps compiling through this port — it selects no behaviour, exactly
+ * as the quota and conversation ports kept theirs. Production callers pass nothing.
  *
  * A driver error is **not** an empty result and is never treated as one: the layer throws on a real
  * failure, so an error is surfaced as `INTERNAL_ERROR` rather than read as "no messages / no
@@ -334,7 +329,7 @@ export function contextStoreFrom(_legacyClient?: unknown): ContextStore {
         // `conversationMessages` merges `{ ownerId: scope.userId }` and filters `conversationId`,
         // ordered `createdAt` desc, then `role` desc (so a farmer message and its answer sharing an
         // instant reverse to question-then-answer), then `_id` desc as the total tiebreak — served
-        // by `owner_conversation_recent`. The same total order the retired PostgREST read produced.
+        // by `owner_conversation_recent`. A single, well-defined total order over the window.
         return await farmerReads(scope.userId).conversationMessages(scope.conversationId, limit);
       } catch (cause) {
         throw readFailure('messages', cause, scope);
@@ -354,18 +349,17 @@ export function contextStoreFrom(_legacyClient?: unknown): ContextStore {
 /**
  * The default store: the farmer's own data through the Data_Access_Layer.
  *
- * *Amended by A3:* this was an RLS-scoped store built lazily from the App Router session's Supabase
- * client. Under A3 the accessors bind to the owner id the caller passes per read, so there is no
- * lazy client import to make and this is simply `contextStoreFrom()`.
+ * The accessors bind to the owner id the caller passes per read, so there is no client to inject
+ * and this is simply `contextStoreFrom()`.
  */
-export const rlsScopedContextStore: ContextStore = contextStoreFrom();
+export const defaultContextStore: ContextStore = contextStoreFrom();
 
 /* ========================================================================== */
 /* Assembly                                                                    */
 /* ========================================================================== */
 
 export interface ContextOptions {
-  /** The read seam. Defaults to the farmer's session through RLS. */
+  /** The read seam. Defaults to the farmer's own data through the Data_Access_Layer. */
   readonly store?: ContextStore | undefined;
   /** Override N. Defaults to `CONTEXT_MESSAGE_LIMIT`; present so a test can pin the boundary. */
   readonly messageLimit?: number | undefined;
@@ -394,7 +388,7 @@ export async function assembleContext(
   scope: ConversationScope,
   options: ContextOptions = {},
 ): Promise<ConversationContext> {
-  const store = options.store ?? rlsScopedContextStore;
+  const store = options.store ?? defaultContextStore;
   const messageLimit = options.messageLimit ?? CONTEXT_MESSAGE_LIMIT;
   const tokenBudget = options.tokenBudget ?? CONTEXT_TOKEN_BUDGET;
 
@@ -473,11 +467,11 @@ function applyTokenBudget(
 /**
  * Post-condition: every row handed onward belongs to this conversation and this farmer.
  *
- * Not redundant with the `.eq()` predicates, for the same two reasons `assertBelongsTo` gives in
- * `conversation.service.ts`. On the WhatsApp path the application check *is* the boundary and there
- * is nothing behind it (`admin.ts`), so a predicate dropped in a refactor would otherwise surface
- * as another farmer's message inside a prompt rather than as a loud failure. And `ContextStore` is
- * an injectable seam — a store that filters incorrectly cannot leak past this point.
+ * Not redundant with the owner-scoped read, for the same two reasons `assertBelongsTo` gives in
+ * `conversation.service.ts`. The Data_Access_Layer's owner filter is the boundary, so a predicate
+ * dropped in a refactor would otherwise surface as another farmer's message inside a prompt rather
+ * than as a loud failure. And `ContextStore` is an injectable seam — a store that filters
+ * incorrectly cannot leak past this point.
  *
  * `INTERNAL_ERROR` because this is a defect in Jamee, not something a farmer did: the mismatch goes
  * to the server log through `AppError.context`, which structurally cannot reach the response body
@@ -614,12 +608,12 @@ export interface ChatQuestion extends ConversationScope {
 
 export interface ChatDeps {
   /**
-   * *Amendment A3 — an IGNORED optional legacy parameter.* This was the request's Supabase client,
-   * used for both reads. Under A3 there is no Supabase and no RLS: the context window and the
-   * knowledge base are read through the owner-scoped Data_Access_Layer, which is scoped by the
-   * `userId` on the question rather than by an injected credential. The field is kept so callers
-   * still written against the old signature keep compiling through the port — it selects no
-   * behaviour, exactly as the quota and conversation ports kept theirs.
+   * *An IGNORED optional legacy parameter.* This once carried the request's data client, used for
+   * both reads. The context window and the knowledge base are now read through the owner-scoped
+   * Data_Access_Layer, which is scoped by the `userId` on the question rather than by an injected
+   * credential. The field is kept so callers still written against the old signature keep compiling
+   * through the port — it selects no behaviour, exactly as the quota and conversation ports kept
+   * theirs.
    */
   readonly supabase?: unknown;
   /** Read seams, for a test or a caller that already built them. Default: the Data_Access_Layer. */
@@ -677,8 +671,8 @@ const REFERRAL_COPY = {
  * Answer one chat turn: assemble the context, resolve scope, and — only if there is something to
  * ground in — make exactly one model call.
  *
- * One implementation for both channels (Requirements 7.7, 16.2): the credential and the runner are
- * parameters, so the web route and the WhatsApp adapter differ in what they pass, not in what runs.
+ * One implementation for both channels (Requirements 7.7, 16.2): the store and the runner are
+ * parameters, so the web route and the Telegram adapter differ in what they pass, not in what runs.
  *
  * ### What this function deliberately does NOT do
  *
@@ -694,7 +688,7 @@ export async function answerQuestion(
     conversationId: question.conversationId,
     userId: question.userId,
   };
-  const knowledge = deps.knowledge ?? rlsScopedReader;
+  const knowledge = deps.knowledge ?? defaultKnowledgeReader;
 
   const context = await assembleContext(scope, {
     store: deps.store,
@@ -893,7 +887,7 @@ function usedFallbackOf(error: unknown): boolean {
  *
  * Requirements: 7.4 (when the Chat_Service produces an answer, the farmer message AND the Jamee
  *               answer are persisted as Messages in the same Conversation), 7.7 / 16.2 (one
- *               implementation serves the Web_App and the WhatsApp channel), 14.1 (one chat message
+ *               implementation serves the Web_App and the Telegram channel), 14.1 (one chat message
  *               spends exactly one chat unit — and a chat answer produced inside a voice request
  *               spends none), 14.2 (both channels count against one shared limit), 14.3 (an
  *               at-limit farmer is declined, told the limit and the reset time, and no provider is
@@ -1017,7 +1011,7 @@ export interface ChatWriteStore {
    * builds (the shared `writeUsageLog` helper produces it), and forwards it to the owner-scoped
    * `usageLogWriterFrom()` accessor which maps it to a `UsageLogDoc`.
    */
-  insertUsageLog(row: TablesInsert<'usage_logs'>): Promise<void>;
+  insertUsageLog(row: UsageLogInsert): Promise<void>;
   /**
    * Whether the supplied conversation id is this farmer's.
    *
@@ -1039,18 +1033,15 @@ export interface ChatWriteStore {
 /**
  * Bind the write seam to the Data_Access_Layer.
  *
- * *Amended by Amendment A3:* this was `chatWriteStoreFrom(client, auditClient)`, a two-Supabase-
- * client split (the farmer session for `messages`/`conversations`, the service role for the
- * append-only `usage_logs`). Under A3 there is no RLS and no service-role client: every write goes
- * through the owner-scoped Data_Access_Layer (D18), which merges the owning Auth_User_Id and stamps
- * timestamps. The two `_legacy*` parameters are accepted and ignored so a caller still written
- * against the old signature keeps compiling through the port — they select no behaviour.
+ * Every write goes through the owner-scoped Data_Access_Layer (D18), which merges the owning
+ * Auth_User_Id and stamps timestamps. The two `_legacy*` parameters are accepted and ignored so a
+ * caller still written against the former two-client signature keeps compiling through the port —
+ * they select no behaviour.
  *
  *  - **messages** — `farmerData(row.ownerId).insertMessage`, resolved from each row's own owner
  *    anchor, which stamps `ownerId` again and `createdAt`.
  *  - **usage_logs** — `usageLogWriterFrom()`, the owner-scoped append-only accessor. "Append-only"
- *    holds more strongly than the retired select-only RLS policy: a farmer session has no path to a
- *    `usage_logs` write at all.
+ *    is structural: there is no code path to a `usage_logs` update or delete at all.
  *  - **conversations** — the activity bump through `touchConversation` in `reads.ts`.
  *
  * The layer throws on a real failure, so an error is surfaced as `INTERNAL_ERROR` rather than read

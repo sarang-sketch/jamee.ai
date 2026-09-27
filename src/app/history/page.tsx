@@ -30,10 +30,10 @@ import styles from './page.module.css';
  *          mechanism 2
  *
  * =============================================================================
- * AMENDMENT A3 — THE DATA_ACCESS_LAYER REPLACES THE RLS-SCOPED SUPABASE CLIENT
+ * AMENDMENT A3 — THE DATA_ACCESS_LAYER REPLACES THE RETIRED RLS-SCOPED CLIENT
  * =============================================================================
  *
- * Under Supabase this page held an RLS-scoped query and minted a Signed_URL per image. Under A3 the
+ * The retired design held an RLS-scoped query and minted a Signed_URL per image. Under A3 the
  * page holds no query and no client: `readHistory({ userId })` reads through the owner-scoped
  * Data_Access_Layer (`src/lib/history.ts` → `farmerReads(userId)`), which merges the owner into
  * every filter (D18), and every image is the constant `/api/media/<fileId>` built by `mediaUrl`

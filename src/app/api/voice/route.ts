@@ -11,8 +11,8 @@ import { transcribeAndAnswer, voiceRequestDeadline } from '@/services/voice.serv
  * `POST /api/voice` — the web channel's entry to the shared `VoiceService`.
  *
  * Requirements: 1.7 (no valid session → HTTP 401 and no domain service invoked), 8.1 (the body
- *               carries only a `voice-messages` Storage_Reference, never the audio bytes), 8.2 /
- *               8.3 (the 120 s and 10 MB limits, re-checked server-side), 8.6 (the transcript AND
+ *               carries only a `voice` Media_Reference, never the audio bytes), 8.2 /
+ *               8.3 (the 120 s and 3 MB limits, re-checked server-side), 8.6 (the transcript AND
  *               the text answer are both returned), 9.5 (a language code outside the
  *               Supported_Languages is HTTP 400 naming the supported codes), 14.1 (one voice
  *               message spends exactly one voice unit — never a voice unit and a chat unit), 15.3
@@ -28,7 +28,7 @@ import { transcribeAndAnswer, voiceRequestDeadline } from '@/services/voice.serv
  * Session check (the wrapper) → read the body → parse it → **one** service call → serialize the
  * result. No transcription, no prompt text, no provider call, no SQL, and no quota arithmetic:
  * every judgement a farmer sees was made by `VoiceService`, which is what keeps the web and
- * WhatsApp channels answering identically (Requirement 16.2) rather than by agreement between two
+ * Telegram channels answering identically (Requirement 16.2) rather than by agreement between two
  * handlers.
  *
  * The ordering that matters is not maintained here either — it is the wrapper's. The handler body is
@@ -44,16 +44,15 @@ import { transcribeAndAnswer, voiceRequestDeadline } from '@/services/voice.serv
  * there is no code path from this file that could opt a request out of the counter, and none that
  * could charge it twice.
  *
- * ### The two things this route contributes that the service cannot
+ * ### The one thing this route contributes that the service cannot
  *
- * Both are *facts about this request*, not decisions about a farmer's recording:
+ * A *fact about this request*, not a decision about a farmer's recording:
  *
  *  1. **One deadline for the whole request.** `voiceRequestDeadline()` is called once and handed to
  *     both halves — to `VoiceService` as `deadlineMs`, and to the nested `ChatService` through
- *     `chatAnswerer({ supabase, runOptions })`. `ChatAnswerer` has no deadline parameter, so the
+ *     `chatAnswerer({ runOptions })`. `ChatAnswerer` has no deadline parameter, so the
  *     closure is the only channel there is; without it the nested turn would compute a fresh 45 s
  *     budget partway into a request that already spent part of its own on transcription.
- *  2. **The recording's real size** (see `resolveAudioBytes` below).
  *
  * ### What this route rate-limits: the voice request, once
  *
@@ -65,14 +64,14 @@ import { transcribeAndAnswer, voiceRequestDeadline } from '@/services/voice.serv
  *
  * ### What the service is given, and what it is not
  *
- * `supabase` is the RLS-scoped server client, so the conversation-ownership lookup, the two
- * `messages` inserts and the storage reads all run under the farmer's own session — **RLS is a
- * second boundary** behind the `user_id` the service supplies. The `usage_logs` insert and the
- * on-success deletion of the recording are deliberately NOT this route's business: migration `0006`
- * grants `authenticated` no insert policy on `usage_logs` and migration `0009` grants a farmer
- * session no `delete` on storage, so both run on the service-role client that `voice.service.ts`
- * builds itself, lazily. Requirement 8.11's "only from a server-side module" is satisfied by the
- * delete living there rather than here.
+ * *Amendment A3:* the route builds and passes no database client. Under A3 there is no relational
+ * RLS layer; `VoiceService` reads and writes through the owner-scoped Data_Access_Layer, scoped by the
+ * `userId` the service supplies, which is the sole tenant boundary. The conversation-ownership
+ * lookup, the two `messages` writes and the GridFS reads all run through that layer. The `usage_logs`
+ * audit write and the on-success deletion of the recording are likewise the service's own business
+ * through the same layer — this route neither builds nor holds a credential for them. Requirement
+ * 8.11's "only from a server-side module" is satisfied by the delete living in the service rather
+ * than here.
  */
 
 /**
@@ -84,7 +83,7 @@ import { transcribeAndAnswer, voiceRequestDeadline } from '@/services/voice.serv
  * Written as a literal because Next.js reads route segment config by static analysis, so an imported
  * constant is not usable here. `route.test.ts` asserts this literal equals
  * `JAMEE_MAX_DURATION_SECONDS`, which is what stops the two drifting apart — the same guard the
- * chat, diagnose and WhatsApp routes carry.
+ * chat, diagnose and Telegram routes carry.
  */
 export const maxDuration = 60;
 
@@ -110,7 +109,7 @@ export const maxDuration = 60;
  * This is the server-side half of Requirement 8.2 that the recorder's own 120 s stop cannot
  * provide: the stop is a client-side check on a server-side spend rule, and a hand-built request
  * need not have a recorder in it at all. `assertAdmissibleAudio()` re-checks the same bound inside
- * the service for callers that never pass through this schema — the WhatsApp path, whose duration
+ * the service for callers that never pass through this schema — the Telegram path, whose duration
  * comes from provider metadata.
  */
 const audioDurationIssue: IssueMapper = (issues) =>
@@ -131,70 +130,15 @@ const audioDurationIssue: IssueMapper = (issues) =>
  * is not this farmer's.
  *
  * `fallback: 'STORAGE_REF_INVALID'` is a good fit here rather than a borrowed one — Requirement 8.1
- * makes the storage reference the substance of the body, so an absent `audio`, a path outside the
- * `{user_id}/{YYYY}/{MM}/{uuid}.{ext}` convention, a reference naming `crop-images` instead of
- * `voice-messages`, an over-long `mimeType`, a body that is not an object and a body that is not
- * JSON at all all describe the same thing going wrong.
+ * makes the Media_Reference the substance of the body, so an absent `audio`, a reference that is not
+ * a valid `{ fileId, kind }` pair, a reference whose `kind` is not `voice`, an over-long `mimeType`, a
+ * body that is not an object and a body that is not JSON at all all describe the same thing going
+ * wrong.
  */
 const BODY_CONTRACT = {
   fallback: 'STORAGE_REF_INVALID',
   endpointSpecific: audioDurationIssue,
 } as const;
-
-/* ========================================================================== */
-/* The size half of Requirement 8.2                                            */
-/* ========================================================================== */
-
-/**
- * **The recording's real size comes from the object, not from the body.**
- *
- * ### Why the number is read rather than declared
- *
- * Requirement 8.2 admits recordings "up to 120 seconds duration and up to 10 MB size", and the two
- * halves were not equally enforced. Duration is measured by the browser and re-checked twice
- * server-side (the schema above, then `assertAdmissibleAudio()`); **size had no server-side check at
- * all** on this path. `VoiceRecorder` rejects a blob over 10 MB, but that is a client-side check on
- * a rule the server is supposed to own, and V10's 25 MB provider cap in `groq.ts` could not fire
- * either — `TranscribeRequest.bytes` is optional and nothing on the web path supplied it. The
- * WhatsApp channel has the number and enforces it at store time (`storeInboundMedia`); the web
- * channel had a guard with no input.
- *
- * The two ways to close that were a byte count on the wire contract, or a read of the object. This
- * is the read, for three reasons:
- *
- *  - **The object is the authority on its own size.** A byte count in the body is the client's
- *    claim about the bytes it uploaded, and a hand-built request — the case the whole server-side
- *    re-check exists for — can put any number in it. Re-checking a claim against a limit catches an
- *    honest client's bug and nothing else.
- *  - **It changes no contract.** `voiceRequestSchema` is the shape the design specifies and the
- *    shape `VoiceRecorder` is being written against; adding a required field would break every
- *    client that has not shipped the matching change yet, for a number the server can get itself.
- *  - **It costs one metadata round trip, before the reserve.** Refusing an oversized recording here
- *    spends no quota unit and no provider call. Letting it through spends both and then reads a
- *    provider 413 — which V11 classifies as `OTHER`, so it surfaces as `TRANSCRIPTION_FAILED`, a
- *    502 marked *retryable* over an object that will fail identically forever.
- *
- * The cost of the round trip is honest: it is a metadata read against Storage on the request path of
- * every voice message. `groq.ts` records the opposite trade — that requiring a size would force an
- * extra round trip "to re-learn a number the request never carried" — and that reasoning is why
- * `TranscribeRequest.bytes` stays optional there. Taken here, once, deliberately, the trip buys a
- * number no other party can misstate.
- *
- * **Absence is not a refusal.** When Storage does not answer with a size, `objectSizeOf()` reports
- * `undefined` and writes one `object_size_unknown` line; the service then skips a check it has no
- * number for, and the request proceeds exactly as it would have. The alternative — failing a request whose
- * bytes are already in the bucket and whose ownership is about to be confirmed — would turn a
- * metadata hiccup into a farmer's lost recording.
- *
- * The probe runs on the farmer's own RLS-scoped client, so `voice_messages_read_own` (migration
- * `0009`) confines it to their own prefix: a reference under someone else's prefix yields
- * `undefined` here and a 403 from the service's ownership gate moments later. This cannot become a
- * size or existence oracle.
- *
- * The judgement itself is **not** made here: `assertAdmissibleAudio()` compares the number against
- * `MAX_AUDIO_BYTES` inside the service, before the reserve, so both channels refuse an oversized
- * recording the same way and with the same sentence. This route supplies a fact; the service decides.
- */
 
 /* ========================================================================== */
 /* The handler                                                                 */

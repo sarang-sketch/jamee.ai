@@ -157,7 +157,7 @@ describe('resolveDetailImage', () => {
     // A Telegram-originated diagnosis past the retention window: no thumbnail was ever produced.
     const image = await resolveDetailImage(
       identifiedRow({
-        channel: 'whatsapp',
+        channel: 'telegram',
         fullImageDeletedAt: new Date('2026-03-12T00:00:00.000Z'),
       }),
       readsWithThumbnail(null),

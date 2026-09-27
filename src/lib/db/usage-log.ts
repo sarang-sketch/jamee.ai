@@ -11,7 +11,31 @@ import type {
   UsageOutcome,
   UsageRejectionReason,
 } from '@/lib/schemas';
-import type { TablesInsert } from '@/types/database';
+
+/**
+ * The wire shape of one `usage_logs` audit row, as `usageLogRow()` builds it and the persistence
+ * seam consumes it. Every enumerated column is typed from the Zod-inferred domain unions in
+ * `schemas.ts` (the same single-source discipline `collections.ts` follows), so a bad `channel`
+ * or `outcome` is a compile error rather than a validator rejection at write time.
+ *
+ * This is the local audit-row contract owned by this module. `user_id` is the required tenant
+ * anchor `usageLogWriterFrom` binds `farmerData` to; the nullable columns are written explicitly
+ * (see `usageLogRow`) so the row shape is a property of the builder and not of a caller's spelling.
+ */
+export interface UsageLogInsert {
+  readonly user_id: string;
+  readonly operation: Operation;
+  readonly channel: Channel;
+  readonly model_provider?: UsageProvider | null;
+  readonly outcome: UsageOutcome;
+  readonly used_fallback?: boolean;
+  readonly rejection_reason?: UsageRejectionReason | null;
+  readonly quota_spent?: boolean;
+  readonly latency_ms?: number | null;
+  readonly prompt_version?: string | null;
+  readonly conversation_id?: string | null;
+  readonly diagnosis_id?: string | null;
+}
 
 /**
  * The one audit vocabulary. Every `usage_logs` row in Jamee is shaped here.
@@ -26,20 +50,19 @@ import type { TablesInsert } from '@/types/database';
  * Migrations: `0006_usage_logs.sql`, `0011_usage_logs_audit_vocabulary.sql`
  *
  * =============================================================================
- * WHY THIS MODULE EXISTS: THERE WERE FOUR DIALECTS
+ * WHY THIS MODULE EXISTS: THE ROW SHAPE LIVES ONCE
  * =============================================================================
  *
- * Five call sites write audit rows — the three services, the WhatsApp duplicate guard, and the
- * WhatsApp pre-flight budget gate — and each had grown its own near-identical row builder. The
- * divergences were not cosmetic:
+ * Several call sites write audit rows — the three services and the Telegram inbound path — and each
+ * had grown its own near-identical row builder. The divergences were not cosmetic:
  *
  *  - `diagnosis.service.ts` wrote the coarse `provider_error` for a rejected rephrase while
  *    `chat.service.ts` wrote `validation_rejected` for the same event. One of them had to be wrong,
  *    and an operator counting `provider_error` was counting two different facts.
- *  - `whatsapp-inbound.ts` omitted `prompt_version`, `latency_ms` and `used_fallback` entirely, so
+ *  - An inbound-path builder omitted `prompt_version`, `latency_ms` and `used_fallback` entirely, so
  *    `prompt_version` was non-null on *most* rows — which is worse than null on all of them, because
  *    a `group by prompt_version` silently dropped the duplicates.
- *  - Each site had its own copy of "never throw, log instead", and a sixth site would have had to
+ *  - Each site had its own copy of "never throw, log instead", and a further site would have had to
  *    remember to write one.
  *
  * So the row shape, the column defaults, and the never-throw rule live here, once. A caller supplies
@@ -66,16 +89,16 @@ import type { TablesInsert } from '@/types/database';
  *  | budget expiry, before or during the work | `timeout` | the server or `none` | `true` / `false` |
  *  | daily limit reached (14.3) | `quota_declined` | `none` | `false` |
  *  | burst ceiling reached (13.8) | `rate_limited` | `none` | `false` |
- *  | Meta redelivery (11.5) | `duplicate_ignored` | `none` | `false` |
+ *  | platform redelivery (11.5) | `duplicate_ignored` | `none` | `false` |
  *
  * And the paths that write **nothing**, each for a stated reason rather than by omission:
  *
  *  - **Anything refused before the request is attributable to a farmer.** A 401, an unparseable
- *    body, an unsupported language, an ownership 403, an unresolvable WhatsApp number, a message
+ *    body, an unsupported language, an ownership 403, an unresolvable sender, a message
  *    type outside text/image/audio. `usage_logs.user_id` is `not null` and these paths either have
  *    no farmer or have refused to trust the one they were handed; a row would have to invent one.
- *  - **A redelivery whose conflicting `whatsapp_inbound` row carries a null `user_id`.** Same
- *    reason, and the design says so explicitly: the duplicate is recorded by the `whatsapp_inbound`
+ *  - **A redelivery whose conflicting inbound-idempotency row carries a null `user_id`.** Same
+ *    reason, and the design says so explicitly: the duplicate is recorded by the inbound
  *    status alone.
  *
  * =============================================================================
@@ -236,10 +259,10 @@ export interface UsageFacts {
  * Build the row. Every column, every time.
  *
  * The nullable columns are written as explicit `null` rather than omitted, which matters more than
- * it looks: PostgREST omits absent keys from the insert, so two call sites that differ only in which
- * keys they left out produce rows that differ in whether a column holds `null` or a database
- * default. Writing all thirteen means the row shape is a property of this function and not of the
- * caller's spelling.
+ * it looks: an omitted key can insert as a collection default rather than `null`, so two call sites
+ * that differ only in which keys they left out would produce rows that differ in whether a field
+ * holds `null` or a default. Writing all thirteen means the row shape is a property of this function
+ * and not of the caller's spelling.
  *
  * `prompt_version` is written on every row, **including rows that composed no prompt** — a quota
  * decline, a burst refusal, a redelivery. It records the prompt revision the request would have
@@ -247,7 +270,7 @@ export interface UsageFacts {
  * A `group by prompt_version` that silently dropped every refused request would be answering a
  * different question from the one an operator asked.
  */
-export function usageLogRow(facts: UsageFacts): TablesInsert<'usage_logs'> {
+export function usageLogRow(facts: UsageFacts): UsageLogInsert {
   return {
     user_id: facts.userId,
     operation: facts.operation,
@@ -274,13 +297,13 @@ export function usageLogRow(facts: UsageFacts): TablesInsert<'usage_logs'> {
  * store interfaces and their existing tests keep working.
  */
 export interface UsageLogWriter {
-  insertUsageLog(row: TablesInsert<'usage_logs'>): Promise<void>;
+  insertUsageLog(row: UsageLogInsert): Promise<void>;
 }
 
 /**
  * Whether the row landed. Returned rather than thrown, so a caller that has something to say about
- * a failed audit — `whatsapp-inbound.ts` reports it as a `DuplicateAudit` — can say it, while the
- * three services can ignore it.
+ * a failed audit — the Telegram inbound path reports it as a `DuplicateAudit` — can say it, while
+ * the three services can ignore it.
  */
 export type UsageLogWrite =
   | { readonly written: true }
@@ -329,9 +352,6 @@ export async function writeUsageLog(
 /**
  * The Data_Access_Layer-backed audit writer.
  *
- * *Amended by Amendment A3:* this was `usageLogWriterFrom(client: SupabaseClient)`, an
- * `INSERT` on the service-role client whose absence-of-a-write-policy on `usage_logs` was the
- * "append-only" enforcement (migration 0006). Under A3 there is no RLS and no service-role client:
  * `usage_logs` is reachable only through the owner-scoped `FarmerData.insertUsageLog` (D18), which
  * merges the owning Auth_User_Id from the bound id and stamps `createdAt`. So this takes no client
  * — the layer is the boundary — and it maps the wire-shaped `usageLogRow()` output to the layer's
@@ -339,7 +359,7 @@ export async function writeUsageLog(
  *
  * "Append-only" still holds, now more strongly: a farmer session has no path to a `usage_logs`
  * write at all, because the only writer is this owner-scoped accessor and nothing hands a farmer
- * session the driver. The `user_id` anchor stays required — `TablesInsert<'usage_logs'>` types it
+ * session the driver. The `user_id` anchor stays required — `UsageLogInsert` types it
  * as a non-nullable `string`, so the typecheck proves every row carries one, and it is what
  * `farmerData` is bound to.
  *
@@ -368,7 +388,7 @@ function toObjectId(value: string | null | undefined): ObjectId | null {
  * write goes through the layer.
  */
 function usageLogDocFrom(
-  row: TablesInsert<'usage_logs'>,
+  row: UsageLogInsert,
 ): Omit<UsageLogDoc, '_id' | 'ownerId' | 'createdAt'> {
   return {
     operation: row.operation,

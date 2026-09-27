@@ -173,8 +173,8 @@ export const THUMBNAIL_QUALITY = 0.7;
  * extension: `…/{uuid}.jpg` → `…/{uuid}.thumb.jpg`.
  *
  * Three properties made this convention preferable to a sibling `thumbs/` folder:
- *  - **The storage RLS predicate needs no change.** `(storage.foldername(name))[1]` is still
- *    `{user_id}` (V4), so both objects are covered by the existing policy with no new grant.
+ *  - **The owner prefix is unchanged.** The first path segment is still `{user_id}`, so both
+ *    objects share one owner anchor with no separate handling.
  *  - **Both derivatives share an extension**, because the browser produces both in one
  *    re-encode pass with one output MIME type — so the extension is not a second thing to
  *    derive.

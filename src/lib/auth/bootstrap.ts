@@ -15,12 +15,12 @@ import { farmerData } from '@/lib/db/farmer';
  * WHY THIS LIVES IN `src/lib/auth` AND NOT NEXT TO THE CALLBACK ROUTE
  * =============================================================================
  *
- * The D8 bootstrap now fires from Better Auth's `databaseHooks` in `src/lib/auth/auth.ts` (V30),
- * so the function they call has to be importable from `src/lib` WITHOUT crossing the one-way rule
+ * The D8 bootstrap fires from Better Auth's `databaseHooks` in `src/lib/auth/auth.ts` (V30), so
+ * the function they call has to be importable from `src/lib` WITHOUT crossing the one-way rule
  * "nothing under `src/lib/**` imports from `src/app/**`" (design, project structure), which
  * `scripts/check-shared-implementation.ts` enforces. So the logic lives here, in `src/lib/auth`,
- * and `src/app/auth/callback/ensure-profile.ts` re-exports it for its own unit test — an
- * `src/app` → `src/lib` import, which the rule allows.
+ * where both the hook path and any future caller can reach it without an `src/app` → `src/lib`
+ * dependency.
  *
  * =============================================================================
  * WHAT CHANGED FROM THE SUPABASE VERSION, AND WHY THE E.164 STORY IS GONE

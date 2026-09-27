@@ -89,8 +89,8 @@ export const ERROR_SPECS: Record<ErrorCode, CodeSpec> = {
   /**
    * **Not retryable, and that is the whole point of the code existing.**
    *
-   * The container a recording arrived in is a property of the recorder, not of the request: on
-   * WhatsApp, Meta chooses it (V14 documents `audio/aac` and `audio/amr`, neither of which is in
+   * The container a recording arrived in is a property of the recorder, not of the request: an
+   * inbound messaging file arrives in whatever container the platform chose (which may be outside
    * V10's accepted list), and in a browser the recorder already picked from the intersection.
    * Either way, re-sending the identical bytes fails identically, so Requirement 15.4's flag has
    * to be `false` — which is exactly what `TRANSCRIPTION_FAILED` (502, retryable) got wrong when

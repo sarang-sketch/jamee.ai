@@ -10,7 +10,7 @@ import { dayWindowKey, nextResetAtIso } from '@/lib/time';
  * The daily quota reserve, refund, and read — the only module that spends a unit.
  *
  * Requirements: 14.1 (20 image / 50 chat / 20 voice per Quota_Window), 14.2 (the Web_App and
- *               WhatsApp channels count against ONE shared per-farmer limit per operation),
+ *               Telegram channels count against ONE shared per-farmer limit per operation),
  *               14.3 (a request past the limit is declined, states the limit and the reset time,
  *               and invokes no model provider), 6.7 (an accepted inconclusive diagnosis counts
  *               exactly one image analysis)
@@ -27,8 +27,8 @@ import { dayWindowKey, nextResetAtIso } from '@/lib/time';
  *
  *  - An ownership 403 spends **zero** (Requirement 2.6) — `assertOwnership()` runs at step 4,
  *    before the reserve at step 6, so nothing was taken to give back.
- *  - A duplicate WhatsApp delivery spends **zero** (Requirement 11.5) — the `whatsapp_inbound`
- *    idempotency insert is step 3, so a Meta redelivery never reaches the counter.
+ *  - A duplicate Telegram delivery spends **zero** (Requirement 11.5) — the inbound idempotency
+ *    insert is step 3, so a platform redelivery never reaches the counter.
  *  - An exhausted quota spends **zero** and calls no provider (Requirement 14.3).
  *  - An accepted inconclusive diagnosis spends **exactly one** (Requirement 6.7). The
  *    classification call happened; validation rejected its content. Spent.
@@ -62,17 +62,14 @@ import { dayWindowKey, nextResetAtIso } from '@/lib/time';
  * so task 24.1 can reuse the same seam, but every public function here passes `'day'`.
  *
  * =============================================================================
- * WHY `server-only` AND THE SERVICE-ROLE CLIENT
+ * WHY `server-only`, AND WHY IT HOLDS NO DATABASE HANDLE
  * =============================================================================
  *
- * *Amended by Amendment A3.* Under Supabase, `counters` granted `authenticated` no write policy and
- * the only writes were through `security definer` functions invoked with the service role. Under
- * A3 there is no RLS and no service-role client: `counters` is reachable only through the
- * Data_Access_Layer's owner-scoped accessors (D18), which merge the owning Auth_User_Id into the
- * counter key by construction. So this module is server-only, it holds no database handle of its
- * own, and the old rule "every service-role query carries an explicit `user_id`" is now structural
- * — `farmerData(userId)` binds the owner, and there is no code path that reaches a counter row
- * without one.
+ * `counters` is reachable only through the Data_Access_Layer's owner-scoped accessors (D18), which
+ * merge the owning Auth_User_Id into the counter key by construction. So this module is
+ * server-only, it holds no database handle of its own, and "every counter touch carries the owner"
+ * is structural — `farmerData(userId)` binds the owner, and there is no code path that reaches a
+ * counter row without one.
  */
 
 /* ========================================================================== */
@@ -133,12 +130,10 @@ export interface CounterRpc {
 /**
  * Bind the seam to the Data_Access_Layer.
  *
- * *Amended by Amendment A3:* this was `adminCounterRpc(client = createAdminClient())`, a slice of a
- * Supabase service-role client calling the three `0007` `security definer` functions. Under A3 the
- * atomic counter operations are D19's `findOneAndUpdate` conditional upsert / guarded decrement /
- * read, and they live on the owner-scoped `FarmerData` bundle in `src/lib/db/farmer.ts` — the only
- * holder of the driver (D18). So each method resolves `farmerData(args.userId)` and forwards to its
- * counter helper. The exported name is kept — every service and the burst limiter build their
+ * The atomic counter operations are D19's `findOneAndUpdate` conditional upsert / guarded decrement
+ * / read, and they live on the owner-scoped `FarmerData` bundle in `src/lib/db/farmer.ts` — the
+ * only holder of the driver (D18). So each method resolves `farmerData(args.userId)` and forwards
+ * to its counter helper. The exported name is kept — every service and the burst limiter build their
  * default RPC through `adminCounterRpc()` — and it now takes NO argument in production, because
  * there is no separate service-role client to inject: the layer *is* the access boundary, and its
  * accessor merges the owner into the counter key by construction.
@@ -149,7 +144,7 @@ export interface CounterRpc {
  * ### The optional `legacyClient` parameter
  *
  * A property test still exercises the "a transport failure must not read as at-limit" classifier
- * through the OLD PostgREST-shaped seam (`{ data, error }`). That property is preserved verbatim
+ * through the OLD `{ data, error }`-shaped seam. That property is preserved verbatim
  * under A3 — a database failure throws out of the Data_Access_Layer rather than arriving as a
  * `null` — and rewriting those property tests belongs to a later restatement task, not this port.
  * So `adminCounterRpc` accepts an OPTIONAL legacy client for exactly that: when one is supplied its
@@ -294,8 +289,8 @@ export type ReserveOutcome =
  * ### The key is `(user_id, operation, 'day', window_key)` and has NO channel component
  *
  * Requirement 14.2's cross-channel sharing is therefore automatic rather than enforced by
- * convention: this function accepts no channel, the SQL primary key has no column for one, and
- * a web request and a WhatsApp request land on the same counter row because there is nothing
+ * convention: this function accepts no channel, the counter key has no component for one, and
+ * a web request and a Telegram request land on the same counter row because there is nothing
  * that could separate them. `channel` is still recorded on the `usage_logs` row (Requirement
  * 14.6) — that is an audit fact, and audit facts do not partition quota.
  *

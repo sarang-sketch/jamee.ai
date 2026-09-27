@@ -301,10 +301,9 @@ const GRIDFS_FILES_INDEXES: IndexSpec[] = [
 /* ========================================================================== */
 
 /**
- * The seed. Content and every `source` citation are copied EXACTLY from
- * `supabase/migrations/0010_seed_disease_knowledge.sql` (the committed real citations, not the
- * design's placeholders), because Requirement 4.3 makes this the only agricultural content a
- * farmer ever reads and 4.2 requires a real provenance per row. Tomato Healthy's `treatment` is
+ * The seed. Content and every `source` citation are the committed real citations (not the design's
+ * placeholders), because Requirement 4.3 makes this the only agricultural content a farmer ever
+ * reads and 4.2 requires a real provenance per row. Tomato Healthy's `treatment` is
  * the empty array (3.4).
  */
 export const SEED_CONDITIONS: ReadonlyArray<{

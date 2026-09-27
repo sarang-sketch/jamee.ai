@@ -41,10 +41,9 @@ import type {
  *
  * One enum is declared HERE rather than reused: `TelegramInboundStatus`. The status vocabulary A3
  * requires for `telegram_inbound` — `received | processed | failed | rejected | unlinked |
- * not_entitled` — is wider than the `whatsappInboundStatusSchema` still sitting in `schemas.ts`
- * (that schema, and the WhatsApp channel it served, are retired by tasks 60/51 which are not this
- * task's to run). So the current, correct vocabulary lives here next to the collection it belongs
- * to, and `scripts/db-setup.ts` pins the same set in the collection validator.
+ * not_entitled` — is the current, correct vocabulary, and it lives here next to the collection it
+ * belongs to. `scripts/db-setup.ts` pins the same set in the collection validator. (The narrower
+ * inbound-status schema the retired WhatsApp channel used has been removed from `schemas.ts`.)
  *
  * =============================================================================
  * IDENTITY FIELDS — WHY SOME `_id`s ARE NOT ObjectIds

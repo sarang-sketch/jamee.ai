@@ -15,10 +15,10 @@ import {
 } from '@/components/DiagnosisResultCard';
 import { EmptyState } from '@/components/EmptyState';
 import { ErrorBanner, type ErrorBannerError } from '@/components/ErrorBanner';
+import { GoogleSignInButton } from '@/components/GoogleSignInButton';
 import { HistoryList } from '@/components/HistoryList';
 import { LanguageContext, type LanguageContextValue } from '@/components/LanguageProvider';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
-import { SignInForm } from '@/components/SignInForm';
 import { VoiceAnswerCard, VoicePanel } from '@/components/VoiceAnswerCard';
 import { AppError, toEnvelope } from '@/lib/errors';
 import { DIAGNOSE_PATH, type HistoryEntry } from '@/lib/history';
@@ -93,7 +93,7 @@ import {
  * =============================================================================
  *
  * Every screen is a server shell (`<main lang>` plus an `<h1>`) around a client subtree. The
- * shells are `async` server components that call `cookies()` and Supabase, so they cannot be
+ * shells are `async` server components that call `cookies()` and the auth library, so they cannot be
  * rendered here without standing in for Jamee's own modules — which the project does not do.
  *
  * `shell()` therefore reproduces the two elements of the shell the scan genuinely needs: the
@@ -247,16 +247,16 @@ const STORED_ROWS: readonly ChatMessageRow[] = [
     role: 'jamee',
     content: 'Dark rings on the lower leaves point to Tomato Early Blight.',
     language: 'en',
-    input_kind: 'text',
-    created_at: '2026-09-15T06:01:00.000Z',
+    inputKind: 'text',
+    createdAt: '2026-09-15T06:01:00.000Z',
   },
   {
     id: '77777777-7777-4777-8777-777777777777',
     role: 'farmer',
     content: 'What should I spray on my potatoes?',
     language: 'en',
-    input_kind: 'text',
-    created_at: '2026-09-15T06:00:00.000Z',
+    inputKind: 'text',
+    createdAt: '2026-09-15T06:00:00.000Z',
   },
 ];
 
@@ -320,7 +320,7 @@ const HISTORY_ENTRIES: readonly HistoryEntry[] = [
     id: '33333333-3333-4333-8333-333333333333',
     condition: null,
     severity: 'none',
-    channel: 'whatsapp',
+    channel: 'telegram',
     createdAt: '2026-09-13T05:00:00.000Z',
     image: { kind: 'thumbnail', url: 'https://signed.test/crop-images/b.thumb.jpg?token=t' },
   },
@@ -360,7 +360,7 @@ describe.each(SUPPORTED_LANGUAGES)('accessibility scan (%s)', (language) => {
       await expectNoViolations(
         shell({ language, heading: ui.appName }, [
           <p key="tagline">{ui.tagline}</p>,
-          <SignInForm key="form" language={language} />,
+          <GoogleSignInButton key="button" language={language} />,
         ]),
       );
     },
@@ -509,7 +509,7 @@ describe.each(SUPPORTED_LANGUAGES)('accessibility scan (%s)', (language) => {
  * before it renders anything. Scanning it would take one of two things, and both are worse than
  * the gap:
  *
- *  - standing in for `createServerSupabase`, `activeLanguage` and `next/navigation`, which means
+ *  - standing in for the Data_Access_Layer, `activeLanguage` and `next/navigation`, which means
  *    substituting Jamee's own modules — the thing every test file in this project refuses to do;
  *  - or rebuilding its markup in this file, which would scan a **copy**. The copy would pass while
  *    the screen regressed, which is the exact failure mode an accessibility gate exists to prevent.

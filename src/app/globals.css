@@ -65,7 +65,7 @@
  * foreground/background pair declared in the same rule across all stylesheets, from the sRGB
  * relative-luminance formula, and every one of them clears 4.5:1. The two figures the modules
  * state in their own comments are accurate: `#ffffff` on `#15803d` — the primary control on
- * `SignInForm`, `ProfileForm`, `ImageUploader`, `EmptyState` and `VoiceRecorder`'s hold button —
+ * `GoogleSignInButton`, `ProfileForm`, `ImageUploader`, `EmptyState` and `VoiceRecorder`'s hold button —
  * is 5.02:1.
  *
  * The tightest pair in the app is `#64748b` on white (`HistoryList`'s fact labels) at 4.76:1, and

@@ -132,8 +132,6 @@ export const mr: MessageCatalog = {
     analyzing: 'जामी तुमच्या पिकाचा फोटो पाहत आहे…',
     thinking: 'जामी विचार करत आहे…',
     listening: 'जामी तुमची रेकॉर्डिंग ऐकत आहे…',
-    sendingCode: 'कोड पाठवला जात आहे…',
-    verifyingCode: 'कोड तपासला जात आहे…',
     saving: 'तुमची माहिती जतन होत आहे…',
   },
 
@@ -141,17 +139,8 @@ export const mr: MessageCatalog = {
     /** Not translated: it is the product's name. */
     appName: 'Jamee',
     tagline: 'टोमॅटो आणि बटाटा शेतकऱ्यांसाठी पीक रोग मदत.',
-    signInHeading: 'तुमच्या मोबाईल नंबरने साइन इन करा',
     googleSignIn: 'Google ने पुढे जा',
     signInDidNotComplete: 'साइन इन पूर्ण झाले नाही. कृपया पुन्हा साइन इन करा.',
-    phoneLabel: 'मोबाईल नंबर',
-    phoneHint: 'देशाचा कोड सुद्धा लिहा, जसे +919876543210.',
-    sendCode: 'कोड पाठवा',
-    otpLabel: 'सहा अंकी कोड',
-    otpHint: 'तुमच्या फोनवर SMS ने आलेला कोड लिहा.',
-    verifyCode: 'कोड तपासा',
-    resendCode: 'नवीन कोड पाठवा',
-    changeNumber: 'दुसरा नंबर वापरा',
     signOut: 'साइन आउट',
     navDiagnose: 'पीक तपासा',
     navChat: 'प्रश्न विचारा',
@@ -188,7 +177,6 @@ export const mr: MessageCatalog = {
     severityLabel: 'तीव्रता',
     channelLabel: 'माध्यम',
     channelWeb: 'वेबसाइट',
-    channelWhatsapp: 'WhatsApp',
     channelTelegram: 'Telegram',
     dateLabel: 'तारीख',
     symptomsHeading: 'काय पाहावे',
@@ -207,16 +195,6 @@ export const mr: MessageCatalog = {
     cropPhotoAlt: 'तुम्ही पाठवलेला पिकाचा फोटो',
     photoThumbnailOnly: 'पूर्ण आकाराचा फोटो आता जतन केलेला नाही. ही छोटी प्रत आहे.',
     photoNoLongerStored: 'या निकालाचा फोटो आता जतन केलेला नाही.',
-  },
-
-  whatsapp: {
-    signInFirst:
-      'जामीमध्ये स्वागत आहे. कृपया आधी याच मोबाईल नंबरने जामीच्या वेबसाइटवर साइन इन करा, नंतर येथे पिकाचा फोटो पाठवा.',
-    unsupportedType: 'जामी फोटो, लिखित संदेश आणि व्हॉइस नोट स्वीकारते.',
-    voiceNoteFormatUnsupported:
-      'जामीला हा व्हॉइस नोट ऐकता आला नाही. कृपया आपला प्रश्न येथे लिहून पाठवा.',
-    takingLonger:
-      'जामीला या फोटोसाठी नेहमीपेक्षा जास्त वेळ लागत आहे. कृपया थोड्या वेळाने पुन्हा पाठवा.',
   },
 
   /**

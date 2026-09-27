@@ -63,7 +63,7 @@ describe('proxy optimistic redirect', () => {
 
   it('never redirects an unprotected path even when signed out', () => {
     cookiePresent = false;
-    for (const path of ['/', '/auth/callback']) {
+    for (const path of ['/', '/api/auth/callback/google']) {
       const response = proxy(request(path));
       expect(response.headers.get('location'), `expected ${path} to pass through`).toBeNull();
     }

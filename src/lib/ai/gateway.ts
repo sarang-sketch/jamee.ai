@@ -238,7 +238,7 @@ export const SOFT_BUDGET_MS = SOFT_BUDGET_FRACTION * JAMEE_MAX_DURATION_SECONDS 
  *
  * It is the work the request still has to do *after* the budget expires, inside the same invocation:
  * build and localize the error envelope, write the `usage_logs` row with `outcome = 'timeout'`, mark
- * the `whatsapp_inbound` row on the WhatsApp path, and send the farmer a message. V16 records that
+ * the inbound-idempotency row on the Telegram path, and send the farmer a message. V16 records that
  * `SIGTERM` grants only ~500 ms of cleanup, so none of that can be deferred to shutdown.
  */
 export const TERMINAL_RESERVE_MS = JAMEE_MAX_DURATION_SECONDS * 1000 - SOFT_BUDGET_MS;

@@ -515,9 +515,9 @@ export function rephrasePrompt(target: RephraseTarget): string {
  *  - The prompt asks for four to six short sentences. Devanagari spends roughly half again as many
  *    code units per visible character as Latin does (a cluster like `क्या` is four), so the ceiling
  *    has to clear six short Marathi sentences without clearing six English paragraphs — 1200 does.
- *  - It sits far below `WHATSAPP_TEXT_BODY_MAX_CHARS` (4096), so an accepted rephrase always fits
- *    in one WhatsApp message and the adapter's sentence-boundary truncation stays the guard it is
- *    described as rather than a routine path.
+ *  - It sits far below a messaging channel's per-message text limit (~4096 chars), so an accepted
+ *    rephrase always fits in one message and the adapter's sentence-boundary truncation stays the
+ *    guard it is described as rather than a routine path.
  *  - It sits above the longest `staticExplanationFor()` output (~900 code units for the longest
  *    seeded row), so the fallback is never longer than what the check that triggered it admits.
  *
@@ -612,9 +612,9 @@ export function outOfScopeConditionsIn(
  *
  * **Check 1 is not re-run after check 2's repair.** The prefix adds at most the canonical name
  * plus a newline — 20 code units for the longest of the five — and the ceiling sits ~2900 below
- * the WhatsApp cap. Re-checking would discard a fully grounded, correctly named answer over 20
- * characters, which trades something a farmer needs for tidiness in a number that has slack by
- * construction.
+ * a messaging channel's per-message text limit. Re-checking would discard a fully grounded,
+ * correctly named answer over 20 characters, which trades something a farmer needs for tidiness in
+ * a number that has slack by construction.
  */
 export function validateRephrased(candidate: string, target: RephraseCheckTarget): RephraseCheck {
   const { entry } = target;

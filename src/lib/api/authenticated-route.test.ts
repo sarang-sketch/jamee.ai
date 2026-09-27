@@ -325,8 +325,8 @@ describe('guardViolations', () => {
 });
 
 /**
- * Requirement 1.7 names four endpoint groups. `whatsapp` is deliberately absent: it is
- * authenticated by an HMAC signature over the raw body (Requirement 11.3), carries no farmer
+ * Requirement 1.7 names four endpoint groups. The Telegram webhook is deliberately absent: it is
+ * authenticated by its secret-token header (Requirement 11.3), carries no farmer
  * session, and gating it on one would break the channel.
  */
 const PROTECTED_ENDPOINTS = new Set(['diagnose', 'chat', 'voice', 'history']);

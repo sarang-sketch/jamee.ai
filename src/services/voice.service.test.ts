@@ -24,7 +24,7 @@ import {
   type VoiceDeps,
   type VoiceStore,
 } from '@/services/voice.service';
-import type { TablesInsert } from '@/types/database';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 
 /**
  * Unit tests for `src/services/voice.service.ts` (Amendment A3), with the media read, transcription,
@@ -210,11 +210,11 @@ function chatStub(options: { error?: unknown; rpc?: CounterRpc } = {}): ChatStub
 
 interface StoreStub {
   readonly store: VoiceStore;
-  readonly usage: TablesInsert<'usage_logs'>[];
+  readonly usage: UsageLogInsert[];
 }
 
 function storeStub(): StoreStub {
-  const usage: TablesInsert<'usage_logs'>[] = [];
+  const usage: UsageLogInsert[] = [];
   return {
     usage,
     store: {

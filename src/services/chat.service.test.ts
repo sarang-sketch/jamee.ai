@@ -14,7 +14,7 @@ import {
   type Operation,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import type { TablesInsert } from '@/types/database';
+import type { UsageLogInsert } from '@/lib/db/usage-log';
 import {
   CONTEXT_MESSAGE_LIMIT,
   CONTEXT_TOKEN_BUDGET,
@@ -531,7 +531,7 @@ describe('estimateTokens', () => {
  *               every language), 16.4 (one grounding-and-rephrase implementation)
  *
  * The knowledge base and the gateway are stubbed at their seams — a `KnowledgeReader` is one async
- * function and a `CapabilityRunner` is two, so nothing here reproduces a PostgREST chain or an SDK
+ * function and a `CapabilityRunner` is two, so nothing here reproduces a query builder chain or an SDK
  * shape. `resolveScope()` and `validateRephrased()` run for real, because they are what the
  * requirements above are about: stubbing either would leave these tests asserting the stub.
  *
@@ -995,7 +995,7 @@ describe('answerQuestion — the outcome carries its context for task 15.3', () 
  * The counter is stubbed at `CounterRpc` — the same seam `quota.service.ts` declares — so the spend
  * assertions are about the real `reserveForRequest` / `refundReservation` and not about a
  * reimplementation of them. The write seam is one object of four async functions, so nothing here
- * reproduces a PostgREST builder chain.
+ * reproduces a query builder chain.
  *
  * The strongest assertions are the spend ones, and they are counted rather than inferred:
  * `tryIncrement` exactly once for a chat request, exactly zero times for a covered one.
@@ -1054,7 +1054,7 @@ interface WriteStub {
   readonly writes: ChatWriteStore;
   /** Every row handed to `insertTurn`, flattened. Length is how "exactly two" is observed. */
   readonly rows: MessageInsert[];
-  readonly usageLogs: TablesInsert<'usage_logs'>[];
+  readonly usageLogs: UsageLogInsert[];
   readonly touched: string[];
 }
 
@@ -1067,7 +1067,7 @@ function writeStub(
   } = {},
 ): WriteStub {
   const rows: MessageInsert[] = [];
-  const usageLogs: TablesInsert<'usage_logs'>[] = [];
+  const usageLogs: UsageLogInsert[] = [];
   const touched: string[] = [];
   let nextId = 0;
 
@@ -1641,7 +1641,7 @@ describe('chatTurn — failures and degradations', () => {
   });
 
   it('propagates a persistence failure rather than reporting an answer that was not stored', async () => {
-    const store = writeStub({ insertError: new Error('postgrest: insert failed') });
+    const store = writeStub({ insertError: new Error('db: insert failed') });
     const counter = counterStub();
 
     await expect(
@@ -1659,7 +1659,7 @@ describe('chatTurn — failures and degradations', () => {
      * The audit write never throws: on a success path it would turn a served turn into a 500, and on a
      * failure path it would replace `QUOTA_EXCEEDED` with "something went wrong".
      */
-    const store = writeStub({ usageLogError: new Error('postgrest: usage_logs unavailable') });
+    const store = writeStub({ usageLogError: new Error('db: usage_logs unavailable') });
     const counter = counterStub();
 
     const result = await chatTurn(
