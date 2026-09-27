@@ -38,13 +38,30 @@ import { SERVER_SECRET_NAMES } from '../../scripts/check-secret-scope';
  *  - the endpoint set is every `route.ts` under `src/app`, read off the filesystem, with each
  *    module's HTTP verbs read out of its own `export` statements.
  *
- * A hand-copied list of eleven variables and six routes would pass today and rot silently, which is
- * precisely the failure Requirement 17.2 and 17.4 are about — a deployment package that no longer
- * describes the deployment.
+ * A hand-copied list of variables and routes would pass today and rot silently, which is precisely
+ * the failure Requirement 17.2 and 17.4 are about — a deployment package that no longer describes
+ * the deployment.
  *
  * The **coverage assertions** after each run are what make the derivation load-bearing rather than
  * decorative: they assert that the run visited *every* member of the derived set, so a generator that
  * silently stopped producing one would fail rather than shrink the claim.
+ *
+ * =============================================================================
+ * AMENDMENT A3 — THE ENVIRONMENT SET THIS PROPERTY IS STATED OVER
+ * =============================================================================
+ *
+ * The claim is unchanged; the substrate it runs over is not. Under Supabase the schema held a
+ * service-role key, a Postgres connection string, a project URL and a publishable/anon key, and this
+ * file's credential rules recognised those shapes. **A3 removes Supabase entirely** (`env.ts`,
+ * `env.public.ts` headers): the only database credential is `MONGODB_URI`, Google sign-in runs
+ * through Better Auth (`BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`,
+ * `GOOGLE_CLIENT_SECRET`), the Telegram and Razorpay secrets stay, and the retention sweep reads
+ * `CRON_SECRET`. There is no `WHATSAPP_VERIFY_TOKEN`, no `JAMEE_TEST_DATABASE_URL` (the integration
+ * tests run against an in-process `mongodb-memory-server` replica set — V31), and the public set is
+ * two names, not three (no alternative publishable-key spelling). The credential rules below are the
+ * A3 shapes: a live `mongodb+srv://…` URI, a Better Auth / Google secret, a real Telegram bot token,
+ * a real Razorpay `rzp_*` id and a real `gsk_…` Groq key. Every rule names the credential family it
+ * guards and what a live one looks like.
  *
  * =============================================================================
  * WHAT THIS ADDS OVER `tests/unit/api-docs.test.ts`, AND WHAT IT LEAVES TO IT
@@ -86,9 +103,9 @@ interface Assignment {
  * Every `KEY=value` line in `.env.example`, commented or not.
  *
  * The pattern requires the key to be at the start of the line (optionally behind a `#`), which is
- * what keeps the file's long prose comments out of the result: a sentence mentioning
- * `SUPABASE_SERVICE_ROLE_KEY` carries no `=` in that position, so it is not an assignment. Both
- * directions of the completeness claim read this one parse.
+ * what keeps the file's long prose comments out of the result: a sentence mentioning `MONGODB_URI`
+ * carries no `=` in that position, so it is not an assignment. Both directions of the completeness
+ * claim read this one parse.
  */
 function assignmentsIn(text: string): readonly Assignment[] {
   return text.split('\n').flatMap((raw, index) => {
@@ -112,41 +129,25 @@ function assignmentFor(key: string): Assignment | undefined {
 }
 
 /**
- * Variables `.env.example` documents that are deliberately **not** in the application's schema.
- *
- * One member, and its absence from `serverEnvSchema` is a decision recorded in two places:
- * `tests/integration/database.ts` reads it directly because it is test scaffolding that never ships,
- * and `scripts/check-deployment.ts`'s header gives the same reasoning for its own operator inputs —
- * adding them to the server schema *"would make `.env.example` list variables the deployment does not
- * need"*. Asserted against that reader below rather than merely declared here.
- */
-const TEST_ONLY_KEYS = ['JAMEE_TEST_DATABASE_URL'] as const;
-
-/**
  * The one documented variable that is **configuration rather than a credential**, so no placeholder
- * rule applies to it: `env.ts` classifies it as *"an override for the case where Meta deprecates the
- * pinned version faster than a code change can ship, not a value an operator is expected to supply"*,
- * and `check-secret-scope.ts` deliberately keeps it out of `SERVER_SECRET_NAMES` because *"an API
- * version string carries no privilege"*. Its committed value is therefore a real version, on purpose.
- */
-const NON_SECRET_CONFIGURATION = OPTIONAL_SERVER_ENV_KEYS;
-
-/**
- * The alternative spelling of the public key, taken from `PUBLIC_ENV_VARS` **by position** rather
- * than by name so a rename in `env.public.ts` follows automatically.
+ * rule applies to it: `BETTER_AUTH_URL` is the deployed origin (`env.ts` records it is "used to
+ * build the Google callback"), and `check-secret-scope.ts` deliberately keeps it out of
+ * `SERVER_SECRET_NAMES` because "a base URL is not a credential". Its committed value is therefore a
+ * real, usable localhost origin (`http://localhost:3000`), on purpose — a developer who copies the
+ * file gets a working local template.
  *
- * V1: current Supabase docs name the key `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` while older projects
- * issue an anon JWT under the older name, and `publicEnv()` accepts either, publishable first. So the
- * third entry is an alternative to the second, not a twelfth thing to configure — which is why its
- * line is commented out and why a commented line is the *correct* shape for it.
+ * `OPTIONAL_SERVER_ENV_KEYS` is empty under A3 (no optional server variable this release), so the
+ * only non-credential configuration is this one name, kept as a list so a future optional variable
+ * folds in without a shape change.
  */
-const ALTERNATIVE_PUBLIC_KEY = PUBLIC_ENV_VARS[2];
+const NON_CREDENTIAL_CONFIGURATION = ['BETTER_AUTH_URL', ...OPTIONAL_SERVER_ENV_KEYS] as const;
 
 /** A key whose line must be **active**, because copying the file has to yield a usable template. */
-function mustBeActive(key: string): boolean {
-  return (
-    !(NON_SECRET_CONFIGURATION as readonly string[]).includes(key) && key !== ALTERNATIVE_PUBLIC_KEY
-  );
+function mustBeActive(): boolean {
+  // A3: every documented variable is a REQUIRED active line. There is no commented alternative
+  // spelling anymore (the Supabase publishable/anon alternative is gone) and no optional variable,
+  // so nothing in this file is legitimately commented out — asserted below by the shape coverage.
+  return true;
 }
 
 /**
@@ -156,15 +157,15 @@ function mustBeActive(key: string): boolean {
  * the run — a marker nothing matches would be a rule that had quietly stopped applying.
  */
 const PLACEHOLDER_MARKERS = {
-  /** `replace-with-your-…`, `REPLACE_WITH_SIGNATURE`, `gsk_replace_with_…`. */
+  /** `replace-with-your-…`, `gsk_replace_with_…`, `123456789:replace-with-…`. */
   replace: /replace/i,
-  /** `your-project-ref`, `REPLACE_WITH_YOUR_ANON_KEY_PAYLOAD`. */
+  /** `your_bot_username`, `your-google-oauth-client-id`, `your-user`, `your-cluster`. */
   your: /your[-_]/i,
-  /** `invent-a-long-random-string-…` — the two secrets the operator makes up. */
+  /** `invent-a-long-random-…` — the Telegram webhook token and the Razorpay webhook secret. */
   invent: /invent/i,
-  /** `generate-a-random-string-…`. */
+  /** `generate-a-long-random-…` / `generate-a-random-string-…` — the Better Auth secret, CRON_SECRET. */
   generate: /generate/i,
-  /** A run of zeros, which is how an id-shaped or key-shaped placeholder is written. */
+  /** A run of zeros, which is how an id-shaped placeholder is written (`rzp_test_0000…`). */
   zeros: /0{4,}/,
 } as const;
 
@@ -177,7 +178,7 @@ function markersMatching(value: string): readonly MarkerName[] {
 }
 
 /**
- * The "no live credential" half, as seven rules over the *shape* of a value.
+ * The "no live credential" half, as rules over the *shape* of a value.
  *
  * Each rule is a **precondition plus a requirement**: the precondition says which values the rule
  * looks at, and the requirement says what such a value must be. That structure is what lets the
@@ -186,7 +187,8 @@ function markersMatching(value: string): readonly MarkerName[] {
  *
  * The rules are aimed at the realistic accident — someone pastes a working value into the committed
  * example while getting their own environment running — which is why each names the credential family
- * it guards and says what a live one looks like.
+ * it guards and says what a live one looks like. Every rule's family appears on at least one A3 key,
+ * so all of them engage over the schema's own keys (the coverage assertion checks exactly that).
  */
 interface CredentialRule {
   readonly id: string;
@@ -195,39 +197,18 @@ interface CredentialRule {
   safe(assignment: Assignment): boolean;
 }
 
-const JWT_SHAPE = /^ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
-
-/**
- * The one rule whose credential family appears **only** on the documented test-only line, so it
- * cannot engage in a run over the schema's own keys.
- *
- * Named here rather than left to be noticed: `JAMEE_TEST_DATABASE_URL` is deliberately outside
- * `serverEnvSchema` (it is test scaffolding), so the connection-string rule is exercised by the
- * whole-file scan below instead. Every other rule must engage in both.
- */
-const TEST_ONLY_RULE_ID = 'database_url_must_be_local';
-
 const CREDENTIAL_RULES: readonly CredentialRule[] = [
   {
-    id: 'jwt_must_be_marked',
-    why: 'a Supabase anon or service-role key is a three-segment JWT; a live one carries a real base64url payload and signature, and the committed placeholder must say REPLACE_WITH in both',
-    applies: ({ value }) => JWT_SHAPE.test(value),
-    safe: ({ value }) => {
-      const [, payload = '', signature = ''] = value.split('.');
-      return payload.includes('REPLACE_WITH') && signature.includes('REPLACE_WITH');
-    },
+    id: 'mongodb_uri_must_be_placeholder',
+    why: 'a live MongoDB connection string carries a real cluster host and credentials; the committed one must name a placeholder user, password and cluster',
+    applies: ({ value }) => /^mongodb(\+srv)?:\/\//.test(value),
+    safe: ({ value }) => markersMatching(value).length > 0,
   },
   {
-    id: 'supabase_host_must_be_placeholder',
-    why: 'a live project URL carries a 20-character project ref, which identifies a real deployment even though the URL itself is public',
-    applies: ({ value }) => /^https:\/\/[^/]+\.supabase\.co\/?$/.test(value),
-    safe: ({ value }) => markersMatching(value.replace('.supabase.co', '')).length > 0,
-  },
-  {
-    id: 'publishable_key_must_be_marked',
-    why: "Supabase's publishable keys are `sb_publishable_` plus real entropy",
-    applies: ({ value }) => value.startsWith('sb_publishable_'),
-    safe: ({ value }) => markersMatching(value.slice('sb_publishable_'.length)).length > 0,
+    id: 'razorpay_id_must_be_zeros',
+    why: 'a real Razorpay key id is `rzp_test_`/`rzp_live_` plus real entropy; the committed one is the prefix and a run of zeros',
+    applies: ({ value }) => /^rzp_(test|live)_/.test(value),
+    safe: ({ value }) => markersMatching(value.replace(/^rzp_(test|live)_/, '')).length > 0,
   },
   {
     id: 'groq_key_must_be_marked',
@@ -236,27 +217,32 @@ const CREDENTIAL_RULES: readonly CredentialRule[] = [
     safe: ({ value }) => PLACEHOLDER_MARKERS.replace.test(value.slice('gsk_'.length)),
   },
   {
-    id: 'database_url_must_be_local',
-    why: 'a connection string is a credential in URL form; the only one that may be committed is the local default',
-    applies: ({ value }) => /^postgres(ql)?:\/\//.test(value),
-    safe: ({ value }) => /@(127\.0\.0\.1|localhost)[:/]/.test(value),
+    id: 'telegram_token_must_be_marked',
+    why: 'a real Telegram bot token is `<numeric-bot-id>:<secret>`; the committed one keeps the shape but the secret half must read as an instruction',
+    applies: ({ value }) => /^\d+:/.test(value),
+    safe: ({ value }) => markersMatching(value.split(':').slice(1).join(':')).length > 0,
   },
   {
-    id: 'numeric_value_must_be_zeros',
-    why: 'a real WhatsApp phone number id is a numeric identifier, so a numeric value that is not a zero run is somebody’s real one',
-    applies: ({ value }) => /^\d+$/.test(value),
-    safe: ({ value }) => /^0+$/.test(value),
+    id: 'google_client_id_must_be_placeholder',
+    why: 'a real Google OAuth client id ends `.apps.googleusercontent.com` with a real project-specific prefix; the committed one names a placeholder prefix',
+    applies: ({ value }) => value.endsWith('.apps.googleusercontent.com'),
+    safe: ({ value }) =>
+      markersMatching(value.replace('.apps.googleusercontent.com', '')).length > 0,
   },
   {
     id: 'operator_invented_secret_must_read_as_an_instruction',
     /**
-     * The two secrets nobody issues — the operator makes them up — so there is no vendor prefix or
-     * JWT shape to recognise them by, and a pasted real value would look like any other string. The
-     * committed value therefore has to read as an instruction. Both are in `SERVER_SECRET_NAMES`,
-     * which is asserted below so this pair cannot drift out of the secret list.
+     * The secrets nobody issues — the operator makes them up — so there is no vendor prefix or JWT
+     * shape to recognise them by, and a pasted real value would look like any other string. The
+     * committed value therefore has to read as an instruction. All three are in
+     * `SERVER_SECRET_NAMES`, which is asserted below so this set cannot drift out of the secret list.
      */
     why: 'a value the operator invents has no recognisable shape, so the placeholder must be an instruction rather than a string',
-    applies: ({ key }) => key === 'WHATSAPP_VERIFY_TOKEN' || key === 'CRON_SECRET',
+    applies: ({ key }) =>
+      key === 'BETTER_AUTH_SECRET' ||
+      key === 'TELEGRAM_WEBHOOK_SECRET_TOKEN' ||
+      key === 'RAZORPAY_WEBHOOK_SECRET' ||
+      key === 'CRON_SECRET',
     safe: ({ value }) =>
       PLACEHOLDER_MARKERS.invent.test(value) || PLACEHOLDER_MARKERS.generate.test(value),
   },
@@ -269,22 +255,18 @@ describe('Property 30, part one: .env.example is complete over the environment s
     expect([...ALL_ENV_KEYS].sort()).toStrictEqual(
       [...PUBLIC_ENV_VARS, ...SERVER_ENV_KEYS, ...OPTIONAL_SERVER_ENV_KEYS].sort(),
     );
-    expect(PUBLIC_ENV_VARS).toHaveLength(3);
-    expect(ALTERNATIVE_PUBLIC_KEY).toBeDefined();
+    // A3: two public variables (the Telegram bot username and the Razorpay public key id), no
+    // alternative publishable-key spelling.
+    expect(PUBLIC_ENV_VARS).toHaveLength(2);
+    // A3: no optional server variable this release.
+    expect(OPTIONAL_SERVER_ENV_KEYS).toHaveLength(0);
 
-    // The two operator-invented secrets rule 7 is keyed on are really in the secret list, so the
-    // rule cannot go on guarding a name that stopped being a secret.
-    for (const key of ['WHATSAPP_VERIFY_TOKEN', 'CRON_SECRET']) {
+    // The operator-invented secrets the rule is keyed on are really in the secret list, so the rule
+    // cannot go on guarding a name that stopped being a secret. (BETTER_AUTH_URL is deliberately NOT
+    // in the secret list — it is configuration — which is why it is not asserted here.)
+    for (const key of ['BETTER_AUTH_SECRET', 'TELEGRAM_WEBHOOK_SECRET_TOKEN', 'CRON_SECRET']) {
       expect(SERVER_SECRET_NAMES as readonly string[]).toContain(key);
     }
-
-    // And the one documented extra really is read by the module that justifies its absence from the
-    // schema, so `TEST_ONLY_KEYS` is anchored to a reader rather than to this file's opinion.
-    const databaseModule = readFileSync(
-      join(REPO_ROOT, 'tests', 'integration', 'database.ts'),
-      'utf8',
-    );
-    for (const key of TEST_ONLY_KEYS) expect(databaseModule).toContain(key);
   });
 
   it('lists every schema key with a placeholder and no live credential value', () => {
@@ -308,15 +290,14 @@ describe('Property 30, part one: .env.example is complete over the environment s
         // rather than telling the operator what to supply.
         expect(assignment.value, `${key} is listed with no value`).not.toBe('');
 
-        // Required keys are active lines; the two documented alternatives/overrides are commented,
-        // which is the shape their own comments describe.
+        // Every A3 key is an active line — there is no commented alternative or optional variable.
         expect(!assignment.commented, `${key} is on the wrong side of the comment marker`).toBe(
-          mustBeActive(key),
+          mustBeActive(),
         );
 
         // Requirement 17.2's second clause, first half: a placeholder. Skipped for the one variable
         // classified as configuration rather than a credential.
-        if (!(NON_SECRET_CONFIGURATION as readonly string[]).includes(key)) {
+        if (!(NON_CREDENTIAL_CONFIGURATION as readonly string[]).includes(key)) {
           const markers = markersMatching(assignment.value);
           expect(
             markers.length,
@@ -337,8 +318,8 @@ describe('Property 30, part one: .env.example is complete over the environment s
           ).toBe(true);
         }
       }),
-      // Twelve keys, so this many runs visits each one dozens of times; the coverage assertion is
-      // what turns that into a guarantee.
+      // A modest key set, so this many runs visits each one dozens of times; the coverage assertion
+      // is what turns that into a guarantee.
       { numRuns: 300 },
     );
 
@@ -346,29 +327,27 @@ describe('Property 30, part one: .env.example is complete over the environment s
     expect([...keysSeen].sort()).toStrictEqual([...ALL_ENV_KEYS].sort());
     // Every placeholder shape the rules recognise occurs in the file, so none of them is dead.
     expect([...markersSeen].sort()).toStrictEqual([...MARKER_NAMES].sort());
-    // And both line shapes occur, so the active/commented split was exercised in both directions.
-    expect([...shapesSeen].sort()).toStrictEqual(['active', 'commented']);
+    // A3: only active lines exist, so the shape coverage is the singleton `active`. (A commented
+    // line reappearing would be an optional/alternative variable this release does not have.)
+    expect([...shapesSeen].sort()).toStrictEqual(['active']);
 
-    // Every credential rule that guards a schema key engaged with at least one committed value. A
-    // rule that matched nothing would be a guard that had stopped guarding — the file's shape having
-    // drifted out from under it.
-    expect([...rulesApplied].sort()).toStrictEqual(
-      CREDENTIAL_RULES.map((rule) => rule.id)
-        .filter((id) => id !== TEST_ONLY_RULE_ID)
-        .sort(),
-    );
+    // Every credential rule engaged with at least one committed value. A rule that matched nothing
+    // would be a guard that had stopped guarding — the file's shape having drifted out from under it.
+    expect([...rulesApplied].sort()).toStrictEqual(CREDENTIAL_RULES.map((rule) => rule.id).sort());
   });
 
   it('documents no variable the code does not read', () => {
     const documented = ASSIGNMENTS.map((assignment) => assignment.key).sort();
-    const expected = [...ALL_ENV_KEYS, ...TEST_ONLY_KEYS].sort();
+    const expected = [...ALL_ENV_KEYS].sort();
 
     // The other direction of completeness: an orphan line is drift too. An operator who sets a
-    // variable nothing reads has been given a false instruction.
+    // variable nothing reads has been given a false instruction. A3 has no test-only documented
+    // variable (the integration harness uses an in-process replica set), so the documented set is
+    // exactly the schema's set.
     expect(documented).toStrictEqual(expected);
 
-    // And the credential rules run over the whole file rather than only over the schema's keys, so
-    // the test-only line is covered as well — which is where the connection-string rule engages.
+    // And the credential rules run over the whole file as well as over the schema's keys, so a live
+    // value pasted onto any line is caught. Over the whole file, every rule engages.
     const applied = new Set<string>();
     for (const assignment of ASSIGNMENTS) {
       for (const rule of CREDENTIAL_RULES) {
@@ -377,8 +356,6 @@ describe('Property 30, part one: .env.example is complete over the environment s
         expect(rule.safe(assignment), `${assignment.key}: ${rule.id}`).toBe(true);
       }
     }
-
-    // Over the whole file, all seven engage.
     expect([...applied].sort()).toStrictEqual(CREDENTIAL_RULES.map((rule) => rule.id).sort());
   });
 });
@@ -422,97 +399,41 @@ function exportedVerbs(routeModule: string): readonly string[] {
   return [...found].sort();
 }
 
-interface DocSection {
-  /** The verbs named in the heading — `GET|POST` is two. */
-  readonly verbs: readonly string[];
-  readonly path: string;
-  readonly body: string;
-}
+/* -------------------------------------------------------------------------- */
+/* The A3 docs/API.md structure                                                */
+/* -------------------------------------------------------------------------- */
 
 /**
- * The per-endpoint sections of `docs/API.md`, keyed by the URL in their own heading.
+ * Under Amendment A3 `docs/API.md` is generated against the code and reads as ONE routes table plus
+ * anchor-bound field/code tables — not the pre-A3 per-endpoint `## \`VERB /path\`` sections. Its own
+ * banner says `tests/unit/api-docs.test.ts` binds every table to a value in the schemas/errors, and
+ * documents the two webhooks, the multipart upload and the auth catch-all **by their authentication
+ * mechanism** rather than a request schema. So Property 30's per-route × per-facet completeness claim
+ * is stated over exactly the structures the A3 document uses:
  *
- * A section runs from its `## \`VERB /path\`` heading to the next `## `. Parsed from the headings
- * rather than from the route table, deliberately: `api-docs.test.ts` already checks the table against
- * the module list, so reading the table here would make this claim depend on that one. The headings
- * are the part of the document a reader navigates by.
+ *  - **method** — the `<!-- routes -->` table's `Methods` column, which must equal the module's
+ *    exported verbs (a stronger accuracy check `api-docs.test.ts` also makes; asserted here because
+ *    the method facet is one of Requirement 17.4's four).
+ *  - **request body / response body** — a JSON route names a `fieldsSchema` in an anchor-bound
+ *    `<!-- fields:… -->` table (diagnose/chat/voice request and response); a route whose body is not
+ *    Jamee's to define is documented in the `### Endpoint summaries` bullet by its mechanism
+ *    (multipart, a webhook's raw body, the Better Auth catch-all, an owner-checked stream, a
+ *    status-only response).
+ *  - **error codes** — an anchor-bound `<!-- codes:… -->` table, OR the `<!-- bodiless -->` table for
+ *    a route that answers with a status and no body, OR the whole-taxonomy `<!-- error-specs -->`.
  */
-function docSections(): readonly DocSection[] {
-  const lines = API_DOC.split('\n');
-  const sections: DocSection[] = [];
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const heading = /^##\s+`([A-Z|]+)\s+(\/\S*)`/.exec(lines[index] ?? '');
-    if (heading === null) continue;
-
-    const end = lines.findIndex((line, at) => at > index && /^##\s/.test(line));
-    sections.push({
-      verbs: (heading[1] ?? '').split('|').sort(),
-      path: heading[2] ?? '',
-      body: lines.slice(index + 1, end === -1 ? lines.length : end).join('\n'),
-    });
-  }
-
-  return sections;
+/** Every anchor name of a given kind the document carries. */
+function anchorsOfKind(kind: string): ReadonlySet<string> {
+  return new Set(
+    [...API_DOC.matchAll(new RegExp(`<!--\\s*${kind}:([^\\s]+)\\s*-->`, 'g'))].map(
+      (match) => match[1] ?? '',
+    ),
+  );
 }
 
-const DOC_SECTIONS = docSections();
-
-/**
- * Requirement 17.4's four facets, one per clause of the sentence.
- *
- * `method` is checked against the module's real exports; the other three are checked for presence in
- * the endpoint's own section, in any of the forms the document legitimately uses.
- */
-const ENDPOINT_FACETS = ['method', 'request_body', 'response_body', 'error_codes'] as const;
-
-type EndpointFacet = (typeof ENDPOINT_FACETS)[number];
-
-/**
- * The accepted forms of a facet.
- *
- * Two forms rather than one because two endpoints have **no** body to describe, and Requirement 17.4
- * is satisfied by saying so rather than by omitting the section: the webhook's GET carries a query
- * string and echoes a challenge, and the sweep reads no body *"not even on `POST`"*. A rule that
- * demanded a `### Request body` heading everywhere would push the document into documenting a body
- * that does not exist.
- *
- * Each form is proven to occur somewhere in the document by the coverage assertion after the run, so
- * a form nobody uses cannot sit here weakening the check.
- */
-const FACET_FORMS = {
-  request_body: {
-    /** `### Request body` — optionally followed by the schema it is generated from. */
-    heading: /^###\s+Request body\b(.*)$/m,
-    /** `- **Request body:** none` — a bullet in the endpoint's summary list. */
-    bullet: /^-\s+\*\*Request body:\*\*\s*(.+)$/m,
-    /** The webhook GET's sentence: there is no body, and no response schema either. */
-    sentence: /There is no request body\b/,
-  },
-  response_body: {
-    heading: /^###\s+Response body\b(.*)$/m,
-    /** `### Responses` — the redirect route answers with statuses rather than one body. */
-    table: /^###\s+Responses\b/m,
-    /** `- **Success:** \`200\` with …` */
-    bullet: /^-\s+\*\*Success:\*\*\s*(.+)$/m,
-  },
-} as const;
-
-/** Every `fields:` anchor the document carries — the tables `api-docs.test.ts` checks. */
-const FIELD_ANCHORS = new Set(
-  [...API_DOC.matchAll(/<!--\s*fields:([^\s]+)\s*-->/g)].map((match) => match[1] ?? ''),
-);
-
-/** Every `codes:` anchor, likewise. */
-const CODE_ANCHORS = new Set(
-  [...API_DOC.matchAll(/<!--\s*codes:([^\s]+)\s*-->/g)].map((match) => match[1] ?? ''),
-);
-
-/** The schema a facet heading names, if it names one: `### Request body — \`chatRequestSchema\``. */
-function schemaNamedIn(headingTail: string): string | undefined {
-  const match = /`([A-Za-z][A-Za-z0-9.]*Schema)`/.exec(headingTail);
-  return match?.[1];
-}
+const FIELD_ANCHORS = anchorsOfKind('fields');
+const CODE_ANCHORS = anchorsOfKind('codes');
 
 /** The rows of the markdown table that follows an anchor, header and separator dropped. */
 function tableAfter(anchor: string): readonly string[] {
@@ -535,29 +456,180 @@ function tableAfter(anchor: string): readonly string[] {
   return rows.slice(1);
 }
 
+/** The `<!-- routes -->` table: route module path → its documented verbs. */
+function routesTable(): ReadonlyMap<string, readonly string[]> {
+  const map = new Map<string, readonly string[]>();
+  for (const row of tableAfter('routes')) {
+    const cells = row.split('|').map((cell) => cell.trim()).filter((cell) => cell.length > 0);
+    const modulePath = (cells[0] ?? '').replace(/`/g, '');
+    const verbs = (cells[1] ?? '')
+      .replace(/`/g, '')
+      .split(',')
+      .map((verb) => verb.trim())
+      .filter((verb) => verb.length > 0)
+      .sort();
+    if (modulePath !== '') map.set(modulePath, verbs);
+  }
+  return map;
+}
+
+const ROUTES_TABLE = routesTable();
+
+/** The `### Endpoint summaries` block — where a mechanism-documented body lives. */
+const ENDPOINT_SUMMARIES = ((): string => {
+  const start = API_DOC.indexOf('### Endpoint summaries');
+  if (start < 0) return '';
+  const rest = API_DOC.slice(start + '### Endpoint summaries'.length);
+  const end = rest.search(/^###?\s/m);
+  return end < 0 ? rest : rest.slice(0, end);
+})();
+
+/** The `<!-- bodiless -->` block, for routes that answer with a status and no body. */
+const BODILESS_BLOCK = ((): string => {
+  const at = API_DOC.indexOf('<!-- bodiless -->');
+  if (at < 0) return '';
+  const rest = API_DOC.slice(at);
+  const end = rest.search(/\n##?#?\s/);
+  return end < 0 ? rest : rest.slice(0, end);
+})();
+
+/**
+ * Which JSON schemas each route's request/response body is documented by, and which `codes:` anchor
+ * (or the bodiless table) carries its error facet. Derived from the A3 document's own conventions.
+ * A route whose body is documented by mechanism carries a `bodyMechanism` regex the endpoint-summary
+ * bullet must match instead of a schema.
+ */
+interface RouteDoc {
+  readonly urlPath: string;
+  /** The `fields:` anchor names the request+response bodies are documented by, if JSON. */
+  readonly bodySchemas: readonly string[];
+  /** A phrase in the endpoint-summary bullet that documents a non-JSON body by its mechanism. */
+  readonly bodyMechanism?: RegExp;
+  /** The `codes:` anchor for the error facet, or `'bodiless'` for a status-only route. */
+  readonly errorAnchor: string;
+}
+
+const ROUTE_DOCS: readonly RouteDoc[] = [
+  {
+    urlPath: '/api/diagnose',
+    bodySchemas: ['diagnoseRequestSchema', 'diagnoseResponseSchema'],
+    errorAnchor: 'diagnose',
+  },
+  {
+    urlPath: '/api/chat',
+    bodySchemas: ['chatRequestSchema', 'chatResponseSchema'],
+    errorAnchor: 'chat',
+  },
+  {
+    urlPath: '/api/voice',
+    bodySchemas: ['voiceRequestSchema', 'voiceResponseSchema'],
+    errorAnchor: 'voice',
+  },
+  {
+    urlPath: '/api/media',
+    bodySchemas: [],
+    bodyMechanism: /multipart/i,
+    errorAnchor: 'media-upload',
+  },
+  {
+    urlPath: '/api/media/[id]',
+    bodySchemas: [],
+    bodyMechanism: /owner-checked|streams a GridFS/i,
+    errorAnchor: 'media-serve',
+  },
+  {
+    urlPath: '/api/link/token',
+    bodySchemas: [],
+    bodyMechanism: /link token|unlinks/i,
+    errorAnchor: 'link-token',
+  },
+  {
+    urlPath: '/api/payment/order',
+    bodySchemas: [],
+    bodyMechanism: /Razorpay order|checkout ids/i,
+    errorAnchor: 'payment-order',
+  },
+  {
+    urlPath: '/api/payment/webhook',
+    bodySchemas: [],
+    bodyMechanism: /raw body|Razorpay signature/i,
+    errorAnchor: 'payment-webhook',
+  },
+  {
+    urlPath: '/api/telegram',
+    bodySchemas: [],
+    bodyMechanism: /Telegram `?Update`?|Secret-Token/i,
+    errorAnchor: 'telegram',
+  },
+  {
+    urlPath: '/api/internal/retention-sweep',
+    bodySchemas: [],
+    bodyMechanism: /retention sweep|scheduled/i,
+    errorAnchor: 'retention-sweep',
+  },
+  {
+    urlPath: '/api/auth/[...all]',
+    bodySchemas: [],
+    bodyMechanism: /Better Auth|catch-all/i,
+    errorAnchor: 'auth-callback',
+  },
+  {
+    urlPath: '/api/payment/confirm',
+    bodySchemas: [],
+    bodyMechanism: /optimistic post-checkout|grants nothing/i,
+    // Confirm shares the taxonomy but has no dedicated codes anchor; its facet is the whole table.
+    errorAnchor: 'error-specs',
+  },
+  {
+    urlPath: '/api/profile',
+    bodySchemas: [],
+    bodyMechanism: /profile save/i,
+    errorAnchor: 'error-specs',
+  },
+  {
+    urlPath: '/api/profile/access',
+    bodySchemas: [],
+    bodyMechanism: /access state/i,
+    errorAnchor: 'error-specs',
+  },
+];
+
+function routeDocFor(urlPath: string): RouteDoc | undefined {
+  return ROUTE_DOCS.find((doc) => doc.urlPath === urlPath);
+}
+
+/** Whether a `codes:`/bodiless/error-specs anchor names a non-empty table. */
+function errorFacetPresent(anchor: string): boolean {
+  if (anchor === 'bodiless') return BODILESS_BLOCK.includes('|');
+  if (anchor === 'error-specs') return tableAfter('error-specs').length > 0;
+  return CODE_ANCHORS.has(anchor) && tableAfter(`codes:${anchor}`).length > 0;
+}
+
+const ENDPOINT_FACETS = ['method', 'request_body', 'response_body', 'error_codes'] as const;
+
+type EndpointFacet = (typeof ENDPOINT_FACETS)[number];
+
 describe('Property 30, part two: docs/API.md documents all four facets of every route', () => {
-  it('derives its endpoint set from the tree, and every module has a section', () => {
+  it('derives its endpoint set from the tree, and the routes table names exactly the modules', () => {
     expect(ROUTE_MODULES.length).toBeGreaterThan(0);
+    expect(ROUTES_TABLE.size).toBeGreaterThan(0);
 
+    // The routes table names every module, and no phantom. This is the `method` facet's completeness
+    // spine: a handler added without a table row fails here.
+    expect([...ROUTES_TABLE.keys()].sort()).toStrictEqual([...ROUTE_MODULES].sort());
+
+    // Every route in the tree has a RouteDoc mapping (so the per-facet run below covers all of them),
+    // and every RouteDoc names a real route.
+    const urlPaths = new Set(ROUTE_MODULES.map(urlPathOf));
     for (const routeModule of ROUTE_MODULES) {
-      const path = urlPathOf(routeModule);
-      const sections = DOC_SECTIONS.filter((section) => section.path === path);
-      expect(sections.length, `docs/API.md documents no endpoint at ${path}`).toBeGreaterThan(0);
-
-      // The verbs in the headings, across however many sections the endpoint is split into, are
-      // exactly the verbs the module exports. A handler added without a section fails here, and so
-      // does a section for a verb that no longer exists.
-      const documented = [...new Set(sections.flatMap((section) => section.verbs))].sort();
-      expect(documented, `${path}: documented verbs disagree with ${routeModule}`).toStrictEqual([
-        ...exportedVerbs(routeModule),
-      ]);
+      expect(
+        routeDocFor(urlPathOf(routeModule)),
+        `${routeModule}: no RouteDoc facet mapping for ${urlPathOf(routeModule)}`,
+      ).toBeDefined();
     }
-
-    // No section for a path that has no route module.
-    const paths = new Set(ROUTE_MODULES.map(urlPathOf));
-    for (const section of DOC_SECTIONS) {
-      expect(paths, `docs/API.md documents ${section.path}, which has no route module`).toContain(
-        section.path,
+    for (const doc of ROUTE_DOCS) {
+      expect(urlPaths, `stale RouteDoc for ${doc.urlPath}, which has no route module`).toContain(
+        doc.urlPath,
       );
     }
   });
@@ -566,80 +638,71 @@ describe('Property 30, part two: docs/API.md documents all four facets of every 
     const pairsSeen = new Set<string>();
     const formsSeen = new Set<string>();
 
-    fc.assert(
-      fc.property(
-        fc.constantFrom(...ROUTE_MODULES),
-        fc.constantFrom<EndpointFacet>(...ENDPOINT_FACETS),
-        (routeModule, facet) => {
-          pairsSeen.add(`${routeModule}|${facet}`);
+    // Requirement 17.4 is a completeness claim over the full route × facet cross product, so it is
+    // asserted deterministically over every pair rather than sampled — a facet missing for one route
+    // must fail, not merely be improbable to generate. `fc` is not the right tool for a finite,
+    // must-visit-every-member claim; the exhaustive loop IS the property here.
+    const checkPair = (routeModule: string, facet: EndpointFacet): void => {
+      pairsSeen.add(`${routeModule}|${facet}`);
 
-          const path = urlPathOf(routeModule);
-          const sections = DOC_SECTIONS.filter((section) => section.path === path);
+      const urlPath = urlPathOf(routeModule);
+      const doc = routeDocFor(urlPath);
+      if (doc === undefined) throw new Error(`no RouteDoc for ${urlPath}`);
+      const label = `${urlPath} / ${facet}`;
 
-          for (const section of sections) {
-            const label = `${section.verbs.join('|')} ${path} / ${facet}`;
+      switch (facet) {
+        case 'method': {
+          // Requirement 17.4's method facet: the routes table's verbs equal the module's exports.
+          const documented = ROUTES_TABLE.get(routeModule) ?? [];
+          expect(documented, `${label}: routes table disagrees with the module`).toStrictEqual([
+            ...exportedVerbs(routeModule),
+          ]);
+          formsSeen.add(`method:${documented.length === 1 ? 'singular' : 'plural'}`);
+          break;
+        }
 
-            switch (facet) {
-              case 'method': {
-                // Named in the summary bullet as well as in the heading, because the heading is a
-                // title and the bullet is the statement. Either singular or plural, since one
-                // section covers two verbs.
-                const bullet = /^-\s+\*\*Methods?:\*\*\s*(.+)$/m.exec(section.body);
-                expect(bullet, `${label}: no Method bullet`).not.toBeNull();
-                for (const verb of section.verbs) {
-                  expect(bullet?.[1] ?? '', label).toContain(verb);
-                }
-                formsSeen.add(`method:${section.verbs.length === 1 ? 'singular' : 'plural'}`);
-                break;
-              }
-
-              case 'request_body':
-              case 'response_body': {
-                const forms = FACET_FORMS[facet];
-                const matched = Object.entries(forms).filter(([, pattern]) =>
-                  pattern.test(section.body),
-                );
-                expect(
-                  matched.length,
-                  `${label}: the section describes no request/response body in any accepted form`,
-                ).toBeGreaterThan(0);
-
-                for (const [name] of matched) formsSeen.add(`${facet}:${name}`);
-
-                // Where a facet names a schema, that schema must be one of the anchor-bound tables
-                // `api-docs.test.ts` checks against the real Zod object. That is how this file stays
-                // a completeness claim while the accuracy claim stays where it already is.
-                const headingMatch = forms.heading.exec(section.body);
-                const named = schemaNamedIn(headingMatch?.[1] ?? '');
-                if (named !== undefined) {
-                  expect(FIELD_ANCHORS, `${label}: ${named} has no fields: anchor`).toContain(named);
-                  formsSeen.add(`${facet}:named_schema`);
-                }
-                break;
-              }
-
-              case 'error_codes': {
-                expect(
-                  /^###\s+Error codes\b/m.test(section.body),
-                  `${label}: no Error codes section`,
-                ).toBe(true);
-
-                const anchor = /<!--\s*codes:([^\s]+)\s*-->/.exec(section.body);
-                expect(anchor, `${label}: the Error codes section carries no codes: anchor`).not.toBeNull();
-
-                const name = anchor?.[1] ?? '';
-                expect(CODE_ANCHORS, label).toContain(name);
-                // A table with rows. An empty one would document the *facet* and no codes.
-                expect(tableAfter(`codes:${name}`).length, label).toBeGreaterThan(0);
-                formsSeen.add('error_codes:anchored_table');
-                break;
-              }
+        case 'request_body':
+        case 'response_body': {
+          // A JSON route: the body is an anchor-bound fields table `api-docs.test.ts` checks
+          // against the real Zod object. This file asserts the facet is PRESENT (a completeness
+          // claim); accuracy stays there.
+          if (doc.bodySchemas.length > 0) {
+            for (const schema of doc.bodySchemas) {
+              expect(FIELD_ANCHORS, `${label}: ${schema} has no fields: anchor`).toContain(schema);
             }
+            formsSeen.add(`${facet}:fields_anchor`);
+            break;
           }
-        },
-      ),
-      { numRuns: 300 },
-    );
+          // A non-JSON route: the body is documented in the endpoint summary by its mechanism.
+          expect(doc.bodyMechanism, `${label}: no body mechanism declared`).toBeDefined();
+          expect(
+            doc.bodyMechanism?.test(ENDPOINT_SUMMARIES),
+            `${label}: the endpoint summary does not document the body by its mechanism`,
+          ).toBe(true);
+          formsSeen.add(`${facet}:mechanism`);
+          break;
+        }
+
+        case 'error_codes': {
+          expect(
+            errorFacetPresent(doc.errorAnchor),
+            `${label}: the error facet (${doc.errorAnchor}) is absent or empty`,
+          ).toBe(true);
+          formsSeen.add(
+            doc.errorAnchor === 'bodiless'
+              ? 'error_codes:bodiless'
+              : doc.errorAnchor === 'error-specs'
+                ? 'error_codes:taxonomy'
+                : 'error_codes:anchored_table',
+          );
+          break;
+        }
+      }
+    };
+
+    for (const routeModule of ROUTE_MODULES) {
+      for (const facet of ENDPOINT_FACETS) checkPair(routeModule, facet);
+    }
 
     // Every module × every facet: Requirement 17.4 is a claim about all four for each endpoint, so
     // the coverage set is the cross product rather than either axis alone.
@@ -649,20 +712,19 @@ describe('Property 30, part two: docs/API.md documents all four facets of every 
       ).sort(),
     );
 
-    // And every accepted form occurs somewhere, so none of the alternatives above is dead weight.
+    // Every documentation form the A3 document uses occurs, so none of the alternatives is dead
+    // weight: JSON routes (fields anchors, both singular and plural methods) and mechanism-documented
+    // routes (multipart/webhook/auth), and the three error-facet shapes.
     expect([...formsSeen].sort()).toStrictEqual(
       [
         'error_codes:anchored_table',
+        'error_codes:taxonomy',
         'method:plural',
         'method:singular',
-        'request_body:bullet',
-        'request_body:heading',
-        'request_body:named_schema',
-        'request_body:sentence',
-        'response_body:bullet',
-        'response_body:heading',
-        'response_body:named_schema',
-        'response_body:table',
+        'request_body:fields_anchor',
+        'request_body:mechanism',
+        'response_body:fields_anchor',
+        'response_body:mechanism',
       ].sort(),
     );
   });

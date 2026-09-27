@@ -33,8 +33,9 @@ import { SUPPORTED_LANGUAGES, type Language } from '@/lib/schemas';
  * *"For any candidate image characterized by (MIME type, byte size), the uploader accepts it if
  * and only if the type is `image/jpeg`, `image/png`, or `image/webp` and the size is at most
  * 10 MB; for any candidate recording characterized by (duration, byte size), the recorder accepts
- * it if and only if the duration is at most 120 seconds and the size is at most 10 MB. Every
- * rejection states the accepted types or duration limit and the size limit."*
+ * it if and only if the duration is at most 120 seconds and the size is at most 3 MB (Amendment
+ * A3 lowered the voice cap from 10 MB to 3 MB — `MAX_AUDIO_BYTES`). Every rejection states the
+ * accepted types or duration limit and the size limit."*
  *
  * **Validates: Requirements 2.3, 2.4, 8.2, 8.3**
  *
@@ -122,7 +123,7 @@ import { SUPPORTED_LANGUAGES, type Language } from '@/lib/schemas';
  *
  * The container generator produces `aac` and `amr` in its **refused** set, and that is the
  * recorded state of the system rather than an oversight. `docs/VERIFIED_VALUES.md` (V14, and the
- * discrepancy note under it) records that V10's accepted list covers neither, that a WhatsApp
+ * discrepancy note under it) records that V10's accepted list covers neither, that a Telegram
  * voice note delivered in either is refused before the media download, and that **Requirement
  * 10.6 is therefore not satisfied for those two containers** — closing it needs a transcode step
  * or a second transcription provider, not a constant edit. Widening

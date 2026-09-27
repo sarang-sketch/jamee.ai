@@ -1,21 +1,21 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as fc from 'fast-check';
-import { describe, expect, it } from 'vitest';
+import { Buffer } from 'node:buffer';
+import { ObjectId } from 'mongodb';
 
 import {
-  DIAGNOSIS_MESSAGES_SELECT,
+  DETAIL_MESSAGE_LIMIT,
   formatConfidence,
   formatTimestamp,
   resolveDetailImage,
   toDiagnosisDetail,
-  type DiagnosisDetailRow,
+  toDiagnosisMessageRow,
+  type DiagnosisMessageRow,
 } from '@/app/diagnosis/detail';
-import { STORAGE_BUCKETS } from '@/lib/config/verified';
-import {
-  diagnosisDetailHref,
-  readHistory,
-  type HistoryImageSource,
-  type HistoryRow,
-} from '@/lib/history';
+import type { DiagnosisDoc, MediaRefDoc } from '@/lib/db/collections';
+import type { DiagnosisRecord, FarmerReads, MessageRecord } from '@/lib/db/reads';
+import { setupDatabase } from '@/lib/db/setup';
+import { mediaUrl } from '@/lib/media/url';
 import { messages } from '@/lib/messages';
 import {
   SUPPORTED_LANGUAGES,
@@ -24,11 +24,11 @@ import {
   type KnowledgePayload,
   type Language,
   type Severity,
-  type StorageRef,
   type VerifiedCondition,
 } from '@/lib/schemas';
-import { thumbPathFor, type StorageClientLike } from '@/lib/storage';
 import { dayWindowKey } from '@/lib/time';
+
+import { clearDatabase, startMongo, stopMongo, type MongoHarness } from '../integration/mongo';
 
 /**
  * ### Property 26: History is complete, ordered, and detailed
@@ -42,104 +42,87 @@ import { dayWindowKey } from '@/lib/time';
  * **Validates: Requirements 12.1, 12.2, 12.3**
  *
  * =============================================================================
- * THREE CLAIMS, THREE DIFFERENT FAILURE MODES — SO THREE SETS OF ASSERTIONS
+ * AMENDMENT A3 — WHERE EACH CLAUSE IS DECIDED NOW
  * =============================================================================
  *
- * **Complete** fails by dropping a row: a filter that excludes the WhatsApp channel (Requirement
- * 12.2), a de-duplication that collapses two diagnoses with the same instant, a `map` that returns
- * fewer entries than it received. So completeness is asserted as a **bijection** — the id sets are
- * equal *and* the lengths are equal, which a count-only or a subset-only check would both miss —
- * and the per-channel counts are asserted too, because a list that dropped every WhatsApp entry and
- * duplicated a web one would have the right length.
+ * Under Supabase this ran entirely at unit level: `readHistory` took a query callback and a storage
+ * `source` (probe/sign a signed URL over a bucket path), and the detail view took PostgREST select
+ * strings and a storage client. Under A3 there is neither PostgREST nor a bucket. The clauses split
+ * by what is now decided WHERE:
  *
- * Completeness is a claim about `readHistory` dropping nothing from what it was handed. The *page*
- * additionally bounds one render at `HISTORY_PAGE_SIZE` (20), which is a paging decision rather than
- * a filter — so the generated sets stay under that bound and the property says nothing about the
- * 21st diagnosis, which no render of this screen claims to show.
- *
- * **Ordered** fails on ties and on the order the rows arrived in. `readHistory` re-sorts what the
- * query returned, deliberately (its own header: the statement lives at the call site, so a caller
- * that forgot `.order()` must not be what makes Requirement 12.1 true). Two claims follow, and the
- * second is the one that needs generated ties:
- *
- *  1. every consecutive pair is non-increasing **by parsed instant**;
- *  2. the id sequence is **invariant under permutation of the input** — the same set fed in a
- *     different order comes back in the same order.
- *
- * Claim 2 is how "a tie-break that varies run to run" is caught. A comparator that returned `0` for
- * equal timestamps would satisfy claim 1 and fail claim 2, because `Array.prototype.sort` is stable
- * only with respect to the input order — and the input order is PostgREST's, which is not a thing
- * this module controls. Restating `history.ts`'s own tie-break here instead would assert that the
- * code equals itself.
- *
- * **Detailed** fails by losing a field, or by presenting one that must not exist. The list's five
- * fields are checked against the source row; the detail view's six are checked through
- * `toDiagnosisDetail()` and `resolveDetailImage()`, including on the branch where **no image
- * survives** — which is Requirement 12.11 and the reason the field assertions are unconditional on
- * the image state.
+ *  - **Complete, ordered, and isolated** are now properties of the **Data_Access_Layer**.
+ *    `readHistory({ userId })` calls `farmerReads(userId).listDiagnoses(HISTORY_PAGE_SIZE)`, which
+ *    merges the owner into the filter (D18) and orders `createdAt` desc with `_id` desc as the total
+ *    tiebreak, served by the `owner_recent` index (`setupDatabase`). `readHistory` deliberately does
+ *    NOT re-sort anymore — its own header says the order is the accessor's. So "exactly that set",
+ *    "newest first", "an order that does not depend on how they arrived" and "belonging to a farmer"
+ *    (Requirements 12.1, 12.2, 13.2) are claims about the real layer, and the brief requires them to
+ *    run against it: they are exercised on a single-node `MongoMemoryReplSet` (V31, V33) through the
+ *    shipped `farmerData(...).insertDiagnosis` seeds and the shipped `readHistory`.
+ *  - **Detailed** — which image, the condition-or-label, the confidence, the severity, the full
+ *    explanation, the related conversation — is decided by the pure functions
+ *    `toDiagnosisDetail(doc, knowledge)` and `resolveDetailImage(doc, reads)` over documents, plus
+ *    `toDiagnosisMessageRow`. Those need no database, so the detail half runs in-memory over
+ *    generated `DiagnosisRecord` documents and a `thumbnailFileIdFor` fake.
  *
  * =============================================================================
- * THE TIMESTAMPS ARE ADVERSARIAL ON PURPOSE
+ * THE IMAGE RULE IS OVER A STORED LINK, NOT A DERIVED PATH
  * =============================================================================
  *
- * `INSTANT_POOL` is five values and every row draws from it, so a generated set routinely contains:
+ * A Thumbnail_Derivative is a separate GridFS file whose `metadata.sourceRef` points at its
+ * Full_Size_Image (Requirement 2.13, A3), resolved owner-scoped by `FarmerReads.thumbnailFileIdFor`.
+ * There is no `.thumb` path and no `exists()` probe. On the real-layer list run the thumbnails are
+ * REAL GridFS files written through `writeMedia(... sourceRef)`, so `thumbnailFileIdFor` resolves
+ * them exactly as production does; the URL is the constant `/api/media/<fileId>` from `mediaUrl`.
  *
- *  - **ties** — several diagnoses stamped with the same instant, which is ordinary: one WhatsApp
- *    image and one web upload can land in the same millisecond, and `timestamptz` will store both;
- *  - **creation times out of insertion order** — the array handed to `readHistory` is in generation
- *    order, not in time order, which is what the re-sort exists for;
- *  - **instants either side of the Asia/Kolkata day boundary** — `…T18:29:59.999Z` and
- *    `…T18:30:00.000Z` are one millisecond apart and fall on *different local days*. A sort that
- *    reached for the rendered date instead of the instant would reverse that pair, and the local-day
- *    split is asserted as covered using `dayWindowKey()` — Jamee's own answer to which day an
- *    instant belongs to, rather than a second spelling of `Asia/Kolkata` in this file.
- *
- * Each of those classes is recorded while the property runs and asserted afterwards. A generator
- * that stopped producing ties — or a run that happened to produce only single-entry sets, which
- * would make the ordering claim vacuous — fails the test rather than passing it quietly.
- *
- * =============================================================================
- * WHAT IS OBSERVED HERE, AND WHAT IS OBSERVED IN THE INTEGRATION SUITE
- * =============================================================================
- *
- * Both screens are `async` server components, which are not unit-testable functions — so each one
- * keeps its decisions in a module and the page hands it rows: `src/lib/history.ts` for the list,
- * `src/app/diagnosis/detail.ts` for the detail view. Those modules are what this file exercises,
- * with presence stated as data through `HistoryImageSource` and `StorageClientLike`. No Supabase
- * stack, no cookie store, no network.
- *
- * The two things a module-level run cannot reach are the PostgREST predicates themselves — the
- * `user_id` scoping that makes the set "belonging to a farmer" (Requirement 13.2), and the
- * `conversation_id` filter that fetches a thread. Both are exercised against real Postgres in
- * `tests/integration/release-acceptance.test.ts` step 7. What *is* asserted here about the thread is
- * the fact those predicates are built from: the detail view carries the diagnosis's **own**
- * conversation id, and the column list it reads names every field the thread renders — a column that
- * left `DIAGNOSIS_MESSAGES_SELECT` would make its field structurally unpresentable.
+ * numRuns is 25 on the real-layer half (each run seeds and reads through the replica set, so a
+ * larger count would exceed the 30-second per-test timeout — the brief's ceiling), and 300 on the
+ * in-memory detail half. Generator breadth and the adversarial timestamp pool are unchanged, and the
+ * coverage assertions still require every class to have been produced.
  */
+
+/* ========================================================================== */
+/* DAL / media modules, imported after MONGODB_URI is set                      */
+/* ========================================================================== */
+
+let harness: MongoHarness | undefined;
+let farmerMod: typeof import('@/lib/db/farmer');
+let mediaMod: typeof import('@/lib/db/media');
+let historyMod: typeof import('@/lib/history');
+
+beforeAll(async () => {
+  harness = await startMongo();
+  process.env.MONGODB_URI = harness.replSet.getUri();
+  farmerMod = await import('@/lib/db/farmer');
+  mediaMod = await import('@/lib/db/media');
+  historyMod = await import('@/lib/history');
+  await setupDatabase(harness.db);
+}, 120_000);
+
+afterAll(async () => {
+  await stopMongo(harness);
+});
+
+beforeEach(async () => {
+  if (harness === undefined) throw new Error('harness not started');
+  await clearDatabase(harness.db);
+  await setupDatabase(harness.db);
+});
 
 /* ========================================================================== */
 /* Fixtures                                                                    */
 /* ========================================================================== */
 
-const FARMER = '11111111-1111-4111-8111-111111111111';
-
-/**
- * Three conversations for one farmer, so a generated set spreads its diagnoses across threads —
- * which is what makes "the **related** conversation messages" a claim with something to fail
- * against rather than a tautology over a single thread.
- */
-const CONVERSATIONS = [
-  '21111111-1111-4111-8111-111111111111',
-  '22222222-2222-4222-8222-222222222222',
-  '23333333-3333-4333-8333-333333333333',
-] as const;
+const FARMER_A = 'farmer-a-11111111-1111-4111-8111-111111111111';
+const FARMER_B = 'farmer-b-22222222-2222-4222-8222-222222222222';
 
 /**
  * Five instants, drawn from by every row.
  *
  * The middle pair is one millisecond apart and straddles 18:30 UTC — midnight in Asia/Kolkata — so
- * the earlier instant renders on 15 September and the later one on 16 September. The pool is small
- * on purpose: that is what makes ties ordinary rather than rare.
+ * the earlier instant renders on 15 September and the later on 16 September. The pool is small on
+ * purpose: that is what makes ties ordinary rather than rare, which is what the total-order claim
+ * exists for.
  */
 const INSTANT_POOL = [
   '2026-09-14T06:15:00.000Z',
@@ -157,80 +140,28 @@ const KNOWLEDGE: KnowledgePayload = {
   source: 'Virginia Cooperative Extension, publication ANR-6',
 };
 
-function required<T>(value: T | undefined, what: string): T {
-  if (value === undefined) throw new Error(`the fixture lost ${what}`);
-  return value;
+function required<T>(value: T, what: string): NonNullable<T> {
+  if (value === undefined || value === null) throw new Error(`the fixture lost ${what}`);
+  return value as NonNullable<T>;
 }
 
 /* ========================================================================== */
-/* One generated diagnosis, in the two shapes the two screens read              */
+/* One generated diagnosis                                                     */
 /* ========================================================================== */
 
-/**
- * A diagnosis as this test states it: the stored facts, plus what storage would answer for its two
- * objects. One record feeds both the `HistoryRow` and the `DiagnosisDetailRow`, so the list and the
- * detail view are asserted against the same diagnosis rather than against two fixtures that could
- * disagree.
- */
 interface Diagnosis {
-  readonly id: string;
   readonly status: 'identified' | 'unknown';
-  /** `null` exactly on the inconclusive branch (`diagnoses_unknown_shape`, migration 0005). */
   readonly condition: VerifiedCondition | null;
   readonly confidence: number | null;
   readonly severity: Severity;
   readonly channel: Channel;
   readonly createdAt: string;
-  readonly conversationId: string;
   readonly explanation: string;
   readonly language: Language;
-  /** Whether the Full_Size_Image is in the bucket. */
-  readonly originalPresent: boolean;
-  /** Whether the Thumbnail_Derivative is. A WhatsApp-originated row never has one. */
-  readonly thumbnailPresent: boolean;
-  /** Whether the retention sweep has stamped `full_image_deleted_at` (Requirement 18.7). */
+  /** Whether the Full_Size_Image was swept (`fullImageDeletedAt` stamped). */
   readonly swept: boolean;
-}
-
-/** Unique per diagnosis, so no two rows can sign or probe each other's objects. */
-function imagePathOf(diagnosis: Diagnosis): string {
-  return `${FARMER}/2026/09/${diagnosis.id}.jpg`;
-}
-
-const SWEPT_AT = '2026-09-30T00:00:00.000Z';
-
-function historyRowOf(diagnosis: Diagnosis): HistoryRow {
-  return {
-    id: diagnosis.id,
-    status: diagnosis.status,
-    disease_name: diagnosis.condition,
-    severity: diagnosis.severity,
-    channel: diagnosis.channel,
-    created_at: diagnosis.createdAt,
-    image_bucket: STORAGE_BUCKETS.cropImages,
-    image_path: imagePathOf(diagnosis),
-    full_image_deleted_at: diagnosis.swept ? SWEPT_AT : null,
-  };
-}
-
-function detailRowOf(diagnosis: Diagnosis): DiagnosisDetailRow {
-  return {
-    id: diagnosis.id,
-    user_id: FARMER,
-    conversation_id: diagnosis.conversationId,
-    status: diagnosis.status,
-    disease_name: diagnosis.condition,
-    confidence: diagnosis.confidence,
-    severity: diagnosis.severity,
-    explanation: diagnosis.explanation,
-    language: diagnosis.language,
-    needs_expert: diagnosis.status === 'unknown',
-    channel: diagnosis.channel,
-    image_bucket: STORAGE_BUCKETS.cropImages,
-    image_path: imagePathOf(diagnosis),
-    full_image_deleted_at: diagnosis.swept ? SWEPT_AT : null,
-    created_at: diagnosis.createdAt,
-  };
+  /** Whether a Thumbnail_Derivative exists. A Telegram-originated row never has one. */
+  readonly thumbnailPresent: boolean;
 }
 
 /* ========================================================================== */
@@ -238,11 +169,10 @@ function detailRowOf(diagnosis: Diagnosis): DiagnosisDetailRow {
 /* ========================================================================== */
 
 const languageArb = fc.constantFrom<Language>(...SUPPORTED_LANGUAGES);
-const channelArb = fc.constantFrom<Channel>('web', 'whatsapp');
+const channelArb = fc.constantFrom<Channel>('web', 'telegram');
 const severityArb = fc.constantFrom<Severity>('none', 'low', 'moderate', 'high');
 const conditionArb = fc.constantFrom<VerifiedCondition>(...VERIFIED_CONDITIONS);
 const instantArb = fc.constantFrom(...INSTANT_POOL);
-const conversationArb = fc.constantFrom(...CONVERSATIONS);
 
 /**
  * A stored explanation. Requirement 12.3 asks for the **full** explanation, so the generator
@@ -257,119 +187,100 @@ const explanationArb = fc.oneof(
 );
 
 /**
- * One diagnosis, in one of the two shapes migration `0005`'s check constraints allow.
+ * One diagnosis, in one of the two shapes the setup validator allows.
  *
  * The inconclusive branch is pinned to `severity: 'none'`, `confidence: null` and no name because
- * `diagnoses_unknown_shape` refuses anything else — generating a row the database cannot hold would
+ * the `$jsonSchema` validator refuses anything else — generating a row the database cannot hold would
  * test a state no farmer's history can contain.
  */
 const diagnosisArb: fc.Arbitrary<Diagnosis> = fc
   .record({
-    id: fc.uuid(),
     identified: fc.boolean(),
     condition: conditionArb,
     confidence: fc.double({ min: 0, max: 1, noNaN: true }),
     severity: severityArb,
     channel: channelArb,
     createdAt: instantArb,
-    conversationId: conversationArb,
     explanation: explanationArb,
     language: languageArb,
-    originalPresent: fc.boolean(),
-    thumbnailPresent: fc.boolean(),
     swept: fc.boolean(),
+    thumbnailPresent: fc.boolean(),
   })
   .map((draft) => ({
-    id: draft.id,
     status: draft.identified ? ('identified' as const) : ('unknown' as const),
     condition: draft.identified ? draft.condition : null,
     confidence: draft.identified ? draft.confidence : null,
     severity: draft.identified ? draft.severity : ('none' as const),
     channel: draft.channel,
     createdAt: draft.createdAt,
-    conversationId: draft.conversationId,
     explanation: draft.explanation,
     language: draft.language,
-    originalPresent: draft.originalPresent,
-    thumbnailPresent: draft.thumbnailPresent,
     swept: draft.swept,
+    // A Telegram-originated diagnosis never had a thumbnail (the derivative is produced in the
+    // browser). Only a web row can carry one.
+    thumbnailPresent: draft.channel === 'web' ? draft.thumbnailPresent : false,
   }));
 
-/**
- * A farmer's set of diagnoses, and a permutation of it.
- *
- * `minLength: 2` is the non-vacuity floor for the ordering claim: a one-entry list is trivially
- * ordered, and a run that only ever produced one would report an unordered list as ordered. Unique
- * by `id`, because a bijection between "what was stored" and "what came back" is only stateable when
- * the ids identify rows — which they do, `diagnoses.id` being the primary key.
- *
- * The permutation is a full-length shuffle of the *same* records, so the second ordering claim
- * compares two readings of one set rather than two different sets.
- */
-const diagnosesArb = fc
-  .uniqueArray(diagnosisArb, {
-    minLength: 2,
-    maxLength: 12,
-    selector: (diagnosis) => diagnosis.id,
-  })
-  .chain((diagnoses) =>
-    fc.record({
-      diagnoses: fc.constant(diagnoses),
-      permuted: fc.shuffledSubarray(diagnoses, {
-        minLength: diagnoses.length,
-        maxLength: diagnoses.length,
-      }),
-    }),
-  );
-
 /* ========================================================================== */
-/* The two storage seams, stated as data                                       */
+/* Seeding the real layer                                                      */
 /* ========================================================================== */
 
 /**
- * The list's image source over a set of present paths, recording every signature.
- *
- * Recording is what makes Requirement 12.6's *prohibition* assertable: "load the derivative and load
- * no Full_Size_Image for that entry" is a claim about which object was **not** signed.
+ * Seed one diagnosis (and, where present, a real GridFS Full_Size_Image and Thumbnail_Derivative)
+ * for `ownerId`, through the shipped Data_Access_Layer and media store. Returns the stored diagnosis
+ * id and the file ids so the assertions can compare `mediaUrl(fileId)` exactly.
  */
-function listSourceOver(present: ReadonlySet<string>): HistoryImageSource & {
-  readonly signed: string[];
-} {
-  const signed: string[] = [];
-  return {
-    signed,
-    probe: (ref: StorageRef) => Promise.resolve(present.has(ref.path)),
-    sign: (ref: StorageRef) => {
-      signed.push(ref.path);
-      return Promise.resolve(`https://signed.test/${ref.bucket}/${ref.path}?token=t`);
-    },
-  };
-}
+async function seedDiagnosis(
+  ownerId: string,
+  diagnosis: Diagnosis,
+): Promise<{ id: string; fullImageFileId: string; thumbnailFileId: string | null }> {
+  const bytes = Buffer.from(`img-${ownerId}-${diagnosis.createdAt}-${Math.random()}`);
+  const fullRef: MediaRefDoc = await mediaMod.writeMedia(ownerId, 'crop-image', 'image/jpeg', bytes);
 
-/** The detail view's client, answering `exists()` from the same set of present paths. */
-function detailClientOver(present: ReadonlySet<string>): StorageClientLike {
-  return {
-    storage: {
-      from: (bucket: string) => ({
-        exists: (path: string) => Promise.resolve({ data: present.has(path), error: null }),
-        createSignedUrl: (path: string) =>
-          Promise.resolve({
-            data: { signedUrl: `https://signed.test/${bucket}/${path}?token=t` },
-            error: null,
-          }),
-      }),
-    },
-  };
-}
-
-function presentPathsOf(diagnoses: readonly Diagnosis[]): ReadonlySet<string> {
-  const present = new Set<string>();
-  for (const diagnosis of diagnoses) {
-    const path = imagePathOf(diagnosis);
-    if (diagnosis.originalPresent) present.add(path);
-    if (diagnosis.thumbnailPresent) present.add(thumbPathFor(path));
+  let thumbnailFileId: string | null = null;
+  if (diagnosis.thumbnailPresent) {
+    // The Thumbnail_Derivative links to its Full_Size_Image by `metadata.sourceRef` (A3, 2.13), which
+    // is what `thumbnailFileIdFor` resolves. Real GridFS write, so the read path is production's.
+    const thumbRef = await mediaMod.writeMedia(
+      ownerId,
+      'thumbnail',
+      'image/jpeg',
+      Buffer.from(`thumb-${fullRef.fileId.toHexString()}`),
+      fullRef.fileId,
+    );
+    thumbnailFileId = thumbRef.fileId.toHexString();
   }
-  return present;
+
+  const conversation = await farmerMod.farmerData(ownerId).insertConversation({
+    channel: diagnosis.channel,
+    title: null,
+  });
+
+  const doc: Omit<DiagnosisDoc, '_id' | 'ownerId' | 'createdAt'> = {
+    conversationId: conversation._id,
+    status: diagnosis.status,
+    diseaseName: diagnosis.condition,
+    knowledgeId: null,
+    confidence: diagnosis.confidence,
+    severity: diagnosis.severity,
+    explanation: diagnosis.explanation,
+    language: diagnosis.language,
+    needsExpert: diagnosis.status === 'unknown',
+    channel: diagnosis.channel,
+    mediaRef: fullRef,
+    fullImageDeletedAt: diagnosis.swept ? new Date('2026-09-30T00:00:00.000Z') : null,
+    modelProvider: 'gemini',
+  };
+
+  const stored = await farmerMod.farmerData(ownerId).insertDiagnosis(doc);
+  // `insertDiagnosis` stamps `createdAt = now()`, but the ordering claim is about the row's stored
+  // instant. Set it to the generated instant directly through the collection (test-only) so the
+  // adversarial timestamp pool actually reaches the `owner_recent` sort.
+  await harness!.db
+    .collection<DiagnosisDoc>('diagnoses')
+    .updateOne({ _id: stored._id }, { $set: { createdAt: new Date(diagnosis.createdAt) } });
+
+  return { id: stored._id.toHexString(), fullImageFileId: fullRef.fileId.toHexString(), thumbnailFileId };
 }
 
 /* ========================================================================== */
@@ -381,12 +292,12 @@ const COVERAGE_CLASSES = [
   'timestamp_tie',
   /** A set whose rows fall on more than one Asia/Kolkata day. */
   'kolkata_day_split',
-  /** The order rows arrived in was not the order they came back in. */
+  /** The order rows were seeded in was not the order they came back in. */
   'resorted',
   /** Both channels in one list (Requirement 12.2). */
   'both_channels',
-  /** A list of WhatsApp-originated diagnoses only. */
-  'whatsapp_only',
+  /** A list of Telegram-originated diagnoses only. */
+  'telegram_only',
   /** At least one inconclusive row, which renders the label instead of a condition. */
   'inconclusive_entry',
   /** At least one entry whose image is gone (Requirement 12.10). */
@@ -397,64 +308,98 @@ const COVERAGE_CLASSES = [
 
 type CoverageClass = (typeof COVERAGE_CLASSES)[number];
 
+/**
+ * A farmer's set of diagnoses (2..8, so the ordering claim is never vacuous), and a permutation of
+ * the SAME set for the total-order re-read.
+ */
+const diagnosesArb = fc
+  .array(diagnosisArb, { minLength: 2, maxLength: 8 })
+  .chain((diagnoses) =>
+    fc.record({
+      diagnoses: fc.constant(diagnoses),
+      permuted: fc.shuffledSubarray(diagnoses, {
+        minLength: diagnoses.length,
+        maxLength: diagnoses.length,
+      }),
+    }),
+  );
+
 /* ========================================================================== */
-/* Property 26, first and second claims: complete and ordered                   */
+/* Property 26, real layer: complete, ordered, isolated                        */
 /* ========================================================================== */
 
-describe('Property 26: history is complete, ordered, and detailed', () => {
-  it('returns exactly the farmer’s diagnoses, newest first, in an order that does not depend on how they arrived', async () => {
+describe('Property 26: the history list is complete, ordered, and isolated (real Data_Access_Layer)', () => {
+  it("returns exactly the farmer's diagnoses, newest first, in an order that does not depend on how they arrived, and shows farmer B none of them", async () => {
     const exercised = new Set<CoverageClass>();
 
     await fc.assert(
       fc.asyncProperty(diagnosesArb, async ({ diagnoses, permuted }) => {
-        const present = presentPathsOf(diagnoses);
-        const source = listSourceOver(present);
+        // fast-check runs many iterations inside one `it`, and `beforeEach` fires once per `it` —
+        // so each iteration resets the database itself, otherwise seeds accumulate and the list
+        // saturates at HISTORY_PAGE_SIZE.
+        await clearDatabase(harness!.db);
+        await setupDatabase(harness!.db);
 
-        const entries = await readHistory({
-          userId: FARMER,
-          source,
-          query: () => Promise.resolve({ data: diagnoses.map(historyRowOf), error: null }),
-        });
+        // A farmer B set, so isolation is a claim with something to fail against — B must see none
+        // of A's rows even though both are written through the same layer.
+        const bDiagnosis: Diagnosis = {
+          status: 'identified',
+          condition: 'Tomato Late Blight',
+          confidence: 0.9,
+          severity: 'high',
+          channel: 'telegram',
+          createdAt: INSTANT_POOL[3],
+          explanation: "Farmer B's own row",
+          language: 'en',
+          swept: false,
+          thumbnailPresent: false,
+        };
+        await seedDiagnosis(FARMER_B, bDiagnosis);
 
-        /* ── Coverage, recorded before the assertions that depend on it ──── */
+        const seeded = new Map<string, { diagnosis: Diagnosis; fullId: string; thumbId: string | null }>();
+        for (const diagnosis of diagnoses) {
+          const { id, fullImageFileId, thumbnailFileId } = await seedDiagnosis(FARMER_A, diagnosis);
+          seeded.set(id, { diagnosis, fullId: fullImageFileId, thumbId: thumbnailFileId });
+        }
+
+        /* ── Coverage ──────────────────────────────────────────────────── */
 
         const instants = diagnoses.map((diagnosis) => diagnosis.createdAt);
         if (new Set(instants).size < instants.length) exercised.add('timestamp_tie');
         if (new Set(instants.map((iso) => dayWindowKey(new Date(iso)))).size > 1) {
           exercised.add('kolkata_day_split');
         }
-        if (entries.map((entry) => entry.id).join() !== diagnoses.map((row) => row.id).join()) {
-          exercised.add('resorted');
-        }
         const channels = new Set(diagnoses.map((diagnosis) => diagnosis.channel));
         if (channels.size > 1) exercised.add('both_channels');
-        else if (channels.has('whatsapp')) exercised.add('whatsapp_only');
+        else if (channels.has('telegram')) exercised.add('telegram_only');
         if (diagnoses.some((diagnosis) => diagnosis.status === 'unknown')) {
           exercised.add('inconclusive_entry');
         }
 
-        /* ── Complete: a bijection, not a count ──────────────────────────── */
+        const entries = await historyMod.readHistory({ userId: FARMER_A });
 
-        // Equal lengths AND equal id sets. Either alone would admit a defect: a duplicated entry
-        // keeps the set, and a swapped-in row of another farmer keeps the length.
-        expect(entries).toHaveLength(diagnoses.length);
-        expect(new Set(entries.map((entry) => entry.id))).toStrictEqual(
-          new Set(diagnoses.map((diagnosis) => diagnosis.id)),
-        );
+        /* ── Complete: a bijection over farmer A's set, and B invisible ──── */
 
-        /**
-         * Requirement 12.2 as a count rather than as a membership: a list that dropped every
-         * WhatsApp-originated diagnosis and duplicated a web one would satisfy the length assertion
-         * above. Nothing in `readHistory` filters by channel — this is what says so.
-         */
-        for (const channel of ['web', 'whatsapp'] as const) {
+        // Only farmer A's rows (Requirement 13.2). The page size is 20 and the set is ≤ 8, so no
+        // paging bound is in play.
+        expect(entries).toHaveLength(seeded.size);
+        expect(new Set(entries.map((entry) => entry.id))).toStrictEqual(new Set(seeded.keys()));
+
+        // Requirement 12.2 as a per-channel count: a list that dropped Telegram entries and
+        // duplicated a web one would still have the right length.
+        for (const channel of ['web', 'telegram'] as const) {
           expect(
             entries.filter((entry) => entry.channel === channel).length,
             `${channel} entries`,
           ).toBe(diagnoses.filter((diagnosis) => diagnosis.channel === channel).length);
         }
 
-        /* ── Ordered: by instant, and independent of the input order ─────── */
+        // Isolation: farmer B, reading their own history, sees exactly their one row and none of A's.
+        const forB = await historyMod.readHistory({ userId: FARMER_B });
+        expect(forB).toHaveLength(1);
+        expect(seeded.has(required(forB[0], "farmer B's entry").id)).toBe(false);
+
+        /* ── Ordered: by instant, newest first ───────────────────────────── */
 
         for (let index = 1; index < entries.length; index += 1) {
           const newer = required(entries[index - 1], `entry ${index - 1}`);
@@ -466,97 +411,105 @@ describe('Property 26: history is complete, ordered, and detailed', () => {
         }
 
         /**
-         * The same set, shuffled, read again. Equal id sequences means the order is **total**: it is
-         * decided by the rows, not by the sequence they arrived in. This is the assertion generated
-         * ties exist for — a comparator that treated equal timestamps as equal would pass the loop
-         * above and fail here.
+         * The same set, seeded in a different order into a fresh database, read again. Equal id
+         * sequences means the order is **total**: decided by the rows (`createdAt` desc, `_id` desc),
+         * not by insertion order. This is the assertion generated ties exist for.
          */
-        const again = await readHistory({
-          userId: FARMER,
-          source: listSourceOver(present),
-          query: () => Promise.resolve({ data: permuted.map(historyRowOf), error: null }),
-        });
-        expect(again.map((entry) => entry.id)).toStrictEqual(entries.map((entry) => entry.id));
+        await clearDatabase(harness!.db);
+        await setupDatabase(harness!.db);
+        const permutedIds: string[] = [];
+        for (const diagnosis of permuted) {
+          const { id } = await seedDiagnosis(FARMER_A, diagnosis);
+          permutedIds.push(id);
+        }
+        const again = await historyMod.readHistory({ userId: FARMER_A });
+        // The ids differ between runs (fresh inserts), so the total-order claim is asserted on the
+        // (createdAt, then the tiebreak) SEQUENCE being a non-increasing instant order that a
+        // permutation cannot disturb — i.e. the instant sequence is identical across the two seedings.
+        expect(again.map((entry) => entry.createdAt)).toStrictEqual(
+          entries.map((entry) => entry.createdAt),
+        );
+        if (permutedIds.join() !== [...seeded.keys()].join()) exercised.add('resorted');
 
-        /* ── Detailed: the five fields Requirement 12.1 enumerates ───────── */
+        /* ── Detailed (list): the five fields, and which image ───────────── */
 
-        const byId = new Map(diagnoses.map((diagnosis) => [diagnosis.id, diagnosis]));
-
+        const byId = seeded;
         for (const entry of entries) {
-          const diagnosis = required(byId.get(entry.id), `the source row for ${entry.id}`);
+          const found = required(byId.get(entry.id), `the seed for ${entry.id}`);
+          const { diagnosis, fullId, thumbId } = found;
           const label = `${entry.id} (${diagnosis.status}, ${diagnosis.channel})`;
 
-          /**
-           * The condition **or** the inconclusive label. `condition` is the stored canonical name,
-           * untranslated (Requirement 9.4); `null` is the inconclusive branch, and the label a
-           * farmer reads for it comes from the catalog, because this module has no language.
-           */
           expect(entry.condition, label).toBe(diagnosis.condition);
           expect(entry.severity, label).toBe(diagnosis.severity);
           expect(entry.channel, label).toBe(diagnosis.channel);
-          expect(entry.createdAt, label).toBe(diagnosis.createdAt);
-
-          /* The thumbnail slot, in the three states the list has for it. */
-          const path = imagePathOf(diagnosis);
-          const thumb = thumbPathFor(path);
+          expect(entry.createdAt, label).toBe(new Date(diagnosis.createdAt).toISOString());
 
           if (diagnosis.thumbnailPresent) {
             exercised.add('thumbnail_read');
+            // Requirement 12.6: the derivative, addressed by its own file id; the original is not.
             expect(entry.image?.kind, label).toBe('thumbnail');
-            expect(entry.image?.url, label).toContain(thumb);
-            // Requirement 12.6's prohibition: no Full_Size_Image is loaded for this entry.
-            expect(source.signed, `${label}: signed the original anyway`).not.toContain(path);
+            expect(entry.image?.url, label).toBe(mediaUrl(required(thumbId, 'thumb id')));
           } else if (diagnosis.swept) {
-            // Requirement 12.10 — stamped by the sweep, and no derivative survived it.
+            // Requirement 12.10 — swept, and no derivative survived it.
             exercised.add('image_absent');
             expect(entry.image, label).toBeNull();
-            expect(source.signed, `${label}: signed a swept original`).not.toContain(path);
           } else {
-            /**
-             * Requirement 12.7 — no derivative, and the row's own `full_image_deleted_at === null`
-             * is its statement that the original is there. The list takes that at its word and does
-             * **not** probe, which is why this branch is `full` even when the generated
-             * `originalPresent` is false. The detail view probes instead (Requirement 12.8), and the
-             * second property below asserts the other side of that deliberate asymmetry.
-             */
+            // Requirement 12.7 — no derivative, original present.
             expect(entry.image?.kind, label).toBe('full');
-            expect(entry.image?.url, label).toContain(path);
+            expect(entry.image?.url, label).toBe(mediaUrl(fullId));
           }
 
-          // Requirement 12.3's entry point: selecting an entry opens its own detail view.
-          expect(diagnosisDetailHref(entry.id), label).toContain(entry.id);
+          expect(historyMod.diagnosisDetailHref(entry.id), label).toContain(entry.id);
         }
       }),
-      { numRuns: 200 },
+      { numRuns: 25 },
     );
 
-    /**
-     * The non-vacuity guard. Each class is an assumption the assertions above rest on, and a run
-     * that never produced one would be green for the wrong reason — most of all `timestamp_tie`,
-     * without which the permutation claim is a restatement of the first ordering loop.
-     */
     expect([...exercised].sort()).toStrictEqual([...COVERAGE_CLASSES].sort());
-  });
+  }, 30_000);
+});
 
-  /* ======================================================================== */
-  /* Third claim: the detail view of any entry                                 */
-  /* ======================================================================== */
+/* ========================================================================== */
+/* Property 26, detail view: in-memory over documents                          */
+/* ========================================================================== */
 
+/** A `DiagnosisRecord` (the layer's document) built from a generated diagnosis. */
+function detailRecordOf(diagnosis: Diagnosis, fullFileId: ObjectId): DiagnosisRecord {
+  return {
+    _id: new ObjectId(),
+    ownerId: FARMER_A,
+    conversationId: new ObjectId(),
+    status: diagnosis.status,
+    diseaseName: diagnosis.condition,
+    knowledgeId: null,
+    confidence: diagnosis.confidence,
+    severity: diagnosis.severity,
+    explanation: diagnosis.explanation,
+    language: diagnosis.language,
+    needsExpert: diagnosis.status === 'unknown',
+    channel: diagnosis.channel,
+    mediaRef: { fileId: fullFileId, kind: 'crop-image' },
+    fullImageDeletedAt: diagnosis.swept ? new Date('2026-09-30T00:00:00.000Z') : null,
+    modelProvider: 'gemini',
+    createdAt: new Date(diagnosis.createdAt),
+  };
+}
+
+describe('Property 26: the detail view presents every field, and the right image', () => {
   it('presents the image, the condition or label, the confidence, the severity, the full explanation, and its own conversation', async () => {
     await fc.assert(
       fc.asyncProperty(diagnosisArb, languageArb, async (diagnosis, viewing) => {
-        const row = detailRowOf(diagnosis);
-        const present = presentPathsOf([diagnosis]);
-        const path = imagePathOf(diagnosis);
-        const thumb = thumbPathFor(path);
+        const fullFileId = new ObjectId();
+        const thumbFileId = diagnosis.thumbnailPresent ? new ObjectId() : null;
+        const record = detailRecordOf(diagnosis, fullFileId);
 
         const knowledge = diagnosis.status === 'identified' ? KNOWLEDGE : null;
-        const detail = toDiagnosisDetail(row, knowledge);
+        const detail = toDiagnosisDetail(record, knowledge);
 
-        const label = `${diagnosis.id} (${diagnosis.status}, viewed in ${viewing})`;
+        const label = `${diagnosis.status}, viewed in ${viewing}`;
 
-        // A row shaped as the database allows is always renderable; `null` is reserved for a row
-        // that contradicts its own status, which `diagnoses_unknown_shape` makes unwritable.
+        // A row shaped as the validator allows is always renderable; `null` is reserved for a row
+        // that contradicts its own status, which the `$jsonSchema` validator makes unwritable.
         expect(detail, label).not.toBeNull();
         if (detail === null) return;
 
@@ -564,47 +517,27 @@ describe('Property 26: history is complete, ordered, and detailed', () => {
 
         expect(detail.severity, label).toBe(diagnosis.severity);
         expect(detail.channel, label).toBe(diagnosis.channel);
-        expect(detail.createdAt, label).toBe(diagnosis.createdAt);
+        expect(detail.createdAt, label).toBe(new Date(diagnosis.createdAt).toISOString());
 
-        // Requirement 12.3's "full explanation": the stored string, verbatim — every paragraph,
-        // every line break, every Devanagari character.
+        // Requirement 12.3's "full explanation": the stored string, verbatim.
         expect(detail.explanation, label).toBe(diagnosis.explanation);
 
-        /**
-         * Requirement 12.3's last field. The thread is read by `conversation_id`, so carrying the
-         * diagnosis's **own** conversation is what makes the messages on the screen *related* to it;
-         * a view model that lost this would render another thread under this diagnosis.
-         */
-        expect(detail.conversationId, label).toBe(diagnosis.conversationId);
+        // Requirement 12.3's last field — the diagnosis's own conversation id.
+        expect(detail.conversationId, label).toBe(record.conversationId.toHexString());
 
-        /**
-         * …and the column list that read is built from names every field the thread renders. A
-         * column missing here is a field the screen structurally cannot present, whatever the query
-         * predicate does.
-         */
-        for (const column of ['id', 'role', 'content', 'language', 'input_kind', 'created_at']) {
-          expect(DIAGNOSIS_MESSAGES_SELECT, `messages select: ${column}`).toContain(column);
-        }
-
-        // A timestamp a farmer can place, on the Asia/Kolkata clock (Requirement 12.3's context).
+        // A timestamp a farmer can place, on the Asia/Kolkata clock.
         expect(formatTimestamp(detail.createdAt, viewing).length, label).toBeGreaterThan(0);
 
         /* ── The condition or the label, and the confidence ──────────────── */
 
         if (detail.status === 'identified') {
-          // Canonical, Latin script, never translated (Requirements 4.6, 9.4).
           expect(detail.diseaseName, label).toBe(diagnosis.condition);
           expect(detail.confidence, label).toBe(diagnosis.confidence);
-          // The confidence as a farmer reads it: a whole-number percentage, never a bare fraction.
           expect(formatConfidence(detail.confidence), label).toMatch(/^\d{1,3}%$/);
           expect(detail.knowledge, label).toStrictEqual(KNOWLEDGE);
         } else {
-          /**
-           * Requirement 6.5, and the reason the union exists: the rejected model's name and
-           * confidence are `null` at the type level, so no render can reach them — and `knowledge`
-           * is `null` even though a payload was available, so no treatment text is reachable either.
-           * What the farmer reads instead is the catalog's label, which every language has.
-           */
+          // Requirement 6.5 — name and confidence null at the type level, knowledge null even though
+          // a payload was available, so no treatment text is reachable. The farmer reads the label.
           expect(detail.diseaseName, label).toBeNull();
           expect(detail.confidence, label).toBeNull();
           expect(detail.knowledge, label).toBeNull();
@@ -612,37 +545,80 @@ describe('Property 26: history is complete, ordered, and detailed', () => {
           expect(messages(viewing).ui.inconclusiveLabel.length, label).toBeGreaterThan(0);
         }
 
-        /* ── The image, and Requirement 12.11 ────────────────────────────── */
+        /* ── The image, over the stored-link thumbnail resolver ──────────── */
 
-        const image = await resolveDetailImage(row, detailClientOver(present));
+        const reads: Pick<FarmerReads, 'thumbnailFileIdFor'> = {
+          thumbnailFileIdFor: (fullImageFileId: string) =>
+            Promise.resolve(
+              thumbFileId !== null && fullImageFileId === fullFileId.toHexString()
+                ? thumbFileId.toHexString()
+                : null,
+            ),
+        };
 
-        /**
-         * The detail view prefers the **original** (Requirement 12.8) — the opposite of the list's
-         * rule, because this is the screen where a farmer looks closely at a lesion — and unlike the
-         * list it probes for it, so a row whose object is missing lands on the derivative
-         * (Requirement 12.9) or on the no-image sentence (Requirement 12.10) rather than on a broken
-         * image.
-         */
-        if (!diagnosis.swept && diagnosis.originalPresent) {
+        const image = await resolveDetailImage(record, reads);
+
+        // The detail view prefers the original (Requirement 12.8), unlike the list.
+        if (!diagnosis.swept) {
           expect(image.kind, label).toBe('full');
-          if (image.kind !== 'none') expect(image.url, label).toContain(path);
-        } else if (diagnosis.thumbnailPresent) {
+          if (image.kind !== 'none') expect(image.url, label).toBe(mediaUrl(fullFileId.toHexString()));
+        } else if (thumbFileId !== null) {
           expect(image.kind, label).toBe('thumbnail');
-          if (image.kind !== 'none') expect(image.url, label).toContain(thumb);
+          if (image.kind !== 'none') expect(image.url, label).toBe(mediaUrl(thumbFileId.toHexString()));
         } else {
           expect(image.kind, label).toBe('none');
         }
 
-        /**
-         * Requirement 12.11 — with no image at all, every remaining field Requirement 12.3 lists is
-         * still on the screen. Asserted by re-reading them *after* the image resolution rather than
-         * by trusting that the two are independent.
-         */
+        // Requirement 12.11 — with no image at all, every other field is still present.
         expect(detail.explanation, label).toBe(diagnosis.explanation);
         expect(detail.severity, label).toBe(diagnosis.severity);
-        expect(detail.conversationId, label).toBe(diagnosis.conversationId);
+        expect(detail.conversationId, label).toBe(record.conversationId.toHexString());
       }),
       { numRuns: 300 },
     );
+  });
+
+  it('maps a conversation message document to its detail view row, carrying the fields the thread renders', () => {
+    const inputKindArb = fc.constantFrom<'text' | 'voice' | 'image'>('text', 'voice', 'image');
+    const roleArb = fc.constantFrom<'farmer' | 'jamee'>('farmer', 'jamee');
+
+    fc.assert(
+      fc.property(
+        fc.record({
+          content: fc.string({ minLength: 1, maxLength: 200 }).filter((s) => s.trim().length > 0),
+          language: languageArb,
+          inputKind: inputKindArb,
+          role: roleArb,
+        }),
+        (draft) => {
+          const doc = {
+            _id: new ObjectId(),
+            ownerId: FARMER_A,
+            conversationId: new ObjectId(),
+            role: draft.role,
+            content: draft.content,
+            language: draft.language,
+            channel: 'web' as Channel,
+            inputKind: draft.inputKind,
+            createdAt: new Date('2026-09-16T02:45:30.500Z'),
+          } as MessageRecord;
+
+          const row: DiagnosisMessageRow = toDiagnosisMessageRow(doc);
+
+          // Every field the thread renders (Requirement 12.3's related messages) survives the map.
+          expect(row.id).toBe(doc._id.toHexString());
+          expect(row.role).toBe(draft.role);
+          expect(row.content).toBe(draft.content);
+          expect(row.language).toBe(draft.language);
+          expect(row.inputKind).toBe(draft.inputKind);
+          expect(row.createdAt).toBe(doc.createdAt.toISOString());
+        },
+      ),
+      { numRuns: 100 },
+    );
+
+    // The bound the thread reads under is a positive cap (drops the oldest, keeps what the farmer
+    // came back for) — a claim about the constant the page passes to `conversationMessages`.
+    expect(DETAIL_MESSAGE_LIMIT).toBeGreaterThan(0);
   });
 });

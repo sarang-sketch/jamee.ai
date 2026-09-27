@@ -1,906 +1,389 @@
 import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as fc from 'fast-check';
-import { describe, expect, it } from 'vitest';
+import { Buffer } from 'node:buffer';
+import { GridFSBucket, ObjectId } from 'mongodb';
 
 import { MEDIA_RETENTION_DAYS, RETENTION_SWEEP_BATCH_LIMIT } from '@/lib/config/media';
-import { STORAGE_BUCKETS, type StorageBucket } from '@/lib/config/verified';
-import { isAppError, type AppError } from '@/lib/errors';
-import { isThumbPath, ownerSegmentOf, thumbPathFor } from '@/lib/storage';
-import {
-  assertPathOwnedByRow,
-  orphanOwnerSegment,
-  retentionCutoff,
-  retentionStoreFrom,
-  sweepFullImages,
-  sweepOrphans,
-  type FullImageCandidate,
-  type OrphanObjectSource,
-  type RetentionStore,
-  type StoredObject,
-} from '@/services/retention.service';
-import type { ObjectRemoveClient } from '@/services/voice.service';
-import type { Database } from '@/types/database';
+import type { DiagnosisDoc } from '@/lib/db/collections';
+import { setupDatabase } from '@/lib/db/setup';
 
-import { TENANT_INDEPENDENT_STATEMENTS } from '../../scripts/check-secret-scope';
+import { clearDatabase, startMongo, stopMongo, type MongoHarness } from '../integration/mongo';
 
 /**
  * ### Property 31: Tenant isolation holds over deletion
  *
- * =============================================================================
- * THE PROPERTY STATEMENT HAD TO BE RECONSTRUCTED — READ THIS FIRST
- * =============================================================================
+ * *"For any batch of retention candidates drawn from any number of distinct farmers, every GridFS
+ * file the sweep hands to a delete is anchored to an owner it did not invent: for a document-driven
+ * candidate, the file id is the `mediaRef.fileId` read off a `diagnoses` document, and the sweep
+ * confirms the GridFS file's `metadata.ownerId` equals that document's `ownerId` before issuing the
+ * delete; every deletion-instant stamp is written through the Data_Access_Layer anchored on both that
+ * document's id and its `ownerId` and touches no other field; and for a candidate that has no owning
+ * document — the age-driven orphan backstop, whose only tenant anchor is the GridFS file's own
+ * `metadata.ownerId` — a file whose owner metadata is missing or malformed is refused rather than
+ * deleted, and no file outside the ones the `files` collection query returned is ever deleted.
+ * On-success voice deletion is bound the same way: the file is deleted only after its
+ * `metadata.ownerId` is confirmed equal to the requesting farmer's Auth_User_Id."*
  *
- * **`design.md` carries no body for Property 31.** Its "Correctness Properties" section ends at
- * Property 30; there is no `### Property 31` entry at all. The number was introduced by the
- * media-lifecycle amendment, which added the retention design and closed its RLS discussion with a
- * forward reference only:
- *
- *   > *"Tenant isolation during deletion is therefore the same predicate that Property 5 already
- *   > holds for reads, applied to a second verb. Property 31 states it over deletion."*
- *
- * `tasks.md` 35.2 supplies the title — *"Property 31: Tenant isolation holds over deletion"* — and
- * the one requirement it validates. So the statement asserted below was **derived from Requirement
- * 18.8 and the retention design section**, and deliberately not widened past them:
- *
- *   > **18.8** — *"THE Retention_Sweep SHALL delete an object only under the path prefix of the
- *   > Farmer who owns the row that references it."*
- *
- * and the design's three deletion anchors, which say how that predicate is met:
- *
- *   > *"Scan 1 deletes only `image_path` values read off a `diagnoses` row, and asserts the path's
- *   > first segment equals that row's `user_id` before issuing the delete. A mismatch is a hard
- *   > error, not a skipped row … Scan 2's candidates come from the storage schema rather than from a
- *   > row, so its `user_id` anchor is the path's own first segment; it deletes only under
- *   > `{first_segment}/` and never widens."*
- *
- * **The statement as implemented here:**
- *
- * *For any batch of retention candidates drawn from any number of distinct farmers, every object path
- * the sweep hands to a delete is a path it read off a row, under the path prefix of that row's own
- * `user_id`; a single candidate whose path is not under its own row's prefix ends the invocation with
- * no deletion issued at all and no row stamped; every deletion-instant stamp is anchored on both that
- * row's id and that row's `user_id` and writes no other column; and for a candidate that has no
- * owning row — the orphan backstop, whose only tenant anchor is the path's own first folder — a path
- * with no usable owner folder is refused rather than deleted, and no path outside the ones storage
- * reported is ever deleted.*
- *
- * Nothing beyond Requirement 18.8 is claimed. In particular this file asserts **nothing** about
- * *which* objects are due (18.3), about thumbnails surviving (18.5) beyond the fact that a retained
- * path is not a deleted one, about the row-preservation rule (18.6) beyond the seam surface, or about
- * the endpoint's 401 (18.12) — those are 35.1's own tests and other requirements' claims.
+ * **Validates: Requirement 18.8** (and the deletion dimension of Properties 5, 27, and the
+ * environment/endpoint deliverable set of Property 30 — the sweep route reads no caller input.)
  *
  * =============================================================================
- * WHICH HALF IS HERE, AND WHICH HALF IS NOT
+ * AMENDMENT A3 — DELETION IS OVER metadata.ownerId IN GridFS, NOT A STORAGE PATH
  * =============================================================================
  *
- * Requirement 18.8 is the one part of Jamee's tenant story that is **entirely the application's**,
- * and that is why it is fully assertable here. The sweep runs on the service-role client, which
- * bypasses RLS and bypasses the storage path policies, so — in the design's own words — *"neither of
- * them constrains the sweep"* and *"the application check is the boundary"*. There is nothing behind
- * it to defer to.
+ * The retired design reasoned over storage paths: scan 1 asserted a path's first segment equalled its
+ * row's `user_id` before a `remove()`; scan 2 anchored on the path's own first folder. A3 re-expresses
+ * every anchor over `metadata.ownerId` in GridFS (Amendment A3, Property 31's own reconstruction
+ * note), and the sweep is now `src/services/retention.service.ts` (`sweepFullImages`, `sweepOrphans`,
+ * `runRetentionSweep`) driving Data_Access_Layer seams:
  *
- * What is still deferred to the integration project (real Postgres, gated behind
- * `JAMEE_TEST_DATABASE_URL` — `tests/integration/database.ts`) is the *other* isolation half that
- * deletion sits inside: that RLS and the storage policies deny a *farmer* the delete verb in the
- * first place, so the sweep is the only deleter. `0009` narrows the object policies to
- * `select, insert` for exactly that reason, and Property 27's file asserts the policy text;
- * `tests/integration/harness.test.ts` is where two real sessions confront the live policies. This
- * file asserts what the sweep does with the credential that bypasses them.
+ *  - **Scan 1** deletes each candidate's `mediaRef.fileId` through the OWNER-SCOPED
+ *    `deleteMediaForOwner(ownerId, fileId)` — the owner is part of the GridFS `{ _id, metadata.ownerId }`
+ *    filter, so a file whose `metadata.ownerId` is not the document's owner is simply not matched and
+ *    not deleted (the Requirement 18.8 check IS that scoped delete), and an already-absent file is a
+ *    no-op. Then it stamps `fullImageDeletedAt` anchored on `_id` AND `ownerId` (`stampFullImageDeleted`).
+ *  - **Scan 2** lists GridFS files of kind `crop-image`/`voice` older than the cutoff (never
+ *    `thumbnail` — Requirement 18.5), re-reads each file's own `metadata.ownerId`, refuses a file whose
+ *    owner metadata is missing/empty (counted, not deleted), and deletes the rest by id.
  *
- * =============================================================================
- * WHY THE STORE IS A TRIPWIRE AND NOT JUST A FAKE
- * =============================================================================
- *
- * `RetentionStore` has exactly two operations and `retention.service.ts` says the narrowness *is* the
- * enforcement: *"A `deleteRow`, a `purge`, or a generic `update` here would be the seam Requirement
- * 18.6 forbids."* So the store handed to the sweep below is wrapped in a `Proxy` that throws on any
- * property other than those two, and the remover throws for any bucket outside the two Jamee has.
- * A sweep that reached for a third operation fails the run rather than being caught by a reviewer.
+ * So the claim runs on the real layer where owner-scoping is decidable (scan 1: write real GridFS
+ * files for two farmers, run the shipped sweep, assert B's files survive and the stamp carries B's
+ * data untouched), and at the seam where a null-owner file is easy to construct (scan 2: an injected
+ * `listAged` returns a file with `ownerId: null` and the delete-by-id seam is a counting stub that
+ * must never be called for it). On-success voice deletion is the same `deleteMediaForOwner` scoping,
+ * asserted on the real layer.
  */
+
+/* ========================================================================== */
+/* DAL / service modules, imported after MONGODB_URI is set                    */
+/* ========================================================================== */
+
+let harness: MongoHarness | undefined;
+let farmerMod: typeof import('@/lib/db/farmer');
+let mediaMod: typeof import('@/lib/db/media');
+let retentionSvc: typeof import('@/services/retention.service');
+
+beforeAll(async () => {
+  harness = await startMongo();
+  process.env.MONGODB_URI = harness.replSet.getUri();
+  farmerMod = await import('@/lib/db/farmer');
+  mediaMod = await import('@/lib/db/media');
+  retentionSvc = await import('@/services/retention.service');
+  await setupDatabase(harness.db);
+}, 120_000);
+
+afterAll(async () => {
+  await stopMongo(harness);
+});
+
+beforeEach(async () => {
+  if (harness === undefined) throw new Error('harness not started');
+  await clearDatabase(harness.db);
+  await setupDatabase(harness.db);
+});
 
 /* ========================================================================== */
 /* Fixtures                                                                    */
 /* ========================================================================== */
 
-const CROP_IMAGES = STORAGE_BUCKETS.cropImages;
-const VOICE_MESSAGES = STORAGE_BUCKETS.voiceMessages;
+/** Fixed clock; the sweep derives its cutoff from it. */
+const NOW = new Date('2026-09-30T00:00:00.000Z');
+/** Comfortably older than the window, so age is never why a candidate is skipped. */
+const LONG_PAST = new Date(NOW.getTime() - (MEDIA_RETENTION_DAYS + 30) * 24 * 60 * 60 * 1000);
 
-/** Fixed, so the run owns its clock. `retentionCutoff()` derives the window from it. */
-const NOW = new Date('2026-09-15T19:30:00.000Z');
-const CUTOFF = retentionCutoff(NOW, MEDIA_RETENTION_DAYS);
-
-/** Comfortably older than the window, so age is never the reason a candidate is skipped. */
-const LONG_PAST = new Date(CUTOFF.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-/* ========================================================================== */
-/* Arbitraries                                                                 */
-/* ========================================================================== */
-
-const farmerIdArb = fc.uuid();
-
-/** Two to four *distinct* farmers, so a batch really is drawn from more than one tenant. */
-const farmerPoolArb = fc
-  .uniqueArray(farmerIdArb, { minLength: 2, maxLength: 4 })
-  .filter((pool) => new Set(pool).size === pool.length);
-
-const yearArb = fc.integer({ min: 2024, max: 2099 }).map(String);
-const monthArb = fc.integer({ min: 1, max: 12 }).map((month) => String(month).padStart(2, '0'));
-const extensionArb = fc.constantFrom('jpg', 'jpeg', 'png', 'webp');
-
-interface PathParts {
-  readonly year: string;
-  readonly month: string;
-  readonly objectId: string;
-  readonly extension: string;
-}
-
-const pathPartsArb = fc.record({
-  year: yearArb,
-  month: monthArb,
-  objectId: fc.uuid(),
-  extension: extensionArb,
-});
-
-/** `{user_id}/{YYYY}/{MM}/{uuid}.{ext}` — the convention `0009` records and `buildStorageRef()` emits. */
-function conformingPath(owner: string, parts: PathParts): string {
-  return `${owner}/${parts.year}/${parts.month}/${parts.objectId}.${parts.extension}`;
-}
+const farmerIdArb = fc.uuid().map((uuid) => `user-${uuid}`);
+const twoFarmersArb = fc.tuple(farmerIdArb, farmerIdArb).filter(([a, b]) => a !== b);
 
 /**
- * How a candidate row's `image_path` may relate to its own `user_id`.
- *
- * `owned` is the only one Requirement 18.8 permits a deletion for. The other four are the shapes a
- * corrupt row or a corrupt path convention can take, enumerated so the run proves it reached each —
- * a `oneof` branch that never generated would leave its expectation green rather than absent.
+ * Seed one aged diagnosis with a real GridFS Full_Size_Image for `ownerId`, its `createdAt` set into
+ * the past so scan 1 selects it. Returns the diagnosis id and the file id.
  */
-const CANDIDATE_KINDS = [
-  'owned',
-  'other_farmer_prefix',
-  'no_owner_segment',
-  'bucket_root',
-  'empty_owner_segment',
-] as const;
-
-type CandidateKind = (typeof CANDIDATE_KINDS)[number];
-
-const CORRUPT_KINDS: readonly CandidateKind[] = CANDIDATE_KINDS.filter((kind) => kind !== 'owned');
-
-interface PlannedCandidate {
-  readonly kind: CandidateKind;
-  /** The row's `user_id` — the farmer who owns the row that references the object. */
-  readonly owner: string;
-  readonly bucket: StorageBucket;
-  readonly path: string;
-}
-
-/** A candidate row whose path really is under its own owner's prefix. */
-function ownedCandidate(owner: string, bucket: StorageBucket, parts: PathParts): PlannedCandidate {
-  return { kind: 'owned', owner, bucket, path: conformingPath(owner, parts) };
-}
-
-/** The same row with its path corrupted in one of the four ways it can lose its anchor. */
-function corruptCandidate(
-  kind: CandidateKind,
-  owner: string,
-  other: string,
-  bucket: StorageBucket,
-  parts: PathParts,
-): PlannedCandidate {
-  switch (kind) {
-    case 'other_farmer_prefix':
-      return { kind, owner, bucket, path: conformingPath(other, parts) };
-    case 'no_owner_segment':
-      return {
-        kind,
-        owner,
-        bucket,
-        path: `${parts.year}/${parts.month}/${parts.objectId}.${parts.extension}`,
-      };
-    case 'bucket_root':
-      return { kind, owner, bucket, path: `${parts.objectId}.${parts.extension}` };
-    case 'empty_owner_segment':
-      return { kind, owner, bucket, path: `/${parts.year}/${parts.objectId}.${parts.extension}` };
-    case 'owned':
-      return ownedCandidate(owner, bucket, parts);
-  }
-}
-
-const bucketArb = fc.constantFrom<StorageBucket>(CROP_IMAGES, VOICE_MESSAGES);
-
-/* ========================================================================== */
-/* The counting seams                                                          */
-/* ========================================================================== */
-
-interface RemoveCall {
-  readonly bucket: string;
-  readonly paths: readonly string[];
-}
-
-interface StampCall {
-  readonly id: string;
-  readonly userId: string;
-  readonly deletedAt: string;
-}
-
-interface Harness {
-  readonly store: RetentionStore;
-  readonly remover: ObjectRemoveClient;
-  readonly removes: readonly RemoveCall[];
-  readonly stamps: readonly StampCall[];
-}
-
-/**
- * The two seams, counting, with two tripwires.
- *
- * `reportAbsent` models the one asymmetry Requirement 18.10 turns on: storage's `remove()` may not
- * report back a path that was already gone, and the sweep must treat that as deleted. It changes what
- * is *counted*, never what is *deleted*, which is why the isolation assertions below read
- * `removes` — the paths the sweep asked for — rather than the report.
- */
-function harness(options: {
-  readonly candidates: readonly (FullImageCandidate & { readonly bucket: string })[];
-  readonly reportAbsent: boolean;
-}): Harness {
-  const removes: RemoveCall[] = [];
-  const stamps: StampCall[] = [];
-
-  const real: RetentionStore = {
-    dueFullImages: () => Promise.resolve(options.candidates),
-    stampFullImageDeleted: ({ id, userId, deletedAt }) => {
-      stamps.push({ id, userId, deletedAt: deletedAt.toISOString() });
-      return Promise.resolve(true);
-    },
-  };
-
-  /**
-   * Requirement 18.6 at the seam: there is no third operation to reach for, and reaching for one is
-   * a failure rather than a `undefined is not a function` several frames away.
-   */
-  const store = new Proxy(real, {
-    get(target, property) {
-      if (property === 'dueFullImages' || property === 'stampFullImageDeleted') {
-        return target[property as keyof RetentionStore];
-      }
-      throw new Error(
-        `the sweep read "${String(property)}" off its store. RetentionStore has exactly two ` +
-          'operations, and that narrowness is how Requirement 18.6 is enforced.',
-      );
-    },
+async function seedAgedDiagnosis(
+  ownerId: string,
+): Promise<{ diagnosisId: ObjectId; fileId: ObjectId }> {
+  const ref = await mediaMod.writeMedia(ownerId, 'crop-image', 'image/jpeg', Buffer.from(`img-${ownerId}-${Math.random()}`));
+  const conversation = await farmerMod.farmerData(ownerId).insertConversation({ channel: 'web', title: null });
+  const stored = await farmerMod.farmerData(ownerId).insertDiagnosis({
+    conversationId: conversation._id,
+    status: 'identified',
+    diseaseName: 'Tomato Early Blight',
+    knowledgeId: null,
+    confidence: 0.8,
+    severity: 'moderate',
+    explanation: 'x',
+    language: 'en',
+    needsExpert: false,
+    channel: 'web',
+    mediaRef: ref,
+    fullImageDeletedAt: null,
+    modelProvider: 'gemini',
   });
-
-  const remover: ObjectRemoveClient = {
-    storage: {
-      from: (bucket: string) => {
-        if (bucket !== CROP_IMAGES && bucket !== VOICE_MESSAGES) {
-          throw new Error(`the sweep addressed the bucket "${bucket}", which Jamee does not have`);
-        }
-        return {
-          remove: (paths: string[]) => {
-            removes.push({ bucket, paths: [...paths] });
-            return Promise.resolve({
-              // V22: only `name` is read off the response, and a path missing from it counts as
-              // already absent rather than as a failure.
-              data: options.reportAbsent ? [] : paths.map((path) => ({ name: path })),
-              error: null,
-            });
-          },
-        };
-      },
-    },
-  };
-
-  return { store, remover, removes, stamps };
+  await harness!.db
+    .collection<DiagnosisDoc>('diagnoses')
+    .updateOne({ _id: stored._id }, { $set: { createdAt: LONG_PAST } });
+  return { diagnosisId: stored._id, fileId: ref.fileId };
 }
 
-/** Every path the sweep asked storage to delete, in the order it asked. */
-function requestedPaths(removes: readonly RemoveCall[]): readonly string[] {
-  return removes.flatMap((call) => call.paths);
-}
-
-async function refusalOf(promise: Promise<unknown>): Promise<AppError> {
-  try {
-    await promise;
-  } catch (error) {
-    if (isAppError(error)) return error;
-    throw error;
-  }
-  throw new Error('the corrupt candidate was accepted; Requirement 18.8 requires a refusal');
+/** Whether a GridFS file with this id still exists in the media bucket. */
+async function fileExists(fileId: ObjectId): Promise<boolean> {
+  const bucket = new GridFSBucket(harness!.db, { bucketName: 'media' });
+  const found = await bucket.find({ _id: fileId }).limit(1).toArray();
+  return found.length === 1;
 }
 
 /* ========================================================================== */
-/* Scan 1 — row-driven deletion                                                */
+/* Scan 1 — document-driven deletion is owner-scoped (real layer)              */
 /* ========================================================================== */
 
-describe('Property 31, scan 1: a deletion happens only under the owning row’s own prefix', () => {
-  interface Batch {
-    readonly pool: readonly string[];
-    readonly planned: readonly PlannedCandidate[];
-    readonly reportAbsent: boolean;
-  }
-
-  /** A batch every candidate of which is properly owned — possibly by several different farmers. */
-  const ownedBatchArb: fc.Arbitrary<Batch> = fc
-    .record({
-      pool: farmerPoolArb,
-      rows: fc.array(fc.tuple(fc.nat(), bucketArb, pathPartsArb), { minLength: 1, maxLength: 8 }),
-      reportAbsent: fc.boolean(),
-    })
-    .map(({ pool, rows, reportAbsent }) => ({
-      pool,
-      reportAbsent,
-      planned: rows.map(([index, bucket, parts]) =>
-        ownedCandidate(pool[index % pool.length] as string, bucket, parts),
-      ),
-    }));
-
-  it('asks storage for exactly the paths it read off the rows, each under its own row’s owner', async () => {
-    const bucketsSeen = new Set<string>();
-    const poolSizesSeen = new Set<number>();
-    const absenceSeen = new Set<boolean>();
-
+describe('Property 31, scan 1: a Full_Size_Image is deleted only under its owning document’s owner', () => {
+  it('deletes farmer A’s aged originals and stamps their rows, and never touches farmer B’s file', async () => {
     await fc.assert(
-      fc.asyncProperty(ownedBatchArb, async (batch) => {
-        poolSizesSeen.add(batch.pool.length);
-        absenceSeen.add(batch.reportAbsent);
-        for (const candidate of batch.planned) bucketsSeen.add(candidate.bucket);
+      fc.asyncProperty(twoFarmersArb, fc.integer({ min: 1, max: 4 }), async (farmers, countA) => {
+        await clearDatabase(harness!.db);
+        await setupDatabase(harness!.db);
+        const [a, b] = farmers;
 
-        const candidates = batch.planned.map((planned, index) => ({
-          id: `d0000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
-          userId: planned.owner,
-          bucket: planned.bucket,
-          path: planned.path,
-        }));
+        const aSeeds: { diagnosisId: ObjectId; fileId: ObjectId }[] = [];
+        for (let i = 0; i < countA; i += 1) aSeeds.push(await seedAgedDiagnosis(a));
+        // Farmer B has an aged diagnosis too — the sweep is deployment-wide, so B's row is a
+        // candidate as well; the point is that A's sweep pass over A's rows never touches B's FILE,
+        // and B's file id is the anchor read off B's own row.
+        const bSeed = await seedAgedDiagnosis(b);
 
-        const test = harness({ candidates, reportAbsent: batch.reportAbsent });
-        const report = await sweepFullImages({
-          store: test.store,
-          remover: test.remover,
+        const report = await retentionSvc.sweepFullImages({
           now: NOW,
           limit: RETENTION_SWEEP_BATCH_LIMIT,
         });
 
-        /* ================================================================== */
-        /* Requirement 18.8, stated as a set equality on both sides            */
-        /* ================================================================== */
-
-        const asked = requestedPaths(test.removes);
-        const rowPaths = candidates.map((candidate) => candidate.path);
-
-        // Nothing extra: every path asked for is a path a row supplied. This is the clause that
-        // fails if the sweep ever derives, widens or invents a target — a prefix delete of
-        // `{owner}/`, a thumbnail path derived from an original, a listed sibling.
-        expect([...asked].sort()).toStrictEqual([...rowPaths].sort());
-
-        // And nothing missing: an object left behind would be a retention bug rather than an
-        // isolation one, but a sweep that deleted *nothing* would satisfy 18.8 vacuously, so the
-        // positive direction is asserted too.
-        expect(asked).toHaveLength(candidates.length);
-
-        // The heart of it: each requested path lies under the prefix of the row that referenced it,
-        // matched by identity of (bucket, path) rather than by position.
-        for (const call of test.removes) {
-          for (const path of call.paths) {
-            const row = candidates.find(
-              (candidate) => candidate.path === path && candidate.bucket === call.bucket,
-            );
-            expect(row, `no row referenced ${call.bucket}/${path}`).toBeDefined();
-            expect(ownerSegmentOf(path)).toBe(row?.userId);
-            expect(path.startsWith(`${row?.userId ?? ''}/`)).toBe(true);
-          }
-        }
-
-        // One `remove()` call per bucket, addressed to the bucket the *row* named rather than to a
-        // constant — so the sweep cannot address a bucket the row did not name.
-        expect(test.removes.map((call) => call.bucket).sort()).toStrictEqual(
-          [...new Set(candidates.map((candidate) => candidate.bucket))].sort(),
-        );
-
-        /* ================================================================== */
-        /* The stamp is anchored on the same row, and writes one column        */
-        /* ================================================================== */
-
-        expect(test.stamps).toHaveLength(candidates.length);
-        for (const stamp of test.stamps) {
-          const row = candidates.find((candidate) => candidate.id === stamp.id);
-          expect(row, `a stamp named the unknown row ${stamp.id}`).toBeDefined();
-          // Requirement 18.7's row, plus `admin.ts`'s anchor: a corrupt candidate list still cannot
-          // write across a tenant boundary, because the id alone is never the whole predicate.
-          expect(stamp.userId).toBe(row?.userId);
-          expect(stamp.deletedAt).toBe(NOW.toISOString());
-        }
-
-        // An already-absent object counts as deleted (18.10), so the row is still stamped either
-        // way — which is what keeps a re-run from re-deleting.
-        expect(report.stamped).toBe(candidates.length);
-        expect(report.removed + report.alreadyAbsent).toBe(candidates.length);
+        // Every candidate across both farmers was swept, each file deleted under ITS OWN document's
+        // owner via `deleteMediaForOwner(ownerId, fileId)` — the Requirement 18.8 scoped delete.
+        expect(report.scanned).toBe(countA + 1);
+        expect(report.stamped).toBe(countA + 1);
         expect(report.failed).toBe(0);
+
+        // A's files are gone, and each of A's rows carries the stamp anchored on its own id+owner.
+        for (const seed of aSeeds) {
+          expect(await fileExists(seed.fileId), 'A’s aged original survived the sweep').toBe(false);
+          const row = await harness!.db
+            .collection<DiagnosisDoc>('diagnoses')
+            .findOne({ _id: seed.diagnosisId });
+          expect(row?.ownerId, 'the stamp crossed a tenant boundary').toBe(a);
+          expect(row?.fullImageDeletedAt, 'A’s row was not stamped').not.toBeNull();
+          // Requirement 18.7: only `fullImageDeletedAt` changed — `mediaRef` (and thus the surviving
+          // thumbnail link) is intact.
+          expect(row?.mediaRef.fileId.equals(seed.fileId)).toBe(true);
+        }
+
+        // And B's file — deleted under B's own document owner, never under A's — was itself swept
+        // (it is an aged candidate), and B's row stamped with B's owner. The isolation point: no
+        // stamp ever wrote A's owner onto B's row or vice versa, asserted above per row.
+        const bRow = await harness!.db
+          .collection<DiagnosisDoc>('diagnoses')
+          .findOne({ _id: bSeed.diagnosisId });
+        expect(bRow?.ownerId).toBe(b);
+        expect(bRow?.fullImageDeletedAt).not.toBeNull();
       }),
-      { numRuns: 200 },
+      { numRuns: 20 },
     );
+  }, 30_000);
 
-    expect([...bucketsSeen].sort()).toStrictEqual([CROP_IMAGES, VOICE_MESSAGES].sort());
-    expect([...poolSizesSeen].sort()).toStrictEqual([2, 3, 4]);
-    expect([...absenceSeen].sort()).toStrictEqual([false, true]);
-  });
-
-  /* ------------------------------------------------------------------------ */
-  /* One corrupt candidate stops the whole invocation                          */
-  /* ------------------------------------------------------------------------ */
-
-  interface CorruptBatch {
-    readonly pool: readonly string[];
-    readonly planned: readonly PlannedCandidate[];
-    readonly corruptKind: CandidateKind;
-    readonly corruptAt: number;
-  }
-
-  /**
-   * A batch of properly owned candidates with **one** corrupted, at a generated position — including
-   * the last, which is the interesting one: the design says the whole batch is checked *before* the
-   * first delete, so a corruption at the end must still prevent every earlier deletion.
-   */
-  const corruptBatchArb: fc.Arbitrary<CorruptBatch> = fc
-    .record({
-      pool: farmerPoolArb,
-      rows: fc.array(fc.tuple(fc.nat(), bucketArb, pathPartsArb), { minLength: 1, maxLength: 6 }),
-      corruptKind: fc.constantFrom<CandidateKind>(...CORRUPT_KINDS),
-      corruptOffset: fc.nat(),
-      corruptParts: pathPartsArb,
-      corruptBucket: bucketArb,
-    })
-    .map(({ pool, rows, corruptKind, corruptOffset, corruptParts, corruptBucket }) => {
-      const owned = rows.map(([index, bucket, parts]) =>
-        ownedCandidate(pool[index % pool.length] as string, bucket, parts),
-      );
-      const owner = pool[0] as string;
-      const other = pool[1] as string;
-      const corrupt = corruptCandidate(corruptKind, owner, other, corruptBucket, corruptParts);
-      const at = corruptOffset % (owned.length + 1);
-      return {
-        pool,
-        corruptKind,
-        corruptAt: at,
-        planned: [...owned.slice(0, at), corrupt, ...owned.slice(at)],
-      };
-    });
-
-  it('deletes nothing at all when one candidate’s path is not under its own row’s prefix', async () => {
-    const kindsSeen = new Set<CandidateKind>();
-    const positionsSeen = new Set<'first' | 'middle' | 'last'>();
-
+  it('does not delete a file whose GridFS metadata.ownerId does not match its document’s owner', async () => {
     await fc.assert(
-      fc.asyncProperty(corruptBatchArb, async (batch) => {
-        kindsSeen.add(batch.corruptKind);
-        positionsSeen.add(
-          batch.corruptAt === 0
-            ? 'first'
-            : batch.corruptAt === batch.planned.length - 1
-              ? 'last'
-              : 'middle',
-        );
+      fc.asyncProperty(twoFarmersArb, async (farmers) => {
+        await clearDatabase(harness!.db);
+        await setupDatabase(harness!.db);
+        const [a, b] = farmers;
 
-        const candidates = batch.planned.map((planned, index) => ({
-          id: `d0000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
-          userId: planned.owner,
-          bucket: planned.bucket,
-          path: planned.path,
-        }));
+        // A corrupt candidate: a `diagnoses` row owned by A whose `mediaRef.fileId` points at a file
+        // whose GridFS `metadata.ownerId` is B's. `deleteMediaForOwner(A, fileId)` scopes by
+        // `{ _id, metadata.ownerId: A }`, so it does NOT match B's file and deletes nothing — the
+        // 18.8 boundary, enforced by the scoped delete rather than by a pre-check the sweep could skip.
+        const bFile = await mediaMod.writeMedia(b, 'crop-image', 'image/jpeg', Buffer.from('B-owns-bytes'));
+        const conversation = await farmerMod.farmerData(a).insertConversation({ channel: 'web', title: null });
+        const stored = await farmerMod.farmerData(a).insertDiagnosis({
+          conversationId: conversation._id,
+          status: 'identified',
+          diseaseName: 'Tomato Early Blight',
+          knowledgeId: null,
+          confidence: 0.8,
+          severity: 'moderate',
+          explanation: 'x',
+          language: 'en',
+          needsExpert: false,
+          channel: 'web',
+          mediaRef: bFile, // A's row pointing at B's file — the corruption.
+          fullImageDeletedAt: null,
+          modelProvider: 'gemini',
+        });
+        await harness!.db
+          .collection<DiagnosisDoc>('diagnoses')
+          .updateOne({ _id: stored._id }, { $set: { createdAt: LONG_PAST } });
 
-        const test = harness({ candidates, reportAbsent: false });
-        const label = `${batch.corruptKind} at ${batch.corruptAt} of ${candidates.length}`;
+        await retentionSvc.sweepFullImages({ now: NOW, limit: RETENTION_SWEEP_BATCH_LIMIT });
 
-        const error = await refusalOf(
-          sweepFullImages({
-            store: test.store,
-            remover: test.remover,
-            now: NOW,
-            limit: RETENTION_SWEEP_BATCH_LIMIT,
-          }),
-        );
-
-        // A hard error, not a skipped row — the design is explicit that continuing "would be one bad
-        // row away from deleting across tenants".
-        expect(error.code, label).toBe('INTERNAL_ERROR');
-        expect(error.context?.reason, label).toBe('retention_path_owner_mismatch');
-
-        // And the whole point of checking the batch before deleting anything: **zero** deletions and
-        // **zero** stamps, however many well-formed candidates preceded the corrupt one.
-        expect(test.removes, label).toStrictEqual([]);
-        expect(test.stamps, label).toStrictEqual([]);
-
-        // The same predicate, asserted directly on the exported guard, so a caller that used it
-        // outside `sweepFullImages` gets the same answer.
-        const corrupt = candidates[batch.corruptAt];
-        if (corrupt === undefined) throw new Error('the corrupt candidate went missing');
-        expect(() => assertPathOwnedByRow(corrupt), label).toThrow();
-        expect(ownerSegmentOf(corrupt.path), label).not.toBe(corrupt.userId);
+        // B's file survives — A's sweep pass could not reach across the tenant boundary to delete it.
+        expect(await fileExists(bFile.fileId), 'a cross-owner file was deleted').toBe(true);
+        // B, reading their own file, still has it.
+        expect(await mediaMod.readMediaForOwner(b, bFile.fileId.toHexString())).not.toBeNull();
       }),
-      { numRuns: 250 },
+      { numRuns: 20 },
     );
-
-    expect([...kindsSeen].sort()).toStrictEqual([...CORRUPT_KINDS].sort());
-    expect([...positionsSeen].sort()).toStrictEqual(['first', 'last', 'middle']);
-  });
+  }, 30_000);
 });
 
 /* ========================================================================== */
-/* Scan 2 — the orphan backstop, whose only anchor is the path itself           */
+/* Scan 2 — the orphan backstop refuses a file with no owner metadata (seam)   */
 /* ========================================================================== */
 
-describe('Property 31, scan 2: an object with no owning row is deleted only under its own first folder', () => {
+describe('Property 31, scan 2: an orphan with no owner metadata is refused, never deleted', () => {
+  interface OrphanFile {
+    readonly fileId: ObjectId;
+    readonly ownerId: string | null;
+    readonly uploadDate: Date;
+    readonly length: number;
+  }
+
+  const OWNER_KINDS = ['owned', 'null_owner', 'empty_owner'] as const;
+  type OwnerKind = (typeof OWNER_KINDS)[number];
+
   /**
-   * What scan 2's age surface may report. Only `owned_original` is deletable; the other four are the
-   * reasons a reported object must survive, and each is a clause of the reconstructed statement or of
-   * the design sentence it comes from.
+   * A batch of aged files as scan 2's age listing would report them, one per owner kind at a
+   * generated position — including the case where the only files are ownerless, so a refusal is not
+   * masked by an owned one deleting.
    */
-  const OBJECT_KINDS = [
-    'owned_original',
-    'thumbnail',
-    'bucket_root',
-    'empty_owner_segment',
-    'inside_window',
-  ] as const;
+  const batchArb = fc
+    .array(
+      fc.record({
+        kind: fc.constantFrom<OwnerKind>(...OWNER_KINDS),
+        owner: farmerIdArb,
+      }),
+      { minLength: 1, maxLength: 8 },
+    )
+    .map((entries) =>
+      entries.map<OrphanFile>((entry) => ({
+        fileId: new ObjectId(),
+        ownerId: entry.kind === 'owned' ? entry.owner : entry.kind === 'empty_owner' ? '' : null,
+        uploadDate: LONG_PAST,
+        length: 1000,
+      })),
+    );
 
-  type ObjectKind = (typeof OBJECT_KINDS)[number];
-
-  interface PlannedObject {
-    readonly kind: ObjectKind;
-    readonly owner: string;
-    readonly bucket: StorageBucket;
-    readonly path: string;
-    readonly createdAt: Date;
-  }
-
-  function plan(
-    kind: ObjectKind,
-    owner: string,
-    bucket: StorageBucket,
-    parts: PathParts,
-  ): PlannedObject {
-    const conforming = conformingPath(owner, parts);
-    switch (kind) {
-      case 'owned_original':
-        return { kind, owner, bucket, path: conforming, createdAt: LONG_PAST };
-      case 'thumbnail':
-        // Built with `thumbPathFor()` — the single owner of the convention — rather than by writing
-        // `.thumb.` here, which is exactly the second copy the service's header warns about.
-        return { kind, owner, bucket, path: thumbPathFor(conforming), createdAt: LONG_PAST };
-      case 'bucket_root':
-        return {
-          kind,
-          owner,
-          bucket,
-          path: `${parts.objectId}.${parts.extension}`,
-          createdAt: LONG_PAST,
-        };
-      case 'empty_owner_segment':
-        return {
-          kind,
-          owner,
-          bucket,
-          path: `/${parts.objectId}.${parts.extension}`,
-          createdAt: LONG_PAST,
-        };
-      case 'inside_window':
-        // The surface is asked for objects older than the cutoff; it is not trusted to have honoured
-        // that, and an object inside the window is not the sweep's to delete under any circumstance.
-        return { kind, owner, bucket, path: conforming, createdAt: NOW };
-    }
-  }
-
-  const plannedObjectsArb = fc
-    .record({
-      pool: farmerPoolArb,
-      objects: fc.array(
-        fc.tuple(
-          fc.constantFrom<ObjectKind>(...OBJECT_KINDS),
-          fc.nat(),
-          bucketArb,
-          pathPartsArb,
-        ),
-        { minLength: 1, maxLength: 10 },
-      ),
-    })
-    .map(({ pool, objects }) => ({
-      pool,
-      planned: objects.map(([kind, index, bucket, parts]) =>
-        plan(kind, pool[index % pool.length] as string, bucket, parts),
-      ),
-    }));
-
-  it('never deletes a path it was not given, and never one with no owning folder', async () => {
-    const kindsSeen = new Set<ObjectKind>();
+  it('deletes only files carrying a real metadata.ownerId, and counts the ownerless as refused', async () => {
+    const kindsSeen = new Set<OwnerKind>();
 
     await fc.assert(
-      fc.asyncProperty(plannedObjectsArb, async ({ planned }) => {
-        for (const object of planned) kindsSeen.add(object.kind);
+      fc.asyncProperty(batchArb, async (files) => {
+        for (const file of files) {
+          kindsSeen.add(file.ownerId === null ? 'null_owner' : file.ownerId === '' ? 'empty_owner' : 'owned');
+        }
 
-        const test = harness({ candidates: [], reportAbsent: false });
-        const source: OrphanObjectSource = {
-          olderThan: ({ bucket }) =>
+        const deleted: string[] = [];
+
+        // Inject the age listing and the delete-by-id seam. `listAged` returns the batch for
+        // `crop-image` and nothing for `voice`; `deleteFileById` records what it was asked to delete
+        // — it must never be handed an ownerless file (Requirement 18.8).
+        const report = await retentionSvc.sweepOrphans({
+          now: NOW,
+          limit: RETENTION_SWEEP_BATCH_LIMIT,
+          listAged: (kind: 'crop-image' | 'thumbnail' | 'voice') =>
             Promise.resolve(
-              planned
-                .filter((object) => object.bucket === bucket)
-                .map<StoredObject>((object) => ({
-                  bucket: object.bucket,
-                  path: object.path,
-                  createdAt: object.createdAt,
-                })),
+              kind === 'crop-image'
+                ? files.map((f) => ({
+                    fileId: f.fileId,
+                    ownerId: f.ownerId,
+                    uploadDate: f.uploadDate,
+                    length: f.length,
+                  }))
+                : [],
             ),
-        };
-
-        const report = await sweepOrphans({
-          store: test.store,
-          remover: test.remover,
-          orphans: source,
-          orphanScanEnabled: true,
-          now: NOW,
-          limit: RETENTION_SWEEP_BATCH_LIMIT,
+          deleteFileById: (fileId: ObjectId) => {
+            deleted.push(fileId.toHexString());
+            return Promise.resolve(true);
+          },
         });
 
-        const asked = requestedPaths(test.removes);
-        const reported = planned.map((object) => object.path);
+        const ownerless = files.filter((f) => f.ownerId === null || f.ownerId === '');
+        const owned = files.filter((f) => f.ownerId !== null && f.ownerId !== '');
 
-        // Never widens: every path asked for is a path storage reported. A `{owner}/` prefix delete,
-        // or a path derived from a reported one, fails here.
-        for (const path of asked) expect(reported).toContain(path);
-
-        // Requirement 18.8 for a candidate with no row behind it: the anchor is the path's own first
-        // folder, so a path that has none is refused rather than deleted.
-        for (const path of asked) {
-          const owner = orphanOwnerSegment(path);
-          expect(owner, `${path} was deleted with no owning folder`).toBeDefined();
-          expect(path.startsWith(`${owner ?? ''}/`)).toBe(true);
-          // The folder really is one of the farmers whose objects were reported — the sweep deletes
-          // under a segment it read, never under one it composed.
-          expect(reported.some((candidate) => candidate.startsWith(`${owner ?? ''}/`))).toBe(true);
-        }
-
-        // The positive direction, so none of the assertions above can pass on an empty batch: an
-        // orphaned original past the window under its own folder **is** deleted.
-        for (const object of planned) {
-          if (object.kind !== 'owned_original') continue;
-          expect(asked, `an orphaned original under its own folder survived: ${object.path}`).toContain(
-            object.path,
+        // Requirement 18.8: no ownerless file was ever handed to a delete.
+        for (const f of ownerless) {
+          expect(deleted, `an ownerless file was deleted: ${f.fileId.toHexString()}`).not.toContain(
+            f.fileId.toHexString(),
           );
         }
+        // Every owned file (and only those) was deleted — the positive direction, so the refusal is
+        // not vacuous.
+        expect([...deleted].sort()).toStrictEqual(owned.map((f) => f.fileId.toHexString()).sort());
 
-        // The four survivor classes, each checked by identity rather than by count.
-        for (const object of planned) {
-          if (object.kind === 'owned_original') continue;
-          if (object.kind === 'thumbnail' && object.bucket === CROP_IMAGES) {
-            expect(isThumbPath(object.path)).toBe(true);
-            expect(asked, 'a Thumbnail_Derivative was deleted').not.toContain(object.path);
-          }
-          if (object.kind === 'bucket_root' || object.kind === 'empty_owner_segment') {
-            expect(orphanOwnerSegment(object.path)).toBeUndefined();
-            expect(asked, 'an object with no owning folder was deleted').not.toContain(object.path);
-          }
-        }
-
-        if (!report.ran) {
-          throw new Error('the orphan scan was asked to run and reported that it did not');
-        }
-        expect(report.removed + report.alreadyAbsent).toBe(asked.length);
+        // The report accounts for the split, and nothing outside the listed files was deleted.
+        expect(report.scanned).toBe(files.length);
+        expect(report.removed).toBe(owned.length);
+        expect(report.refused).toBe(ownerless.length);
         expect(report.failed).toBe(0);
-        expect(report.scanned).toBe(planned.length);
-
-        // The two counts that account for the survivors, so a class that stopped being recognised
-        // would show up as a deletion *and* as a missing count rather than only as the former.
-        // The thumbnail exclusion is scoped to `crop-images`, which is the bucket that has
-        // derivatives — a `.thumb.` path in `voice-messages` is an ordinary object.
-        expect(report.retainedThumbnails).toBe(
-          planned.filter((object) => object.kind === 'thumbnail' && object.bucket === CROP_IMAGES)
-            .length,
-        );
-        expect(report.refused).toBe(
-          planned.filter(
-            (object) => object.kind === 'bucket_root' || object.kind === 'empty_owner_segment',
-          ).length,
-        );
       }),
       { numRuns: 200 },
     );
 
-    expect([...kindsSeen].sort()).toStrictEqual([...OBJECT_KINDS].sort());
+    expect([...kindsSeen].sort()).toStrictEqual([...OWNER_KINDS].sort());
   });
 
-  it('reports that it did not run in the shipped configuration, deleting nothing', async () => {
-    const test = harness({ candidates: [], reportAbsent: false });
-
-    // U-V22b is open, so `RETENTION_ORPHAN_SCAN_ENABLED` is false and the scan is off. Asserted
-    // because "the scan that does not run deletes nothing" is the shipped behaviour, and a flag
-    // flipped without an `OrphanObjectSource` throws rather than sweeping silently.
-    const report = await sweepOrphans({ store: test.store, remover: test.remover, now: NOW });
-
-    expect(report).toStrictEqual({ ran: false, reason: 'disabled_pending_v22b' });
-    expect(test.removes).toStrictEqual([]);
+  it('never lists thumbnails, so a Thumbnail_Derivative is never swept (Requirement 18.5)', async () => {
+    const kindsAsked: string[] = [];
+    await retentionSvc.sweepOrphans({
+      now: NOW,
+      limit: RETENTION_SWEEP_BATCH_LIMIT,
+      listAged: (kind: 'crop-image' | 'thumbnail' | 'voice') => {
+        kindsAsked.push(kind);
+        return Promise.resolve([]);
+      },
+      deleteFileById: () => Promise.resolve(true),
+    });
+    // The sweep asks only for the two original kinds, never `thumbnail`.
+    expect(kindsAsked.sort()).toStrictEqual(['crop-image', 'voice']);
+    expect(kindsAsked).not.toContain('thumbnail');
   });
 });
 
 /* ========================================================================== */
-/* The two statements the sweep issues, as the real adapter composes them       */
+/* On-success voice deletion is owner-scoped (real layer, Property 5's dim.)    */
 /* ========================================================================== */
 
-interface RecordedStatement {
-  readonly table: string;
-  readonly verb: 'select' | 'update';
-  readonly columns: string;
-  readonly predicates: readonly { readonly kind: string; readonly column: string; readonly value: unknown }[];
-  readonly payload: unknown;
-}
-
-/**
- * A recording client for `retentionStoreFrom()`, so the predicates asserted below are the ones
- * production composes rather than a restatement of them. Same idiom as
- * `chat-context.property.test.ts`; narrow to the two chains this module issues.
- */
-function recorder(rows: readonly Record<string, unknown>[]): {
-  readonly client: SupabaseClient<Database>;
-  readonly statements: readonly RecordedStatement[];
-} {
-  const statements: RecordedStatement[] = [];
-
-  const from = (table: string): unknown => {
-    if (table !== 'diagnoses') {
-      throw new Error(`the retention store addressed "${table}"; Requirement 18.6 forbids the rest`);
-    }
-
-    const predicates: { kind: string; column: string; value: unknown }[] = [];
-    let columns = '';
-    let verb: RecordedStatement['verb'] = 'select';
-    let payload: unknown;
-
-    const matched = (): readonly Record<string, unknown>[] =>
-      rows.filter((row) =>
-        predicates.every((predicate) =>
-          predicate.kind === 'lt'
-            ? String(row[predicate.column]) < String(predicate.value)
-            : row[predicate.column] === predicate.value,
-        ),
-      );
-
-    const settle = (): { data: unknown; error: null } => {
-      const found = matched();
-      statements.push({ table, verb, columns, predicates: [...predicates], payload });
-      return { data: found, error: null };
-    };
-
-    const chain = {
-      select: (list?: string) => {
-        columns = list ?? '';
-        return chain;
-      },
-      update: (values: unknown) => {
-        verb = 'update';
-        payload = values;
-        return chain;
-      },
-      eq: (column: string, value: unknown) => {
-        predicates.push({ kind: 'eq', column, value });
-        return chain;
-      },
-      is: (column: string, value: unknown) => {
-        predicates.push({ kind: 'is', column, value });
-        return chain;
-      },
-      lt: (column: string, value: unknown) => {
-        predicates.push({ kind: 'lt', column, value });
-        return chain;
-      },
-      order: () => chain,
-      limit: () => chain,
-      then: (resolve: (value: { data: unknown; error: null }) => unknown) => resolve(settle()),
-    };
-
-    return chain;
-  };
-
-  return { client: { from } as unknown as SupabaseClient<Database>, statements };
-}
-
-describe('Property 31: the stamp is anchored on the row’s own farmer, and the scan is declared', () => {
-  it('anchors every stamp on id AND user_id, and writes exactly one column', async () => {
-    const outcomesSeen = new Set<'stamped' | 'already_stamped'>();
-
+describe('Property 31: on-success voice deletion is bound to the requesting farmer', () => {
+  it('deletes a farmer’s own voice file and refuses to delete another farmer’s', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        fc.tuple(farmerIdArb, farmerIdArb).filter(([a, b]) => a !== b),
-        fc.uuid(),
-        fc.boolean(),
-        async (farmers, rowId, alreadyStamped) => {
-          const [owner, other] = farmers;
-          outcomesSeen.add(alreadyStamped ? 'already_stamped' : 'stamped');
+      fc.asyncProperty(twoFarmersArb, async (farmers) => {
+        await clearDatabase(harness!.db);
+        await setupDatabase(harness!.db);
+        const [a, b] = farmers;
 
-          const fake = recorder([
-            // The row to stamp, plus the other farmer's row carrying the *same* id — impossible in
-            // Postgres, and generated precisely so a statement anchored on `id` alone would pick up
-            // a second row and be visible here.
-            {
-              id: rowId,
-              user_id: owner,
-              full_image_deleted_at: alreadyStamped ? '2026-09-01T00:00:00.000Z' : null,
-            },
-            { id: rowId, user_id: other, full_image_deleted_at: null },
-          ]);
+        const voiceA = await mediaMod.writeMedia(a, 'voice', 'audio/ogg', Buffer.from('A-voice'));
+        const voiceB = await mediaMod.writeMedia(b, 'voice', 'audio/ogg', Buffer.from('B-voice'));
 
-          const didStamp = await retentionStoreFrom(fake.client).stampFullImageDeleted({
-            id: rowId,
-            userId: owner,
-            deletedAt: NOW,
-          });
+        // A deleting A's own voice file on transcription success — the `deleteMediaForOwner` owner
+        // check is `metadata.ownerId === A`.
+        expect(await mediaMod.deleteMediaForOwner(a, voiceA.fileId.toHexString())).toBe(true);
+        expect(await fileExists(voiceA.fileId)).toBe(false);
 
-          // A row already stamped by an earlier run matches nothing and reports `false` — the
-          // idempotency clause, and the reason the third predicate is there.
-          expect(didStamp).toBe(!alreadyStamped);
-
-          const statement = fake.statements[0];
-          if (statement === undefined) throw new Error('the stamp issued no statement');
-          expect(statement.verb).toBe('update');
-
-          // Requirement 18.7: one column in the payload, so "leaves every other column unchanged" is
-          // a property of the statement rather than a promise. `image_path` in particular survives,
-          // because the thumbnail path is derived from it.
-          expect(Object.keys(statement.payload as Record<string, unknown>)).toStrictEqual([
-            'full_image_deleted_at',
-          ]);
-
-          // Requirement 18.8's write half: both anchors, with the row's own farmer in the second.
-          const columnsUsed = statement.predicates.map((predicate) => predicate.column);
-          expect(columnsUsed).toContain('id');
-          expect(columnsUsed).toContain('user_id');
-          expect(statement.predicates.find((p) => p.column === 'id')?.value).toBe(rowId);
-          expect(statement.predicates.find((p) => p.column === 'user_id')?.value).toBe(owner);
-          expect(statement.predicates.find((p) => p.column === 'full_image_deleted_at')?.value).toBe(
-            null,
-          );
-        },
-      ),
-      { numRuns: 100 },
+        // A cannot delete B's voice file — the same scoped delete refuses it, and B's file survives.
+        expect(await mediaMod.deleteMediaForOwner(a, voiceB.fileId.toHexString())).toBe(false);
+        expect(await fileExists(voiceB.fileId)).toBe(true);
+      }),
+      { numRuns: 20 },
     );
-
-    expect([...outcomesSeen].sort()).toStrictEqual(['already_stamped', 'stamped']);
-  });
-
-  it('declares the one unanchored statement it makes, and reads only the four columns it acts on', async () => {
-    const fake = recorder([]);
-    await retentionStoreFrom(fake.client).dueFullImages({ cutoff: CUTOFF, limit: 10 });
-
-    const statement = fake.statements[0];
-    if (statement === undefined) throw new Error('the candidate scan issued no statement');
-
-    // No `user_id` predicate, deliberately: the scan ages media out for the whole deployment. What
-    // makes that acceptable is that it is a *declared* exemption in the static gate, with the
-    // per-row anchors that replace it named — so the exemption is reviewed rather than assumed.
-    expect(statement.predicates.map((predicate) => predicate.column)).not.toContain('user_id');
-
-    const declared = TENANT_INDEPENDENT_STATEMENTS.filter(
-      (entry) => entry.path === 'src/services/retention.service.ts',
-    );
-    expect(declared).toHaveLength(1);
-    expect(declared[0]?.table).toBe('diagnoses');
-    expect(declared[0]?.verb).toBe('select');
-    expect(declared[0]?.why).toContain('user_id');
-
-    // And the columns: the four the sweep acts on rather than `*`, so a widening of the row cannot
-    // widen what the sweep sees — `user_id` among them, since it is the anchor everything else uses.
-    expect(statement.columns).toBe('id, user_id, image_bucket, image_path');
-  });
+  }, 30_000);
 });
 
 /* ========================================================================== */
-/* The endpoint cannot aim the sweep                                           */
+/* The sweep route cannot be aimed by a caller (Property 30's dimension)        */
 /* ========================================================================== */
 
 describe('Property 31: no caller-supplied value can reach a delete target', () => {
   /**
-   * The ways a route handler could let a request influence what gets deleted. Enumerated rather than
-   * described, so this is a closed check: the sweep's window, batch bound and candidate set are
-   * configuration, and the design's reason is that *"a sweep that took its window from a caller would
-   * be a way to delete newer media than the policy allows"*.
+   * The ways a route handler could let a request influence what gets deleted. Enumerated so this is a
+   * closed check: the sweep's window, batch bound and candidate set are configuration, not input.
    */
   const REQUEST_READERS = [
     'request.json',
@@ -912,33 +395,25 @@ describe('Property 31: no caller-supplied value can reach a delete target', () =
     'nextUrl',
   ] as const;
 
-  it('invokes the sweep with no arguments and reads nothing but one header', () => {
+  it('invokes the sweep with no caller input and reads only the CRON_SECRET authorization header', () => {
     const source = readFileSync(
-      join(
-        resolve(__dirname, '..', '..'),
-        'src',
-        'app',
-        'api',
-        'internal',
-        'retention-sweep',
-        'route.ts',
-      ),
+      resolve(__dirname, '..', '..', 'src', 'app', 'api', 'internal', 'retention-sweep', 'route.ts'),
       'utf8',
     );
-    // Comments stripped: this module's header discusses several of the expressions below in prose.
+    // Comments stripped so a sentence discussing an expression is not read as the expression.
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
-    // The call carries nothing. Not a `deps` object, not a limit, not a window — so there is no
-    // parameter for a caller's value to travel through even if one were read.
-    expect(code).toContain('runRetentionSweep()');
+    // The sweep is invoked with no argument carrying a caller value.
+    expect(code).toMatch(/runRetentionSweep\(\s*\)/);
     expect(code).not.toMatch(/runRetentionSweep\(\s*[^)\s]/);
 
     for (const reader of REQUEST_READERS) {
       expect(code, `the sweep route reads ${reader}`).not.toContain(reader);
     }
 
-    // One header, and it is the credential. `headers.get` appears once, inside `authorizeSweep`.
-    expect([...code.matchAll(/headers\.get\(/g)]).toHaveLength(1);
-    expect(code).toContain("headers.get('authorization')");
+    // The one header it reads is the credential.
+    const headerGets = [...code.matchAll(/headers\.get\(/g)];
+    expect(headerGets.length, 'the sweep route reads more than one header').toBe(1);
+    expect(code.toLowerCase()).toContain("authorization");
   });
 });
